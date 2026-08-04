@@ -1,0 +1,78 @@
+#!/bin/bash
+set -e
+
+# 最低系统要求：macOS 14.0（Sonoma）
+# 注意：此脚本仅打包主应用并生成 DMG，不含 helper。如需 helper（低电量模式），
+# 请先运行 build-app.sh 生成完整 app bundle，再据此调整 DMG 打包。
+
+APP_NAME="BatteryBar"
+BUILD_DIR=".build/debug"
+APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
+DMG_NAME="$APP_NAME.dmg"
+DMG_DIR="$BUILD_DIR/dmg"
+VOLUME_NAME="BatteryBar"
+
+echo "=== Building $APP_NAME ==="
+swift build
+
+echo "=== Creating app bundle ==="
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+
+cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>BatteryBar</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.batterybar.app</string>
+    <key>CFBundleName</key>
+    <string>BatteryBar</string>
+    <key>CFBundleDisplayName</key>
+    <string>BatteryBar</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+echo "=== Creating DMG ==="
+rm -rf "$DMG_DIR"
+rm -f "$DMG_NAME"
+mkdir -p "$DMG_DIR"
+
+# 复制 app 到 DMG 目录
+cp -R "$APP_BUNDLE" "$DMG_DIR/"
+
+# 创建 Applications 快捷方式
+ln -s /Applications "$DMG_DIR/Applications"
+
+# 创建 DMG
+hdiutil create -volname "$VOLUME_NAME" \
+    -srcfolder "$DMG_DIR" \
+    -ov -format UDZO \
+    "$DMG_NAME"
+
+echo ""
+echo "=== Done ==="
+echo "DMG created: $DMG_NAME"
+echo "Size: $(du -h "$DMG_NAME" | cut -f1)"
+echo ""
+echo "To install:"
+echo "1. Open $DMG_NAME"
+echo "2. Drag BatteryBar to Applications"
+echo "3. Launch from Applications or Spotlight"
