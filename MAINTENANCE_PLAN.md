@@ -104,6 +104,33 @@ swift test
 
 ## 五、变更日志
 
+### 2026-08-04 — GitHub Actions 云编译链路 + macOS 27 数据修复 + Popover 卡片化重设计
+
+> 背景：本机无 Xcode（仅 CLT 无法编译 SwiftUI 宏），建立云端编译链路；实机审查发现多个数据 bug 与 UI 问题。
+
+#### 工程基础设施
+- **GitHub Actions 云编译**：新增 `.github/workflows/build.yml`，推送 main 分支后云端 Xcode 编译 + `build-app.sh` 打包，产物 `BatteryBar.zip` 可下载（保留 30 天）
+- **初始化 git 仓库**：首次提交全部源码与文档，`.gitignore` 排除构建产物与无关工具文件
+- **清理**：删除逆向遗留 `conf.py`；README 修正（移除已删除的低电量模式描述，补充云编译流程）
+
+#### 数据修复（macOS 27 兼容）
+- **容量 0/0 mAh**：macOS 27 顶层 `DesignCapacity` 已移除、`MaxCapacity` 语义变为百分比，[BatteryReader.swift](Sources/BatteryBar/Data/BatteryReader.swift) 改读 `BatteryData.DesignCapacity` / `BatteryData.FullChargeCapacity`，兼容旧系统顶层 mAh 与 `FccComp1`
+- **温度恒 0.0°C**：Apple Silicon 不暴露 `Temperature` 键，UI 显示「—」；修复 UsageTab 温控因素把 0°C 当极低温惩罚（系数 0.2）导致充满预估暴涨的连锁问题
+- **充满预估跳变（7h→15h）**：[DrainRateCalculator.swift](Sources/BatteryBar/Calc/DrainRateCalculator.swift) `chargeRate()` 扩窗至 30 分钟 + 最小样本要求（≥3 快照/≥4 分钟/≥1% 变化）+ 3-80%/h 限幅；[PowerSampler.swift](Sources/BatteryBar/Data/PowerSampler.swift) 增加 EMA 平滑（0.6/0.4）
+- **无效循环脏数据**：[CycleTracker.swift](Sources/BatteryBar/Data/CycleTracker.swift) 过滤电量下降 <1% 的循环（100%→100%）
+
+#### Popover 重设计（[PopoverView.swift](Sources/BatteryBar/MenuBar/PopoverView.swift)）
+- Divider 分隔改为卡片分组（圆角 + 半透明填充）
+- 充电/已插电未充电/放电三种状态统一结构（均带电量进度条），新增「已插电，未充电」状态
+- 电压/电流降级为次要小字，不再混在功耗列表
+- 健康度突出显示 + 良好/一般/建议检修标签
+- 功率为 0 时显示「—」
+
+#### 验证
+- CI 编译通过，产物安装后实机截图验证：容量 4240/4382 mAh、温度 —、充满预估稳定（约 0h 38m）、卡片布局正常
+
+---
+
 ### 2026-07-17 — 全量代码审查 + 修复 24 个问题 + 深色模式支持确认
 
 > 基于用户「挂多个 agent 完整检查整个程序的所有代码修复优化代码，优化性能占用逻辑 bug 等等内容」请求，执行 7 个批次的全量代码审查与修复。
