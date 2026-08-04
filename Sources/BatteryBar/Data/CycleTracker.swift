@@ -50,7 +50,9 @@ final class CycleTracker: @unchecked Sendable {
 
     private func endCycle(endLevel: Double) {
         let duration = Date().timeIntervalSince(cycleStartDate)
-        guard duration > 300 else { return }
+        // 过滤无效循环：时长不足 5 分钟，或电量下降不足 1%
+        //（满电时拔电又迅速插电会产生 100%→100% 的脏数据）
+        guard duration > 300, (cycleStartLevel - endLevel) >= 1 else { return }
 
         let avgWatt = cycleWattageSamples.isEmpty ? 0 : cycleWattageSamples.reduce(0, +) / Double(cycleWattageSamples.count)
 

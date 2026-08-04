@@ -210,7 +210,7 @@ struct UsageTab: View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
             metricTile("循环", value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", icon: "arrow.triangle.2.circlepath", color: .blue)
             metricTile("健康度", value: String(format: "%.0f", sampler.systemHealthPercent), unit: "%", icon: "heart.fill", color: .green)
-            metricTile("温度", value: String(format: "%.1f", sampler.currentTemperature), unit: "°C", icon: "thermometer", color: .orange)
+            metricTile("温度", value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—", unit: sampler.currentTemperature > 0.5 ? "°C" : "", icon: "thermometer", color: .orange)
             metricTile("容量", value: capacityString, unit: "mAh", icon: "battery.100", color: .indigo)
         }
     }
@@ -734,6 +734,10 @@ struct UsageTab: View {
             //  - < 15°C: 低温减速
             let temp = sampler.currentTemperature
             let tempFactor: Double
+            if temp <= 0.5 {
+                // 温度不可用（Apple Silicon 部分系统不暴露 Temperature 键）：不惩罚
+                tempFactor = 1.0
+            } else {
             switch temp {
             case 45...: tempFactor = 0.3
             case 40..<45: tempFactor = 0.6
@@ -742,6 +746,7 @@ struct UsageTab: View {
             case 10..<15: tempFactor = 0.7
             case 5..<10: tempFactor = 0.4
             default: tempFactor = 0.2 // 极低温
+            }
             }
 
             let adjustedRate = rate * efficiency * tempFactor

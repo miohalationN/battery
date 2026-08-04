@@ -297,8 +297,15 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
                 healthPercent: systemHealthPercent,
                 dischargeStart: dischargeStartTime
             )
-            cachedChargeRate = DrainRateCalculator.chargeRate()
+            cachedChargeRate = Self.smoothRate(old: cachedChargeRate, measured: DrainRateCalculator.chargeRate())
         }
+    }
+
+    /// 速率 EMA 平滑：旧值 0.6 + 新测量 0.4；测量为 0（样本不足）时保持旧值，避免预估时间瞬间变「计算中」或跳变
+    private static func smoothRate(old: Double, measured: Double) -> Double {
+        guard measured > 0 else { return old }
+        guard old > 0 else { return measured }
+        return old * 0.6 + measured * 0.4
     }
 
     private func sampleStorage() {

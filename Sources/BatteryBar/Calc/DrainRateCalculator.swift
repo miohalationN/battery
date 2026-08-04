@@ -99,13 +99,21 @@ enum DrainRateCalculator {
     }
 
     /// 充电速率（每小时充电百分比）
+    /// 取最近 30 分钟内的充电快照，要求足够的时间跨度与电量变化，
+    /// 避免短窗口 + 小变化导致的剧烈跳变（如 7h → 15h）。
     static func chargeRate() -> Double {
-        let recent = DataStore.shared.recentSnapshots(30).filter { $0.isCharging }
-        guard recent.count >= 2 else { return 0 }
+        let cutoff = Date().addingTimeInterval(-1800)
+        let recent = DataStore.shared.recentSnapshots(60)
+            .filter { $0.isCharging && $0.timestamp >= cutoff }
+        guard recent.count >= 3 else { return 0 }
         let sorted = recent.sorted { $0.timestamp < $1.timestamp }
         let hours = sorted.last!.timestamp.timeIntervalSince(sorted.first!.timestamp) / 3600
-        guard hours > 0 else { return 0 }
-        return abs(sorted.last!.level - sorted.first!.level) / hours
+        let delta = abs(sorted.last!.level - sorted.first!.level)
+        // 跨度不足 4 分钟或变化不足 1%：样本噪声太大，不给出速率
+        guard hours >= 4.0 / 60, delta >= 1 else { return 0 }
+        let rate = delta / hours
+        // 合理区间限制：3-80%/h（超过 80%/h 必是异常采样）
+        return min(max(rate, 3), 80)
     }
 
     /// 机型基准放电速率（%/h），根据机型和电池健康度调整。

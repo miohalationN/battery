@@ -101,10 +101,27 @@ final class BatteryReader: @unchecked Sendable {
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
 
-        let designCap = readInt(service, "DesignCapacity") ?? 0
-        let maxCapPercent = readInt(service, "MaxCapacity") ?? 100
-        let fccComp1 = readNestedInt(service, "BatteryData", key: "FccComp1")
-        let actualMaxCap = fccComp1 ?? (designCap * maxCapPercent / 100)
+        // macOS 27+：顶层 DesignCapacity 已移除，改放到 BatteryData 嵌套字典里
+        let designCap = readInt(service, "DesignCapacity")
+            ?? readNestedInt(service, "BatteryData", key: "DesignCapacity") ?? 0
+        // 顶层 MaxCapacity 语义随系统版本变化：
+        //   - 旧系统：mAh（>1000）
+        //   - macOS 27+：健康度百分比（≤100）
+        let maxCapRaw = readInt(service, "MaxCapacity") ?? 100
+        // 实际满充容量（mAh）：优先 BatteryData.FullChargeCapacity（macOS 27+），
+        // 其次 FccComp1（部分旧系统），再退到旧版顶层 mAh 或百分比推算
+        let fcc = readNestedInt(service, "BatteryData", key: "FullChargeCapacity")
+            ?? readNestedInt(service, "BatteryData", key: "FccComp1")
+        let actualMaxCap: Int
+        if let fcc, fcc > 0 {
+            actualMaxCap = fcc
+        } else if maxCapRaw > 1000 {
+            actualMaxCap = maxCapRaw
+        } else if designCap > 0 {
+            actualMaxCap = designCap * maxCapRaw / 100
+        } else {
+            actualMaxCap = 0
+        }
 
         let cycles = readInt(service, "CycleCount") ?? 0
         let voltage = readDouble(service, "Voltage") ?? 0

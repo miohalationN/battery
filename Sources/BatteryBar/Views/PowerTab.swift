@@ -101,7 +101,7 @@ struct PowerTab: View {
             powerTile("电压", value: String(format: "%.0f", sampler.currentVoltage), unit: "mV", icon: "bolt", color: .blue)
             powerTile("电流", value: String(format: "%.0f", sampler.currentAmperage), unit: "mA", icon: "arrow.left.arrow.right", color: .green)
             powerTile("功率", value: String(format: "%.1f", sampler.currentWattage), unit: "W", icon: "bolt.fill", color: .yellow)
-            powerTile("温度", value: String(format: "%.1f", sampler.currentTemperature), unit: "°C", icon: "thermometer", color: .orange)
+            powerTile("温度", value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—", unit: sampler.currentTemperature > 0.5 ? "°C" : "", icon: "thermometer", color: .orange)
         }
     }
 
