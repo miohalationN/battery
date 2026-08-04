@@ -250,6 +250,6 @@ struct PopoverMenuBarView: View {
 
     var body: some View {
         PopoverView(sampler: sampler)
-            .frame(width: 320)
+            .frame(width: 340)
     }
 }

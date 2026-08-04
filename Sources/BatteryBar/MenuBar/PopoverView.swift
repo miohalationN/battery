@@ -333,6 +333,7 @@ struct PopoverView: View {
         case 26...50: return "battery.50percent"
         case 51...75: return "battery.75percent"
         default: return "battery.100percent"
+        }
     }
 
     // MARK: - 主窗口控制
