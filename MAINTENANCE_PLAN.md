@@ -129,6 +129,12 @@ swift test
 #### 验证
 - CI 编译通过，产物安装后实机截图验证：容量 4240/4382 mAh、温度 —、充满预估稳定（约 0h 38m）、卡片布局正常
 
+#### 文档对齐（commit e82c015）
+- **REQUIREMENTS.md 重写**：从过时设计稿改为与代码对齐的需求基线，有意偏离标注「决策」（图标放弃/HealthTab 合并/SwiftData→JSON），未实现项标注「待办」（右键菜单、低电量变红、同步日志等）；通知功能从 YAGNI 改为已实现
+- **PROJECT_CONTEXT.md**：补充 GitHub Actions 云编译、macOS 27 字段兼容约束、Popover 卡片化设计约束、swiftc -parse 预检查流程
+- **README.md**：状态栏描述修正为纯百分比；云编译安装改为 gh CLI 命令行流程
+- **CI**：`build.yml` 增加 `paths-ignore`，纯文档改动不触发编译（约省 4 分钟/次）
+
 ---
 
 ### 2026-07-17 — 全量代码审查 + 修复 24 个问题 + 深色模式支持确认
