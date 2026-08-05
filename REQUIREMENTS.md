@@ -1,419 +1,173 @@
 # BatteryBar — macOS 菜单栏电池监控应用
 
+> 需求基线文档。本文档已与实际代码对齐（2026-08-04）。
+> 有意偏离原始设计的决策均标注「决策」，尚未实现的项标注「待办」。
+
 ## 一、产品定位
 
-一款 macOS 菜单栏常驻应用，将 iPhone 上「设置 → 电池」的核心体验搬到 Mac：自上次充电以来的使用时长、耗电曲线、电池健康、实时功耗，一目了然。状态栏图标与系统电池 1:1 一致，百分比直接嵌入图标内部。遵循 macOS 26 Liquid Glass 设计规范。
+一款 macOS 菜单栏常驻应用，将 iPhone 上「设置 → 电池」的核心体验搬到 Mac：自上次充电以来的使用时长、耗电曲线、电池健康、实时功耗，一目了然。
+
+- 形态：菜单栏常驻（纯百分比文字）+ 可选主窗口
+- 风格：系统材质 + 卡片分组，跟随系统亮/暗模式，不自定义主题
 
 ---
 
-## 二、功能清单
+## 二、功能清单与实现状态
 
 ### 2.1 状态栏（Menu Bar）
 
-| 项目 | 说明 |
-|------|------|
-| 电池图标 | 用 Canvas 绘制，与系统 `NSBattery` 图标像素级一致：圆角矩形外壳 + 右侧小凸起 + 内部填充（按电量百分比裁剪，充电时绿色渐变） |
-| 百分比数字 | 嵌入图标内部，居中显示，字体 SF Pro Rounded Medium，字号自适应图标高度（~11pt），颜色随填充对比度自动切换黑/白 |
-| 充电指示 | 充电中时图标内部填充为绿色，叠加 ⚡ 符号或闪电路径 |
-| 低电量 | ≤20% 填充变红，≤10% 闪烁（1s 周期） |
-| 点击行为 | 点击展开 Popover 面板；Option+点击打开主窗口 |
-| 右键菜单 | 快捷操作：打开主窗口、偏好设置、关于、退出 |
+| 项目 | 状态 | 说明 |
+|------|------|------|
+| 显示内容 | ✅ 已实现 | **纯文字百分比**（`XX%`），NSTextField 精确控宽，紧贴系统电池图标 |
+| 深色/浅色跟随 | ✅ 已实现 | `textColor = .labelColor` 自动切换 |
+| 点击行为 | ✅ 已实现 | 点击展开 Popover 面板 |
+| 电池图标自绘 | 🚫 决策放弃 | 原需求要求像素级复刻系统图标，迭代 12 版无法达成，2026-07-16 决定改为纯文字 |
+| 低电量变红/闪烁 | 📋 待办 | ≤20% 文字变红（图标放弃后未补做文字版） |
+| Option+点击打开主窗口 | 📋 待办 | — |
+| 右键菜单 | 📋 待办 | 打开主窗口、电池设置、关于、退出 |
 
-### 2.2 Popover 面板（点击状态栏图标展开）
+### 2.2 Popover 面板（点击状态栏展开）
 
-**布局：** 宽度 320pt，高度自适应，Liquid Glass 毛玻璃背景
+**布局：** 宽度 340pt，高度自适应，`.regularMaterial` 毛玻璃背景，卡片分组（圆角 12pt 半透明卡片，不用分隔线）
 
 ```
 ┌─────────────────────────────────────┐
-│  🔋 78%  充电中 · 45W 输入          │  ← 顶部摘要
-│  ─────────────────────────────────  │
-│  自上次充电以来                      │
-│  ├ 亮屏   3h 42m                    │
-│  ├ 休眠   1h 15m                    │
-│  └ 使用   4h 57m                    │
-│  ─────────────────────────────────  │
-│  实时功耗                           │
-│  ├ 系统总功耗    12.4 W             │
-│  ├ CPU           5.2 W              │
-│  ├ GPU           2.1 W              │
-│  └ 显示器        3.8 W              │
-│  ─────────────────────────────────  │
-│  电池健康                           │
-│  ├ 循环次数      287 次             │
-│  ├ 最大容量      5,200 / 5,100 mAh │
-│  ├ 设计容量      5,100 mAh         │
-│  ├ 电池温度      32.4°C             │
-│  └ 健康度        100%               │
-│  ─────────────────────────────────  │
-│  本循环预估寿命                      │
-│  ├ 已用 4h57m → 剩余 ~3h12m        │
-│  └ 预计总续航  ~8h09m               │
-│  ─────────────────────────────────  │
-│  [ 打开详细视图 ]   [ 偏好设置 ]     │
+│  🔋 78%  充电中                      │  ← 图标圈 + 大数字 + 状态
+│  ┌ 状态卡片 ────────────────────┐   │
+│  │ ⚡ 预计 1h 20m 后充满   28.6W │   │  三种状态统一结构：
+│  │ ▓▓▓▓▓▓▓░░░ 电量进度条         │   │  充电中 / 已插电未充电 / 放电中
+│  └─────────────────────────────┘   │  （放电时下方加 亮屏/休眠/当前功率 三列）
+│  ┌ 实时功耗 ────────────────────┐   │
+│  │ ⚡ 总功率          28.6 W     │   │
+│  │ （Helper 开启时：CPU/GPU/内存/│   │
+│  │   显示器分项）                │   │
+│  │            12.5 V · 2290 mA  │   │  ← 电压/电流降级为次要小字
+│  └─────────────────────────────┘   │
+│  ┌ 电池健康 ────────────────────┐   │
+│  │ 98%  [良好]                   │   │  ← 健康度大数字 + 状态标签
+│  │ 循环次数 136 次               │   │
+│  │ 满充容量 4240 / 4382 mAh      │   │
+│  │ 温度     —（不可用时）        │   │
+│  └─────────────────────────────┘   │
+│  [ 查看详情（全宽按钮）]            │
+│  电池设置                    退出   │
 └─────────────────────────────────────┘
 ```
 
+📋 待办：「自上次充电以来」使用合计行、预计总续航（已用 → 剩余 → 总计）
+
 ### 2.3 主窗口（详细视图）
 
-**窗口规格：** 720×540pt，可调整，Liquid Glass 背景，圆角 16pt
+**窗口规格：** 默认 760×580pt，可调整，`.thickMaterial` 背景。打开时显示 Dock 图标，关闭后回到纯菜单栏模式。
 
-#### Tab 1：使用记录
+#### Tab 1：首页（使用记录）✅
 
-- **耗电曲线图**（Swift Charts）
-  - X 轴：自上次充电以来的时间（HH:MM）
-  - Y 轴：电量百分比（0-100%）
-  - 折线图，充电区间用绿色填充，放电区间用蓝色渐变填充
-  - 支持鼠标悬停查看精确数值
-  - 采样间隔：每 60 秒记录一次，保留最近 24h 数据
-- **时长统计卡片**
-  - 亮屏时长、休眠时长、总使用时长
-  - 各阶段平均耗电速率（%/h）
-- **本次循环预测**
-  - 基于当前耗电速率推算剩余续航
-  - 基于历史同场景数据推算总续航
+- 状态卡（充电中/放电中 + 预计时间 + 功耗）
+- 关键指标 4 格：循环 / 健康度 / 温度 / 容量
+- 电量曲线（Swift Charts，充电/放电分段着色，悬停查看数值）
+- 上次使用时长统计、电池信息区
 
-#### Tab 2：电池健康
+#### Tab 2：电池健康 🚫 决策合并
 
-- **健康仪表盘**
-  - 圆环图显示当前容量 / 设计容量
-  - 循环次数 + 寿命条（参考 Apple 标准：1000 次循环后 ≥80%）
-- **温度实时曲线**（最近 1h）
-- **电池信息表**
-  - 制造商、型号、序列号、化学成分（Li-ion）
-  - 设计容量、当前最大容量、当前电量
-  - 电压、电流、功率
+- 原设计为独立 HealthTab（仪表盘/温度曲线/信息表）
+- 2026-07-16 决策：删除独立 Tab，健康信息合并到首页指标卡与 Popover
 
-#### Tab 3：循环统计
+#### Tab 2（现）：循环统计 ✅
 
-- **循环列表**
-  - 每次完整循环（100%→0% 等效）记录
-  - 日期、持续时长、起止电量、平均功耗
-- **循环寿命趋势图**
-  - X 轴：循环序号，Y 轴：该循环实际可用容量
-  - 用于判断电池衰减趋势
-- **统计摘要**
-  - 平均每次循环续航
-  - 最长 / 最短循环续航
-  - 容量衰减率（mAh/循环）
+- 循环列表（日期、时长、起止电量、平均功率；自动过滤电量下降 <1% 的无效循环）
+- 续航能力趋势图
+- 统计摘要（平均/最长循环续航）
 
-#### Tab 4：组件功耗（可选，需 IOReport 权限）
+#### Tab 3：组件功耗 ✅
 
-- CPU、GPU、显示器、Wi-Fi、蓝牙等分项功耗
-- 实时柱状图 + 历史趋势
+- 系统总功耗 + 电压/电流/功率/温度卡片
+- Helper 未开启时显示开启引导；开启后显示 CPU/GPU/内存分项
+- 平均/峰值/最低功耗、功耗趋势图
 
-#### Tab 5：同步
+#### Tab 4：同步 ✅（部分待办）
 
-- **WebDAV 服务器配置**
-  - 服务器地址、端口、路径、用户名、密码（存 Keychain）
-  - 测试连接按钮
-  - 支持 Nextcloud / 坚果云 / 任意 WebDAV 服务
-- **同步策略**
-  - 本地优先（Local-first）：所有数据先写本地 SwiftData
-  - 手动同步 + 自动同步（可配置间隔：15min / 1h / 6h）
-  - 同步方向：双向 / 仅上传 / 仅下载
-- **同步内容**
-  - 电池采样快照（BatterySnapshot）
-  - 循环记录（ChargeCycle）
-  - 偏好设置
-- **同步状态**
-  - 最后同步时间、下次同步倒计时
-  - 同步进度条、冲突提示
-  - 同步日志（最近 50 条）
+- WebDAV 服务器配置（地址/用户名/密码 Keychain 存储/远程路径）+ 测试连接 ✅
+- 默认坚果云；支持任意 WebDAV ✅
+- 同步间隔：15min / 1h / 6h / 手动 ✅
+- 同步方向：双向 / 仅上传 / 仅下载 ✅
+- 同步状态显示（idle/syncing/success/failed）✅
+- 📋 待办：同步日志（最近 50 条）、下次同步倒计时、配置不完整时的警告提示
+
+### 2.4 通知 ✅
+
+> 原始设计列为 YAGNI，后改为实现。
+
+- 低电量 ≤20%：30 分钟冷却，充电时不触发
+- 充满提醒：60 分钟冷却
+- 启动即请求通知权限
 
 ---
 
-## 三、技术架构
+## 三、技术架构（实际选型）
 
-### 3.1 技术栈
+| 层 | 选型 | 与原设计差异 |
+|----|------|-------------|
+| 语言 | Swift 6.2（严格并发） | — |
+| UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSTextField（原设计 MenuBarExtra，为精确控宽弃用） |
+| 图表 | Swift Charts | — |
+| 持久化 | JSON 文件（DataStore，串行队列保护） | 原设计 SwiftData，实现期替换 |
+| 电池数据 | IOKit（IOPS + AppleSmartBattery registry） | **已适配 macOS 27**：容量字段改读 `BatteryData` 嵌套字典 |
+| 分项功耗 | XPC Helper + `powermetrics`（root，可选） | 原设计 IOReport（私有框架不稳定） |
+| 健康度 | `system_profiler`（60s 缓存） | — |
+| 温度 | IORegistry `Temperature` 键 | Apple Silicon 部分系统不暴露，UI 显示「—」 |
+| 电源事件 | NSWorkspace 通知（SleepWatcher） | — |
+| 通知 | UserNotifications | — |
+| WebDAV | 自建 URLSession + XMLParser | 无第三方依赖 |
+| 凭据 | Keychain（AfterFirstUnlock） | — |
+| 构建 | SPM + shell 脚本 + **GitHub Actions 云编译** | 本机无 Xcode（CLT 缺 SwiftUI 宏插件），推 main 分支云端编译 |
+| 签名 | ad-hoc | 原设计 Developer ID + 公证（发布时再做） |
+| App Sandbox | **未开启** | Helper 安装需 osascript 提权，沙盒下不可行 |
 
-| 层 | 选型 | 理由 |
-|----|------|------|
-| UI | SwiftUI + MenuBarExtra (macOS 13+) | 原生菜单栏支持，Liquid Glass 原生适配 |
-| 图表 | Swift Charts | 系统框架，Liquid Glass 风格统一 |
-| 数据持久化 | SwiftData | 轻量，Swift 原生，够用 |
-| 电池数据 | IOKit (IOPSCopyPowerSourcesInfo + IORegistry) | 系统 API，无需额外权限 |
-| 功耗细分 | IOReport | 可读取 CPU/GPU/显示器分项功耗 |
-| 电源事件 | NSWorkspace + IORegisterForSystemPower | 监听休眠/唤醒/充电状态变化 |
-| 定时器 | Timer + RunLoop | 每 60s 采样一次电池数据 |
-| WebDAV 同步 | WebDAV-Swift (SPM) 或自建 URLSession+XMLParser | 轻量 WebDAV 客户端，支持 Nextcloud/坚果云 |
-| 密码存储 | Keychain Services | WebDAV 凭据安全存储 |
-
-### 3.2 项目结构
-
-```
-BatteryBar/
-├── App/
-│   ├── BatteryBarApp.swift          # 入口，MenuBarExtra 注册
-│   └── AppDelegate.swift            # 电源事件监听
-├── MenuBar/
-│   ├── BatteryIcon.swift            # Canvas 绘制系统风格电池图标
-│   ├── StatusBarController.swift    # 状态栏管理
-│   └── PopoverView.swift            # 点击展开的概览面板
-├── Views/
-│   ├── MainView.swift               # 主窗口 TabView
-│   ├── UsageTab.swift               # 使用记录 Tab
-│   ├── HealthTab.swift              # 电池健康 Tab
-│   ├── CycleTab.swift               # 循环统计 Tab
-│   ├── PowerTab.swift               # 组件功耗 Tab
-│   └── SyncTab.swift                # 同步设置 Tab
-├── Data/
-│   ├── BatteryReader.swift          # IOKit 数据读取封装
-│   ├── PowerSampler.swift           # 定时采样 + IOReport
-│   ├── SleepWatcher.swift           # 休眠/唤醒事件监听
-│   └── CycleTracker.swift           # 循环检测与记录
-├── Sync/
-│   ├── WebDAVClient.swift           # WebDAV 协议实现（PROPFIND/PUT/GET/DELETE）
-│   ├── SyncEngine.swift             # 同步调度、冲突解决、增量同步
-│   ├── SyncModels.swift             # 同步元数据（时间戳、哈希、版本号）
-│   └── KeychainHelper.swift         # Keychain 读写封装
-├── Models/
-│   ├── BatterySnapshot.swift        # SwiftData: 采样快照
-│   ├── ChargeCycle.swift            # SwiftData: 循环记录
-│   └── BatteryInfo.swift            # 电池静态信息
-├── Utilities/
-│   ├── LiquidGlassModifier.swift    # Liquid Glass 样式封装
-│   └── NumberFormatter+.swift       # 数字格式化
-└── Resources/
-    └── Assets.xcassets              # 图标资源
-```
-
-### 3.3 关键实现
-
-#### 状态栏图标
-
-```swift
-// BatteryIcon.swift — 核心绘制逻辑
-struct BatteryIcon: View {
-    let level: Double      // 0.0 ~ 1.0
-    let isCharging: Bool
-    let isLow: Bool
-
-    var body: some View {
-        Canvas { context, size in
-            // 1. 外壳：圆角矩形 22×11，线宽 1.5
-            // 2. 正极凸起：右侧 2×4 圆角矩形
-            // 3. 内部填充：按 level 裁剪，充电时绿色
-            // 4. 百分比文字：居中，SF Pro Rounded Medium 11pt
-            // 5. 低电量红色 / 充电闪电符号
-        }
-        .frame(width: 28, height: 14)
-    }
-}
-```
-
-#### 电池数据读取
-
-```swift
-// BatteryReader.swift
-class BatteryReader {
-    // IOPSCopyPowerSourcesInfo → 电量、充电状态、剩余时间
-    // IORegistry → 循环次数、设计容量、最大容量、温度、电压、电流
-    // 计算实时功率 P = V × I
-}
-```
-
-#### 采样与持久化
-
-```swift
-// PowerSampler.swift
-class PowerSampler {
-    let timer = Timer.publish(every: 60, on: .main, in: .common)
-
-    func sample() {
-        let snapshot = BatterySnapshot(
-            timestamp: Date(),
-            level: reader.level,
-            isCharging: reader.isCharging,
-            wattage: reader.wattage,
-            temperature: reader.temperature,
-            screenOn: ScreenState.isScreenOn
-        )
-        modelContext.insert(snapshot)
-    }
-}
-```
-
-#### 循环检测
-
-```swift
-// CycleTracker.swift
-// 逻辑：检测充电状态从 charging → not-charging 的转换
-// 当转换发生时，记录本次循环的起止时间、起止电量、总耗电量
-// 100%→0% 为一个完整循环；多次部分充放累计 100% 也算一个等效循环
-```
-
-### 3.4 WebDAV 同步架构
-
-#### 同步协议
-
-基于 HTTP 的 WebDAV 扩展方法，使用 Foundation `URLSession` + `XMLParser` 自建轻量客户端（不引入第三方依赖）。核心操作：
-
-| WebDAV 方法 | 用途 |
-|-------------|------|
-| `PROPFIND` | 列出远程目录、获取文件修改时间 |
-| `GET` | 下载数据文件 |
-| `PUT` | 上传数据文件 |
-| `MKCOL` | 创建同步目录 |
-| `DELETE` | 删除过期数据 |
-
-#### 远程目录结构
+### 数据模型
 
 ```
-/BatteryBar/
-├── snapshots/
-│   ├── 2026-07-12.jsonl.gz    # 按天分文件，gzip 压缩
-│   ├── 2026-07-11.jsonl.gz
-│   └── ...
-├── cycles/
-│   └── cycles.json            # 循环记录（小文件，全量同步）
-├── settings.json              # 偏好设置
-└── .sync-meta.json            # 同步元数据（设备ID、最后同步时间）
+BatterySnapshot   id/timestamp/level/isCharging/wattage/temperature/screenOn
+                  + cpuPower/gpuPower/displayPower/dramPower + dirty
+ChargeCycle       id/startDate/endDate/startLevel/endLevel/totalEnergy/averageWattage/dirty
+SyncConfig        isEnabled/serverURL/username/remotePath/syncInterval/syncDirection/lastSyncAt/deviceID
+BatteryInfo       静态信息（designCapacity/maxCapacity/cycleCount/serial/manufacturer/电压/电流/温度/适配器）
 ```
 
-#### 同步策略
-
-```
-1. 本地写入 SwiftData（立即）
-2. 标记 dirty flag（待同步）
-3. 同步定时器触发 / 手动触发
-4. 增量上传：只上传 dirty 记录
-5. 冲突解决：last-write-wins（以 timestamp 为准）
-6. 下载合并：按 record id 去重，新记录插入本地
-```
-
-#### 数据格式
-
-每条采样记录序列化为 JSON Lines（每行一条 JSON），按天分文件：
-
-```json
-{"id":"uuid","ts":1720780800,"level":78.5,"charging":true,"watt":45.2,"temp":32.4,"screen":true}
-```
-
-gzip 压缩后上传，单日文件约 50KB（1440 条 × ~80 字节 → 压缩后 ~15KB）。
-
-### 3.5 Liquid Glass 适配
-
-- 所有面板使用 `.glassEffect()` 或 `.background(.ultraThinMaterial)`
-- Popover 和主窗口使用圆角 16pt + 阴影
-- 卡片内使用 `.padding(12)` + `.clipShape(RoundedRectangle(cornerRadius: 10))`
-- 颜色方案跟随系统（亮/暗），不自定义主题
-- 图标使用 SF Symbols 6（macOS 26 新增的电池相关符号）
-- 字体层级：标题 `.headline`，数据 `.title2.monospacedDigit()`，标签 `.caption`
+持久化位置：`~/Library/Application Support/BatteryBar/`（snapshots.json / cycles.json / sync-config.json / usage-state.json / refresh-interval.json）
 
 ---
 
-## 四、数据模型
+## 四、非功能需求
 
-### BatterySnapshot（每 60s 一条）
-
-```
-id: UUID                # 同步用唯一标识
-timestamp: Date
-level: Double           // 0~100
-isCharging: Bool
-wattage: Double         // 瓦特
-temperature: Double     // 摄氏度
-screenOn: Bool          // 亮屏/休眠标记
-dirty: Bool             // 待同步标记（本地新增/修改后置 true，同步完成后置 false）
-```
-
-### ChargeCycle
-
-```
-id: UUID
-startDate: Date
-endDate: Date
-startLevel: Double
-endLevel: Double
-totalEnergy: Double     // mAh
-averageWattage: Double
-duration: TimeInterval
-dirty: Bool             // 待同步标记
-```
-
-### BatteryInfo（静态，不持久化）
-
-```
-designCapacity: Int     // mAh
-maxCapacity: Int        // mAh
-cycleCount: Int
-manufactureDate: Date
-serialNumber: String
-manufacturer: String
-```
-
-### SyncConfig（SwiftData，单例）
-
-```
-isEnabled: Bool
-serverURL: String       // WebDAV 服务器地址
-username: String
-remotePath: String      // 远程目录，默认 /BatteryBar
-syncInterval: Enum      // 15min / 1h / 6h / manual
-syncDirection: Enum     // bidirectional / uploadOnly / downloadOnly
-lastSyncAt: Date?
-deviceID: String        // 设备唯一标识，用于多设备去重
-```
+| 指标 | 要求 | 现状 |
+|------|------|------|
+| CPU 占用 | < 1% | ⚠️ Helper 开启时 powermetrics 每 10s spawn 子进程，存在超标风险 |
+| 自身功耗 | < 0.5W | 同上 |
+| 存储 | 24h ≈ 1440 条 < 1MB | ✅ 快照超 2000 条裁剪到 1440；⚠️ JSON 每 60s 全量重写（待优化） |
+| 冷启动 | < 1s | ✅ 耗时读取（system_profiler）全部后台化 |
+| 隐私 | 不配置同步则零网络请求 | ✅ |
 
 ---
 
-## 五、权限与兼容性
+## 五、不做（YAGNI）
 
-| 项目 | 要求 |
-|------|------|
-| 最低系统 | macOS 14.0（Sonnet）—— MenuBarExtra + SwiftData |
-| 推荐系统 | macOS 26.0 —— Liquid Glass 完整支持 |
-| 权限 | 无特殊权限要求，IOKit 读取电池数据为用户态操作 |
-| App Sandbox | 开启，仅需 `com.apple.security.app-sandbox` |
-| 签名 | Developer ID 签名 + 公证（发布时） |
-| 后台运行 | `LSUIElement = true`，无 Dock 图标 |
-
----
-
-## 六、非功能需求
-
-- **性能：** CPU 占用 < 1%，内存 < 50MB，采样线程不阻塞主线程
-- **电量：** 自身功耗 < 0.5W，不能比监控的电量消耗还多
-- **存储：** 24h 采样数据约 1440 条记录，占用 < 1MB；历史数据按天自动清理
-- **启动：** 冷启动 < 1s，状态栏图标立即显示
-- **隐私：** 不联网（WebDAV 同步为用户主动配置，不配置则零网络请求），不收集任何数据，所有数据本地存储
-
----
-
-## 七、不做（YAGNI）
-
-- ❌ 通知/提醒功能（系统已有低电量提醒）
-- ❌ 多设备支持（iPhone/Apple Watch 电量）
+- ❌ 低电量模式切换（曾实现，2026-07-16 移除）
+- ❌ 隐藏系统电池图标（曾实现，2026-07-16 移除）
+- ❌ 多设备电量显示（iPhone/Apple Watch）
 - ❌ 电池校准工具
 - ❌ 自定义主题/皮肤
-- ❌ 导出报告（除非用户明确要求）
-- ❌ Widget（v1 不做，MenuBarExtra 够用）
-- ❌ 菜单栏图表（v1 只显示图标+百分比）
+- ❌ Widget、菜单栏图表
+- ✅ 通知功能（原列 YAGNI，后改为实现，见 2.4）
 
 ---
 
-## 八、参考项目
+## 六、已知待办汇总
 
-### macOS 电池监控类
-
-| 项目 | 亮点 | 参考价值 |
-|------|------|----------|
-| [ChargeWatching](https://github.com/TY-teo/ChargeWatching) | SwiftUI 菜单栏，三路功率显示（电池/系统/适配器），SQLite 存储历史，IOKit `AppleSmartBattery` + `PowerTelemetryData` 读取，1Hz 采样 | 功率计算方式（V×I）、菜单栏实现、历史数据存储 |
-| [MacoPowerMonitor](https://github.com/LCYLYM/MacoPowerMonitor) | SwiftUI + AppKit，玻璃面板，双向功率视图，`ioreg` + `system_profiler` + `IOPowerSources` 多数据源，本地 JSON 历史 | 数据源选择、面板 UI 设计、隐私优先 |
-| [batt](https://github.com/charlie0129/batt) | Go 写的充电限制器，SMC 直接读写，Client-Daemon 架构，菜单栏 GUI | SMC 数据读取方式、daemon 架构思路 |
-| [coconutBattery](https://coconut-flavour.com) | 老牌工具，循环次数/容量/温度/Wi-Fi 多设备查看 | 数据展示维度参考 |
-
-### WebDAV 同步类
-
-| 项目 | 亮点 | 参考价值 |
-|------|------|----------|
-| [WebDAV-Swift](https://github.com/skjiisa/WebDAV-Swift) (⭐79) | 纯 Swift WebDAV 客户端，内置缓存，支持 Nextcloud，SPM 集成 | 可直接作为依赖引入，或参考其 PROPFIND/PUT/GET 实现 |
-| [FileProvider](https://github.com/amosavian/FileProvider) (⭐116) | 统一文件操作接口，支持 WebDAV/iCloud/Dropbox/OneDrive/S3 | 架构参考：统一 FileProvider 协议，WebDAV 只是其中一个 backend |
-| [PandaNote](https://github.com/Panway/PandaNote) (⭐117) | Markdown 笔记应用，支持 WebDAV 同步 | 同步策略、冲突处理参考 |
-
-### 关键技术参考
-
-- **IOKit 电池数据读取**：`IOPSCopyPowerSourcesInfo()` + `IORegistryEntryCreateCFProperty("AppleSmartBattery")` — ChargeWatching 和 MacoPowerMonitor 都用这个方案
-- **功率计算**：`P = Voltage(mV) × InstantAmperage(mA) / 1,000,000` — ChargeWatching 验证过聚合字段不可靠，必须用原始 V×I
-- **WebDAV 协议**：本质是 HTTP + 扩展方法（PROPFIND/MKCOL），用 `URLSession` + `XMLParser` 可自建，无需第三方依赖
-- **同步数据格式**：JSON Lines + gzip 压缩，按天分文件，单文件小适合增量同步
+| 优先级 | 项目 |
+|--------|------|
+| 高 | 状态栏低电量变红；右键菜单；Option+点击打开主窗口 |
+| 高 | 同步 Tab 配置不完整（用户名/密码为空）时的警告 |
+| 中 | Popover 预计总续航区块；使用时长合计行 |
+| 中 | 同步日志（最近 50 条）、下次同步倒计时 |
+| 中 | powermetrics 子进程功耗优化；JSON 增量写盘 |
+| 低 | Developer ID 签名 + 公证（发布前） |

@@ -1,7 +1,7 @@
 # BatteryBar — 项目上下文
 
 > 维护工程师入门文档。读完此文档即可理解整体架构、数据流与约束。
-> 更新日期：2026-07-17
+> 更新日期：2026-08-04
 
 ---
 
@@ -11,8 +11,8 @@
 
 - 形态：菜单栏常驻 + 可选主窗口
 - 最低系统：macOS 14（Package.swift 声明）
-- 构建：纯 SPM，无 Xcode 工程
-- 分发：DMG / `update.sh` 直接装到 `/Applications`
+- 构建：纯 SPM，无 Xcode 工程；**本机无 Xcode 时依赖 GitHub Actions 云编译**（`.github/workflows/build.yml`，推 main 分支自动构建，产物用 `gh run download` 下载）
+- 分发：DMG / `update.sh` 直接装到 `/Applications`（云编译产物建议装 `~/Applications`，旧 root 版本无法覆盖）
 - 权限：默认零权限运行；CPU/GPU 分项功耗需用户在 PowerTab 手动开启 Helper（安装时弹一次管理员密码）
 
 ---
@@ -22,6 +22,7 @@
 ```
 battery/
 ├── Package.swift                       # SPM 清单，2 个 target
+├── .github/workflows/build.yml         # GitHub Actions 云编译（本机无 Xcode）
 ├── README.md                           # 简要说明
 ├── REQUIREMENTS.md                     # 产品需求文档（设计稿，可能与实现有差异）
 ├── PROJECT_CONTEXT.md                  # 本文件
@@ -44,7 +45,7 @@ battery/
     │   │   ├── NotificationManager.swift # UNUserNotificationCenter 封装
     │   │   └── SleepWatcher.swift      # NSWorkspace 休眠/唤醒监听
     │   ├── MenuBar/
-    │   │   └── PopoverView.swift       # Popover 面板内容
+    │   │   └── PopoverView.swift       # Popover 面板内容（卡片化设计，宽 340）
     │   ├── Models/
     │   │   ├── BatteryInfo.swift       # 静态电池信息 struct
     │   │   ├── BatterySnapshot.swift   # Codable 快照
@@ -74,7 +75,7 @@ battery/
 | UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSStatusBarButton + 子 NSTextField（精确控制宽度） |
 | 图表 | Swift Charts | 系统框架 |
 | 持久化 | JSON 文件（`DataStore`） | 串行 DispatchQueue 保护 |
-| 电池数据 | IOKit (`IOPSCopyPowerSourcesInfo` + `AppleSmartBattery` registry) | 用户态，无权限 |
+| 电池数据 | IOKit (`IOPSCopyPowerSourcesInfo` + `AppleSmartBattery` registry) | 用户态，无权限；**已适配 macOS 27**（容量字段在 `BatteryData` 嵌套字典） |
 | 系统功耗 | `powermetrics` 子进程（Helper） | 仅在用户开启 Helper 时 |
 | 健康度 | `system_profiler SPPowerDataType -json` | 60s 缓存 |
 | 电源事件 | `NSWorkspace` 通知（`SleepWatcher`） | 补足睡眠时长 |
@@ -82,7 +83,7 @@ battery/
 | 特权操作 | `NSXPCConnection` + `BatteryBarHelper` LaunchDaemon | 读取 CPU/GPU/DRAM 功耗 |
 | WebDAV | 自建 `URLSession` + `XMLParser` | 无第三方依赖 |
 | 凭据 | Keychain Services | — |
-| 构建 | SPM + 自定义 shell 脚本 | 无 Xcode 工程 |
+| 构建 | SPM + 自定义 shell 脚本 + GitHub Actions 云编译 | 无 Xcode 工程；本机仅 CLT 无法编译 SwiftUI 宏 |
 | 签名 | ad-hoc（`codesign --sign -`） | 通过 osascript 安装 helper |
 
 ---
@@ -269,7 +270,9 @@ SyncEngine.sync(config:)
 8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间。用 `NSTextField.sizeToFit() + fittingSize` 测量文字精确宽度（`NSString.size` 会因小数丢损失裁切 `%`），`ceil + 2pt` 余量设为 `statusItem.length`（固定值，非 variableLength），消除 NSStatusBarButton 系统默认 padding；textField 右对齐到 button 右边缘，余量在左侧（`%` 紧贴系统电池图标）
 9. **状态栏深色/浅色模式自动跟随**：`textField.textColor = .labelColor`，系统外观切换时自动更新，无需手动监听
 10. **SyncEngine 并发保护**：`tryStartSyncing()` / `endSyncing()` 同步函数封装 NSLock（async 函数中不能直接调用 NSLock.lock/unlock）
-11. **修改前先读代码**，修改后运行 `swift build` 验证
+11. **修改前先读代码**，修改后运行 `swift build` 验证；无 Xcode 环境时用 `xcrun swiftc -parse` 做语法级检查，推送后由 GitHub Actions 验证完整编译，产物安装到 `~/Applications` 实机确认
+12. **macOS 27 IOKit 字段兼容**：顶层 `DesignCapacity` 已移除、`MaxCapacity` 语义变为百分比，容量类字段必须优先读 `BatteryData` 嵌套字典（`DesignCapacity`/`FullChargeCapacity`），保留旧系统回退；`Temperature` 键可能不存在，UI 必须容忍 0 值（显示「—」，不得当作 0°C 参与算法）
+13. **Popover 卡片化设计**：分区用圆角卡片（`.quaternary` 填充），禁用 Divider；充电/已插电未充电/放电三种状态统一结构且均带电量进度条；电压/电流只能作为次要小字展示
 
 ---
 

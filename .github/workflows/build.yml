@@ -3,6 +3,10 @@ name: Build
 on:
   push:
     branches: [main]
+    paths-ignore:
+      # 纯文档改动不触发编译（需要时可用 workflow_dispatch 手动触发）
+      - '**.md'
+      - 'conf.py'
   workflow_dispatch:
 
 jobs:
