@@ -2,20 +2,20 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 
+/// 纯 AppKit 入口：菜单栏工具不需要 SwiftUI App/Scene 生命周期。
+/// 实测（2026-08-22，macOS 27）：SwiftUI App 脚手架（无论 WindowGroup 还是
+/// Settings 场景）在本机会持续产生约 40% CPU 的短命线程风暴，sample 不可见
+/// 但 task 级 utime 可测；改用 NSApplication 直启后归零。
+/// SwiftUI 仅用于 Popover 与主窗口内容（NSHostingController 包裹）。
 @main
-struct BatteryBarApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
-    var body: some Scene {
-        // 主窗口由 AppDelegate 以 NSWindow + NSHostingController 管理（见 showMainWindow），
-        // 不用 SwiftUI WindowGroup：启动时保持纯菜单栏不开窗，右键菜单和 Popover
-        // 都能直接拉起主窗口，也避免 WindowGroup 自动开窗与激活策略切换的时序问题。
-        Settings { EmptyView() }
-    }
-
-    init() {
+enum BatteryBarApp {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
         // 设置 App 图标（运行时绘制，无需外部资源）
-        NSApplication.shared.applicationIconImage = Self.drawAppIcon()
+        app.applicationIconImage = drawAppIcon()
+        app.run()
     }
 
     /// 用 CoreGraphics 绘制 1024×1024 电池图标作为 App 图标
@@ -102,7 +102,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let powerModel = PowerTabModel()
     let syncModel = SyncTabModel()
     private var observer: NSObjectProtocol?
-    private var textField: NSTextField?
+    // refreshTitle 门控：文字与低电量态都没变时跳过（title/length 赋值会触发菜单栏重排）
+    private var lastTitleText: String?
+    private var lastTitleLowBattery = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         sampler.start()
@@ -118,26 +120,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.statusItem = statusItem
 
         if let button = statusItem.button {
-            button.title = ""
+            button.title = "—"
             button.image = nil
+            button.font = NSFont.menuBarFont(ofSize: 0)
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             // 左键弹 Popover，右键弹菜单（在 statusItemClicked 中按事件类型分流）
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-
-            // 用 NSTextField 替代 button.title，精确控制宽度
-            let tf = NSTextField(labelWithString: "—")
-            tf.font = NSFont.menuBarFont(ofSize: 0)
-            tf.textColor = .labelColor
-            tf.alignment = .center
-            tf.isBezeled = false
-            tf.isEditable = false
-            tf.isSelectable = false
-            tf.drawsBackground = false
-            // 不用 Auto Layout，直接用 frame 定位
-            tf.translatesAutoresizingMaskIntoConstraints = true
-            self.textField = tf
-            button.addSubview(tf)
         }
 
         // 监听 sampler 变化，更新文字（queue: .main 保证闭包在主线程，assumeIsolated 同步直达）
@@ -307,31 +296,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// 更新状态栏文字（跟随系统逻辑：纯百分比，不显示预估时间）
     /// 低电量（≤20% 且未充电）时文字变红。
-    /// 用 sizeToFit() 让 textField 自己计算完整渲染尺寸（含 cell padding），
-    /// +2pt 余量防 % 被裁切；textField 右对齐到 button 右边缘，余量在左侧
-    /// 视觉上 % 紧贴系统电池图标，左侧余量被数字前的状态栏间距吸收
+    ///
+    /// 宽度控制：button.title + 固定 statusItem.length（NSAttributedString 精确测宽 + ceil + 2pt）。
+    /// 不再用 NSTextField 子视图方案——macOS 27 上 NSTextField 嵌入 NSStatusBarButton
+    /// 会触发 AppKit 布局引擎持续重排，实测空转约 37% CPU（2026-08-22，见 T-30）。
     private func refreshTitle() {
         let level = Int(sampler.currentLevel)
         let text = "\(level)%"
+        let lowBattery = level <= 20 && !sampler.currentIsCharging
 
-        guard let tf = textField else { return }
-        tf.stringValue = text
-        tf.textColor = (level <= 20 && !sampler.currentIsCharging) ? .systemRed : .labelColor
-        tf.sizeToFit()
+        // 每秒采样通知到达，但内容未变时跳过：title/length 赋值会触发菜单栏重排
+        guard text != lastTitleText || lowBattery != lastTitleLowBattery else { return }
+        lastTitleText = text
+        lastTitleLowBattery = lowBattery
 
-        // sizeToFit 后 fittingSize 是 textField 完整渲染所需尺寸（含 cell padding）
-        let fitWidth = tf.fittingSize.width
-        let textWidth = ceil(fitWidth) + 2  // +2pt 余量防止 % 边缘被裁切
-
-        // 固定 statusItem.length = 文字宽度 + 余量
-        statusItem?.length = textWidth
-
-        // textField 右对齐：x = 总宽度 - 文字实际渲染宽度
-        // 余量出现在左侧（数字前），右侧 % 紧贴 button 右边缘
-        let h = NSStatusBar.system.thickness
-        let renderWidth = ceil(fitWidth)
-        let x = textWidth - renderWidth
-        tf.frame = NSRect(x: x, y: (h - tf.fittingSize.height) / 2, width: renderWidth, height: tf.fittingSize.height)
+        guard let button = statusItem?.button else { return }
+        let font = NSFont.menuBarFont(ofSize: 0)
+        // 低电量变红；labelColor 为动态色，自动跟随系统深浅模式
+        let color: NSColor = lowBattery ? .systemRed : .labelColor
+        button.attributedTitle = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
+        // 精确宽度：attributed size（含字体全要素）→ ceil 防小数裁切 + 2pt 余量防 % 边缘被裁
+        let width = ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width) + 2
+        statusItem?.length = width
     }
 
     func applicationWillTerminate(_ notification: Notification) {

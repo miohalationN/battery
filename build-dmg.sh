@@ -6,14 +6,14 @@ set -e
 # 请先运行 build-app.sh 生成完整 app bundle，再据此调整 DMG 打包。
 
 APP_NAME="BatteryBar"
-BUILD_DIR=".build/debug"
+BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME.dmg"
 DMG_DIR="$BUILD_DIR/dmg"
 VOLUME_NAME="BatteryBar"
 
 echo "=== Building $APP_NAME ==="
-swift build
+swift build -c release
 
 echo "=== Creating app bundle ==="
 mkdir -p "$APP_BUNDLE/Contents/MacOS"

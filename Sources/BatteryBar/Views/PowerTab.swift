@@ -52,9 +52,11 @@ struct PowerTab: View {
             model.snapshots = DataStore.shared.allSnapshots()
             model.lastSnapshotUpdate = Date()
         }
-        .onReceive(sampler.$tick) { _ in
+        // 快照数组 60s 节流刷新（与 CycleTab 同模式）；
+        // 实时数值由 sampler @Published 变化驱动，不再订阅每秒 tick
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             let now = Date()
-            if now.timeIntervalSince(model.lastSnapshotUpdate) > 60 {
+            if now.timeIntervalSince(model.lastSnapshotUpdate) > 50 {
                 model.snapshots = DataStore.shared.allSnapshots()
                 model.lastSnapshotUpdate = now
             }

@@ -7,13 +7,15 @@ set -e
 
 APP_NAME="BatteryBar"
 HELPER_NAME="BatteryBarHelper"
-BUILD_DIR=".build/debug"
+# 分发用 release 构建：debug 构建的 Swift 6 运行时在实测中空转约 40% CPU
+# （2026-08-22 排查，详见 MAINTENANCE_PLAN T-29），release 构建空闲为 0
+BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 BUNDLE_ID="com.batterybar.app"
 HELPER_BUNDLE_ID="com.batterybar.helper"
 
-echo "=== 编译 $APP_NAME 和 $HELPER_NAME ==="
-swift build
+echo "=== 编译 $APP_NAME 和 $HELPER_NAME（release） ==="
+swift build -c release
 
 echo "=== 创建 App Bundle ==="
 # 清理旧的 bundle

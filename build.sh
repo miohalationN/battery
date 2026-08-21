@@ -5,11 +5,11 @@ set -e
 # 注意：此脚本仅打包主应用，不含 helper。如需 helper（低电量模式），请使用 build-app.sh。
 
 APP_NAME="BatteryBar"
-BUILD_DIR=".build/debug"
+BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 
 echo "Building $APP_NAME..."
-swift build
+swift build -c release
 
 echo "Creating app bundle..."
 mkdir -p "$APP_BUNDLE/Contents/MacOS"

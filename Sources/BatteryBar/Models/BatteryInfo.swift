@@ -1,7 +1,8 @@
 import Foundation
 
 /// 电池静态信息
-struct BatteryInfo {
+/// Equatable：PowerSampler 用它门控 @Published 写入（值未变不触发 objectWillChange）
+struct BatteryInfo: Equatable {
     let designCapacity: Int     // mAh
     let maxCapacity: Int        // mAh（实际满充容量）
     let cycleCount: Int

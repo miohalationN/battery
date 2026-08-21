@@ -6,7 +6,7 @@ set -e
 
 APP_NAME="BatteryBar"
 APP_PATH="/Applications/$APP_NAME.app"
-BUILD_DIR=".build/debug"
+BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 
 echo "=== 正在更新 $APP_NAME ==="
@@ -18,7 +18,7 @@ sleep 0.5
 
 # 2. 编译（包含 helper）
 echo "编译中..."
-swift build
+swift build -c release
 
 # 3. 创建 app bundle
 echo "打包中..."

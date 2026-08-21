@@ -25,8 +25,8 @@ final class PowerSampler: ObservableObject {
     @Published private(set) var currentAmperage: Double = 0
     @Published private(set) var currentInfo: BatteryInfo?
     @Published private(set) var systemHealthPercent: Double = 100
-    @Published private(set) var lastUpdateTime: Date = Date()
-    @Published private(set) var tick: Bool = false
+    /// 最近一次采样时刻（视图不观察；曾为 @Published 每秒触发 objectWillChange 风暴）
+    private(set) var lastUpdateTime: Date = Date()
 
     @Published private(set) var cpuPower: Double = 0
     @Published private(set) var gpuPower: Double = 0
@@ -273,15 +273,17 @@ final class PowerSampler: ObservableObject {
         }
         wasExternalConnected = isPluggedIn
 
-        currentLevel = ps.level
-        currentIsCharging = ps.isCharging
-        currentWattage = info?.systemPower ?? info?.wattage ?? 0
-        currentTemperature = info?.temperature ?? 0
-        currentVoltage = info?.voltage ?? 0
-        currentAmperage = info?.instantAmperage ?? 0
-        currentInfo = info
+        // 只在值真正变化时写 @Published：每秒无条件写会让 objectWillChange 风暴式触发，
+        // 把所有观察 sampler 的 SwiftUI 视图逐秒重算（2026-08-22 实测占空烧掉约 40% CPU）
+        let wattage = info?.systemPower ?? info?.wattage ?? 0
+        if ps.level != currentLevel { currentLevel = ps.level }
+        if ps.isCharging != currentIsCharging { currentIsCharging = ps.isCharging }
+        if abs(wattage - currentWattage) > 0.05 { currentWattage = wattage }
+        if (info?.temperature ?? 0) != currentTemperature { currentTemperature = info?.temperature ?? 0 }
+        if (info?.voltage ?? 0) != currentVoltage { currentVoltage = info?.voltage ?? 0 }
+        if (info?.instantAmperage ?? 0) != currentAmperage { currentAmperage = info?.instantAmperage ?? 0 }
+        if info != currentInfo { currentInfo = info }
         lastUpdateTime = Date()
-        tick.toggle()
 
         // 通知状态栏 AppDelegate 刷新 button.title（title 不自动响应 @Published）
         NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)

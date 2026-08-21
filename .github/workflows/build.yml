@@ -32,12 +32,12 @@ jobs:
 
       - name: Package artifact
         run: |
-          cd .build/debug
+          cd .build/release
           ditto -c -k --sequesterRsrc --keepParent BatteryBar.app BatteryBar.zip
 
       - name: Upload BatteryBar.app
         uses: actions/upload-artifact@v4
         with:
           name: BatteryBar
-          path: .build/debug/BatteryBar.zip
+          path: .build/release/BatteryBar.zip
           retention-days: 30

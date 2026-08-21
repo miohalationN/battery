@@ -59,6 +59,8 @@
 | T-26 | 机型基准 "m1"/"m2" 子串永不匹配：Apple Silicon hw.model 是 "Mac14,2" 平台键或 "MacBookAir10,1"，子串分类是死代码 | DrainRateCalculator.swift | ✅ 已修复（2026-08-22 改为典型功耗 ÷ 实测电池能量，容量未知才退回固定表，配套单测） |
 | T-27 | macOS 27 移除 dram 采样器，v3 helper `--samplers ...,dram` 整体失败，CPU/GPU 分项功耗自系统升级以来恒为 0 | main.swift | ✅ 已修复（2026-08-22 helper 4.0 按系统版本门控采样器 + 启动失败退避） |
 | T-28 | SyncConfigTests 默认值断言过期（serverURL 应为坚果云默认而非空），CI `|| echo warning` 放水下长期未发现 | SyncConfigTests.swift / build.yml | ✅ 已修复（2026-08-22 修正断言 + 恢复 CI 测试门禁） |
+| T-29 | Swift 6 debug 构建运行时空转：debug 产物（含云端 CI 一直分发的 .build/debug）空闲烧约 38% CPU，release 同代码为 0；`sample` 不可见（不显示为线程栈），task 级 utime 可测 | 构建脚本 / build.yml | ✅ 已修复（2026-08-22 全链路改 `-c release`） |
+| T-30 | NSTextField 嵌入 NSStatusBarButton 触发 AppKit 布局引擎持续重排：状态栏百分比方案（2026-07-16 为精确控宽引入）在 macOS 27 上空转约 37% CPU，release 构建下依然存在；20 行最小应用可复现 | BatteryBarApp.swift | ✅ 已修复（2026-08-22 改 `button.attributedTitle` + `NSAttributedString.size()` 测宽 + 固定 length，红色低电量用 attributedTitle 前景色） |
 
 ---
 
@@ -107,6 +109,32 @@ swift test
 ---
 
 ## 五、变更日志
+
+### 2026-08-22（第四批）— CPU 空转根因修复：0.1% 达标（40% → 0.1%）
+
+> 背景：实机冒烟测得应用空闲烧约 40% CPU（新旧版本皆然，从未被发现——没有测量手段）。
+> 二分定位出**两个叠加元凶**，均已修复并实测验证。
+
+#### 根因一（T-29）：Swift 6 debug 构建运行时空转（~38%）
+- 现象：debug 产物空闲 38% CPU；`sample` 全线程显示空闲但 task 级 utime 持续增长（短命线程风暴不可采样）；系统进程与最小 AppKit 应用均正常
+- 定位：release 同代码零消耗（0.16s/10s）直接证伪代码嫌疑；云端 CI 一直分发 `.build/debug` 产物
+- 修复：`build-app.sh` / `build.sh` / `build-dmg.sh` / `update.sh` / `build.yml` 全链路 `swift build -c release`
+
+#### 根因二（T-30）：NSTextField-in-NSStatusBarButton 布局风暴（~37%，release 下仍在）
+- 现象：release 空壳空闲，release 全功能 37%；逐块二分（sampler / 观察者 / popover / sync 均无罪）锁定状态栏；20 行最小应用复现：`button.addSubview(NSTextField)` 即烧 37%，`button.title` + 定长为零
+- 根因：macOS 27 上 NSTextField 嵌入 NSStatusBarButton 触发 AppKit 布局引擎持续重排（2026-07-16 为精确控宽引入的方案）
+- 修复：`button.attributedTitle`（低电量红色用前景色）+ `NSAttributedString.size()` 测宽 + `ceil + 2pt` + 固定 `statusItem.length`；保持「% 紧贴系统电池图标」设计目标
+
+#### 配套修复与加固（顺带，方向正确故保留）
+- **@Published 门控**：sampleUI 只在值真变化时写（wattage 0.05W 阈值；BatteryInfo 加 Equatable）；`lastUpdateTime` 改非 @Published；删除每秒翻转的 `tick`（UsageTab/PowerTab 改 60s Timer 刷新快照）——消除 objectWillChange 风暴
+- **refreshTitle 门控**：文字与低电量态未变时跳过 title/length 赋值
+- **入口改纯 AppKit**：`@main enum` + `NSApplication.run()`，删除 SwiftUI Scene 脚手架（SwiftUI 仅用于 Popover/主窗口内容）
+
+#### 验证（本机实机，release 构建）
+- 空闲 CPU：**0.1%**（修复前 40%+）；进程稳定、snapshots.json 持续落盘、日志零错误、无 powermetrics 残留
+- `swift test` 37/37 通过
+
+---
 
 ### 2026-08-22（第三批）— 视图状态迁移 @Observable：本地 CLT 完整构建 + 测试跑通；仓库转公开前隐私清理
 

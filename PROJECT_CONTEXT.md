@@ -281,7 +281,7 @@ SyncEngine.sync(config:)
 5. **电池使用时间统计**：拔电立即重置，30 秒内重插拔平滑过渡，仅离电时累加
 6. **drain rate 计算**：由 `DrainRateCalculator` 统一实现（历史 0.6 + 功率 0.4 权重），纯函数——快照数组与时间由参数注入，不直接读 DataStore / 系统时钟；PowerSampler 每 30 个 tick 取 recentSnapshots(1440) 调用并缓存到 `@Published cachedDrainRate`；禁止在 View body 里全量扫描 DataStore
 7. **本地优先**：所有数据先写本地，同步是可选功能
-8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间；≤20% 且未充电时变红。用 `NSTextField.sizeToFit() + fittingSize` 测量文字精确宽度（`NSString.size` 会因小数丢损失裁切 `%`），`ceil + 2pt` 余量设为 `statusItem.length`（固定值，非 variableLength），消除 NSStatusBarButton 系统默认 padding；textField 右对齐到 button 右边缘，余量在左侧（`%` 紧贴系统电池图标）
+8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间；≤20% 且未充电时 attributedTitle 变红（`.systemRed`，`.labelColor` 为动态色自动跟随深浅模式）。宽度控制：`button.attributedTitle` + 固定 `statusItem.length`（`NSAttributedString.size()` 测宽 + `ceil` + 2pt 余量）。**禁止把 NSTextField 嵌入 NSStatusBarButton**——macOS 27 实测会触发 AppKit 布局引擎持续重排，空转约 37% CPU（T-30，2026-08-22 用 20 行最小复现定位）；也禁止 `@main` SwiftUI App/Scene 脚手架（debug 构建下同样空转，见约束 18）
 9. **状态栏深色/浅色模式自动跟随**：`textField.textColor = .labelColor`（低电量时 `.systemRed`，同为动态色），系统外观切换时自动更新，无需手动监听
 10. **SyncEngine 并发保护**：`tryStartSyncing()` / `endSyncing()` 同步函数封装 NSLock（async 函数中不能直接调用 NSLock.lock/unlock）
 11. **修改前先读代码**，修改后运行 `swift build` 验证；涉及算法/数据逻辑跑 `swift test`（本地 CLT 可完整构建与测试）。涉及 UI 的改动 `bash build-app.sh && open .build/debug/BatteryBar.app` 实机确认
@@ -291,6 +291,9 @@ SyncEngine.sync(config:)
 15. **主窗口不走 SwiftUI WindowGroup**：AppDelegate `showMainWindow()` 以 NSWindow + NSHostingController 创建，`isReleasedWhenClosed = false`；新开窗入口（右键菜单 / Popover 查看详情）一律调 `showMainWindow()`，不要恢复 `@Environment(\.openWindow)`
 16. **CycleTracker / DrainRateCalculator 可测试性**：时钟与落盘经 init/参数注入，配套单测在 `Tests/BatteryBarTests/`；修改算法必须同步更新测试
 17. **视图状态用 @Observable 模型，禁止 @State**：@State 在新版 SDK 是宏（插件仅随 Xcode 分发，CLT 编译不过）。模式：每个 Tab 一个 `@Observable final class XxxModel`，由 AppDelegate 持有并注入（跨窗口关闭/重开保留状态）；视图里 `@Bindable var model` + 读侧计算属性透传（body 沿用原属性名）。**本地 `swift test` 可跑，CI 测试失败会阻断打包**（旧 `|| echo warning` 曾放过一个过期断言半个多月）
+18. **@Published 必须值变才写**：每秒无条件写会让 objectWillChange 风暴式触发所有观察视图重算（曾在无窗口时烧约 40% CPU）；`sampleUI` 对 level/isCharging/wattage(0.05W 阈值)/温度/电压/电流/BatteryInfo(需 Equatable) 全部门控，`lastUpdateTime` 非 @Published，已删除每秒翻转的 `tick`（视图用 60s Timer 刷新快照）
+19. **分发必须 release 构建**：Swift 6 debug 构建的运行时在本机实测空转约 38% CPU（release 同代码为 0，T-29）；`build-app.sh`/`build.sh`/`build-dmg.sh`/`update.sh`/CI 均已 `-c release`
+20. **入口为纯 AppKit**：`@main enum BatteryBarApp` 直接 `NSApplication.shared.run()`，无 SwiftUI Scene；SwiftUI 仅用于 Popover 与主窗口内容（NSHostingController）
 
 ---
 
