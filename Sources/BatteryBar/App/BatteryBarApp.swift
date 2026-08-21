@@ -1,38 +1,21 @@
 import SwiftUI
 import AppKit
+import ServiceManagement
 
 @main
 struct BatteryBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // 主窗口 — WindowGroup 配合单例控制，避免反复 openWindow 创建多窗口
-        // sampler / syncEngine 由 AppDelegate 持有，状态栏/主窗口/popover 共用同一实例
-        WindowGroup(id: "main") {
-            ContentView()
-                .environmentObject(appDelegate.sampler)
-                .environmentObject(appDelegate.syncEngine)
-                .onAppear {
-                    appDelegate.sampler.start()
-                    // 打开主窗口时显示 Dock 图标
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-                .onDisappear {
-                    // 关闭主窗口时隐藏 Dock 图标，回到纯菜单栏模式
-                    NSApp.setActivationPolicy(.accessory)
-                }
-        }
-        .defaultSize(width: 760, height: 580)
+        // 主窗口由 AppDelegate 以 NSWindow + NSHostingController 管理（见 showMainWindow），
+        // 不用 SwiftUI WindowGroup：启动时保持纯菜单栏不开窗，右键菜单和 Popover
+        // 都能直接拉起主窗口，也避免 WindowGroup 自动开窗与激活策略切换的时序问题。
+        Settings { EmptyView() }
     }
 
     init() {
         // 设置 App 图标（运行时绘制，无需外部资源）
         NSApplication.shared.applicationIconImage = Self.drawAppIcon()
-
-        // 启动标记（确认 app 重启）
-        try? "BatteryBar started at \(Date())".write(toFile: "/tmp/batterybar_started.txt",
-                                                       atomically: true, encoding: .utf8)
     }
 
     /// 用 CoreGraphics 绘制 1024×1024 电池图标作为 App 图标
@@ -42,7 +25,6 @@ struct BatteryBarApp: App {
         image.lockFocus()
 
         let rect = CGRect(origin: .zero, size: size)
-
         // 背景：深色圆角矩形（macOS 图标风格）
         NSColor(red: 0.13, green: 0.16, blue: 0.20, alpha: 1.0).setFill()
         NSBezierPath(roundedRect: rect, xRadius: 224, yRadius: 224).fill()
@@ -104,11 +86,14 @@ struct BatteryBarApp: App {
     }
 }
 
-/// AppDelegate — 精确控制状态栏宽度，消除系统 padding
-/// 用固定 statusItem.length = 文字实际渲染宽度，绕过 NSStatusBarButton 的内置 padding
-class AppDelegate: NSObject, NSApplicationDelegate {
+/// AppDelegate — 状态栏（左键 Popover / 右键菜单）、主窗口（NSWindow）、开机自启。
+/// 整体隔离在 MainActor：持有 @MainActor 的 PowerSampler/SyncEngine，
+/// 且所有入口（生命周期回调、target-action、窗口代理）都在主线程。
+@MainActor
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var mainWindow: NSWindow?
     let sampler = PowerSampler()
     let syncEngine = SyncEngine()
     private var observer: NSObjectProtocol?
@@ -131,7 +116,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = ""
             button.image = nil
             button.target = self
-            button.action = #selector(togglePopover(_:))
+            button.action = #selector(statusItemClicked(_:))
+            // 左键弹 Popover，右键弹菜单（在 statusItemClicked 中按事件类型分流）
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
             // 用 NSTextField 替代 button.title，精确控制宽度
             let tf = NSTextField(labelWithString: "—")
@@ -148,19 +135,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.addSubview(tf)
         }
 
-        // 监听 sampler 变化，更新文字
+        // 监听 sampler 变化，更新文字（queue: .main 保证闭包在主线程，assumeIsolated 同步直达）
         observer = NotificationCenter.default.addObserver(
             forName: NSNotification.Name("PowerSamplerDidUpdate"),
             object: nil, queue: .main
         ) { [weak self] _ in
-            self?.refreshTitle()
+            MainActor.assumeIsolated {
+                self?.refreshTitle()
+            }
         }
 
         // 创建 popover
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 340, height: 480)
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: PopoverMenuBarView(sampler: sampler))
+        popover.contentViewController = NSHostingController(
+            rootView: PopoverMenuBarView(sampler: sampler, onOpenDetails: { [weak self] in
+                self?.showMainWindow()
+            })
+        )
         self.popover = popover
 
         // 延迟触发一次刷新（等 sampler 第一次采样完成）
@@ -168,6 +161,129 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshTitle()
         }
     }
+
+    // MARK: - 状态栏点击分流（左键 Popover / 右键菜单）
+
+    @objc func statusItemClicked(_ sender: Any?) {
+        guard let event = NSApp.currentEvent else {
+            togglePopover(sender)
+            return
+        }
+        switch event.type {
+        case .rightMouseUp, .rightMouseDown:
+            guard let item = statusItem else { return }
+            // 临时挂载菜单让系统显示它，显示完移除，恢复左键 Popover 行为
+            item.menu = buildStatusMenu()
+            item.button?.performClick(nil)
+            item.menu = nil
+        default:
+            togglePopover(sender)
+        }
+    }
+
+    private func buildStatusMenu() -> NSMenu {
+        let menu = NSMenu()
+
+        let openItem = menu.addItem(withTitle: "打开主窗口", action: #selector(openMainWindowFromMenu(_:)), keyEquivalent: "")
+        openItem.target = self
+
+        let loginItem = menu.addItem(withTitle: "开机自启动", action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+
+        menu.addItem(.separator())
+
+        let settingsItem = menu.addItem(withTitle: "电池设置…", action: #selector(openBatterySettingsFromMenu(_:)), keyEquivalent: "")
+        settingsItem.target = self
+
+        let aboutItem = menu.addItem(withTitle: "关于 BatteryBar", action: #selector(showAbout(_:)), keyEquivalent: "")
+        aboutItem.target = self
+
+        menu.addItem(.separator())
+
+        // target 为 nil 走响应链，最终由 NSApplication 处理 terminate
+        menu.addItem(withTitle: "退出 BatteryBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        return menu
+    }
+
+    @objc private func openMainWindowFromMenu(_ sender: Any?) {
+        showMainWindow()
+    }
+
+    @objc private func openBatterySettingsFromMenu(_ sender: Any?) {
+        sampler.openBatterySettings()
+    }
+
+    @objc private func showAbout(_ sender: Any?) {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(nil)
+    }
+
+    // MARK: - 开机自启动（SMAppService Login Item）
+
+    @objc private func toggleLoginItem(_ sender: Any?) {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            // 常见失败原因：直接运行 .build 里的裸二进制（无 bundle），或 bundle 不在可注册位置
+            let alert = NSAlert()
+            alert.messageText = "开机自启动设置失败"
+            alert.informativeText = "\(error.localizedDescription)\n请确认 BatteryBar 已安装到「应用程序」或个人目录的「应用程序」。"
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
+    }
+
+    // MARK: - 主窗口（NSWindow + NSHostingController）
+
+    /// 显示主窗口：已存在则激活，否则创建。打开时显示 Dock 图标。
+    func showMainWindow() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let window = mainWindow {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 580),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "BatteryBar"
+        window.contentMinSize = NSSize(width: 560, height: 420)
+        // 记住上次窗口位置与大小；首次打开居中
+        if !window.setFrameAutosaveName("BatteryBarMainWindow") {
+            window.center()
+        }
+        // 保留窗口实例：关闭后「打开主窗口」可再次显示
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.contentViewController = NSHostingController(
+            rootView: ContentView()
+                .environmentObject(sampler)
+                .environmentObject(syncEngine)
+        )
+        window.makeKeyAndOrderFront(nil)
+        mainWindow = window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === mainWindow else { return }
+        // 主窗口关闭后回到纯菜单栏模式（隐藏 Dock 图标）
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    // MARK: - Popover
 
     @objc func togglePopover(_ sender: Any?) {
         guard let popover = popover, let button = statusItem?.button else { return }
@@ -180,16 +296,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 更新状态栏文字（跟随系统逻辑：纯百分比，不显示预估时间）
+    /// 低电量（≤20% 且未充电）时文字变红。
     /// 用 sizeToFit() 让 textField 自己计算完整渲染尺寸（含 cell padding），
     /// +2pt 余量防 % 被裁切；textField 右对齐到 button 右边缘，余量在左侧
     /// 视觉上 % 紧贴系统电池图标，左侧余量被数字前的状态栏间距吸收
-    @MainActor
     private func refreshTitle() {
         let level = Int(sampler.currentLevel)
         let text = "\(level)%"
 
         guard let tf = textField else { return }
         tf.stringValue = text
+        tf.textColor = (level <= 20 && !sampler.currentIsCharging) ? .systemRed : .labelColor
         tf.sizeToFit()
 
         // sizeToFit 后 fittingSize 是 textField 完整渲染所需尺寸（含 cell padding）
@@ -247,9 +364,10 @@ struct ContentView: View {
 /// 状态栏弹窗
 struct PopoverMenuBarView: View {
     @ObservedObject var sampler: PowerSampler
+    var onOpenDetails: () -> Void
 
     var body: some View {
-        PopoverView(sampler: sampler)
+        PopoverView(sampler: sampler, onOpenDetails: onOpenDetails)
             .frame(width: 340)
     }
 }

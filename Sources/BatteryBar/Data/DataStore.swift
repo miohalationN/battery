@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let dataStoreLogger = Logger(subsystem: "com.batterybar", category: "DataStore")
 
 /// JSON 文件持久化，替代 SwiftData
 final class DataStore: @unchecked Sendable {
@@ -38,9 +41,11 @@ final class DataStore: @unchecked Sendable {
 
     func load() {
         queue.sync {
-            snapshots = loadJSON(from: snapshotsFile) ?? []
-            cycles = loadJSON(from: cyclesFile) ?? []
-            syncConfig = loadJSON(from: configFile) ?? .default
+            // 核心数据文件解码失败时先备份 .bak 再从空数据重建，
+            // 避免格式损坏导致的数据静默丢失（MAINTENANCE_PLAN 回滚策略的落地）
+            snapshots = loadJSON(from: snapshotsFile, backupOnFailure: true) ?? []
+            cycles = loadJSON(from: cyclesFile, backupOnFailure: true) ?? []
+            syncConfig = loadJSON(from: configFile, backupOnFailure: true) ?? .default
         }
     }
 
@@ -197,14 +202,33 @@ final class DataStore: @unchecked Sendable {
 
     // MARK: - JSON helpers
 
-    private func loadJSON<T: Decodable>(from url: URL) -> T? {
+    private func loadJSON<T: Decodable>(from url: URL, backupOnFailure: Bool = false) -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            dataStoreLogger.error("Decode \(url.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            if backupOnFailure {
+                let bakURL = url.appendingPathExtension("bak")
+                try? FileManager.default.removeItem(at: bakURL)
+                do {
+                    try FileManager.default.moveItem(at: url, to: bakURL)
+                    dataStoreLogger.info("Corrupt file backed up to \(bakURL.lastPathComponent, privacy: .public)")
+                } catch {
+                    dataStoreLogger.error("Backup failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            return nil
+        }
     }
 
     private func saveJSON<T: Encodable>(_ value: T, to url: URL) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
-        try? data.write(to: url, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(value)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            dataStoreLogger.error("Write \(url.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Refresh Interval（UI 刷新间隔持久化）

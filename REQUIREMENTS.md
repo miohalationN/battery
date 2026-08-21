@@ -1,6 +1,6 @@
 # BatteryBar — macOS 菜单栏电池监控应用
 
-> 需求基线文档。本文档已与实际代码对齐（2026-08-04）。
+> 需求基线文档。本文档已与实际代码对齐（2026-08-22）。
 > 有意偏离原始设计的决策均标注「决策」，尚未实现的项标注「待办」。
 
 ## 一、产品定位
@@ -20,11 +20,12 @@
 |------|------|------|
 | 显示内容 | ✅ 已实现 | **纯文字百分比**（`XX%`），NSTextField 精确控宽，紧贴系统电池图标 |
 | 深色/浅色跟随 | ✅ 已实现 | `textColor = .labelColor` 自动切换 |
-| 点击行为 | ✅ 已实现 | 点击展开 Popover 面板 |
+| 低电量变红 | ✅ 已实现 | ≤20% 且未充电时文字变 `.systemRed`，插电后恢复 |
+| 点击行为 | ✅ 已实现 | 左键展开 Popover 面板 |
+| 右键菜单 | ✅ 已实现 | 打开主窗口 / 开机自启动（勾选） / 电池设置 / 关于 / 退出 |
+| 开机自启动 | ✅ 已实现 | SMAppService Login Item，右键菜单开关；应用需安装在 /Applications 或 ~/Applications |
 | 电池图标自绘 | 🚫 决策放弃 | 原需求要求像素级复刻系统图标，迭代 12 版无法达成，2026-07-16 决定改为纯文字 |
-| 低电量变红/闪烁 | 📋 待办 | ≤20% 文字变红（图标放弃后未补做文字版） |
 | Option+点击打开主窗口 | 📋 待办 | — |
-| 右键菜单 | 📋 待办 | 打开主窗口、电池设置、关于、退出 |
 
 ### 2.2 Popover 面板（点击状态栏展开）
 
@@ -58,7 +59,7 @@
 
 ### 2.3 主窗口（详细视图）
 
-**窗口规格：** 默认 760×580pt，可调整，`.thickMaterial` 背景。打开时显示 Dock 图标，关闭后回到纯菜单栏模式。
+**窗口规格：** 默认 760×580pt（最小 560×420），可调整，位置与大小记忆（frameAutosaveName），`.thickMaterial` 背景。主窗口由 AppDelegate 以 NSWindow + NSHostingController 管理（2026-08-22 决策）：启动保持纯菜单栏不开窗；打开主窗口时显示 Dock 图标，关闭后回到纯菜单栏模式。入口：右键菜单、Popover「查看详情」。
 
 #### Tab 1：首页（使用记录）✅
 
@@ -108,7 +109,8 @@
 | 层 | 选型 | 与原设计差异 |
 |----|------|-------------|
 | 语言 | Swift 6.2（严格并发） | — |
-| UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSTextField（原设计 MenuBarExtra，为精确控宽弃用） |
+| UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSTextField（原设计 MenuBarExtra，为精确控宽弃用）；主窗口 NSWindow + NSHostingController（原 WindowGroup，为启动不开窗 + 任意入口拉起弃用） |
+| 并发模型 | PowerSampler / AppDelegate 隔离在 @MainActor | 2026-08-22 重构：阻塞调用（system_profiler / XPC helper）经 Task.detached 出主线程，结果回主线程 |
 | 图表 | Swift Charts | — |
 | 持久化 | JSON 文件（DataStore，串行队列保护） | 原设计 SwiftData，实现期替换 |
 | 电池数据 | IOKit（IOPS + AppleSmartBattery registry） | **已适配 macOS 27**：容量字段改读 `BatteryData` 嵌套字典 |
@@ -165,9 +167,10 @@ BatteryInfo       静态信息（designCapacity/maxCapacity/cycleCount/serial/ma
 
 | 优先级 | 项目 |
 |--------|------|
-| 高 | 状态栏低电量变红；右键菜单；Option+点击打开主窗口 |
+| 高 | Option+点击打开主窗口 |
 | 高 | 同步 Tab 配置不完整（用户名/密码为空）时的警告 |
 | 中 | Popover 预计总续航区块；使用时长合计行 |
 | 中 | 同步日志（最近 50 条）、下次同步倒计时 |
-| 中 | powermetrics 子进程功耗优化；JSON 增量写盘 |
+| 中 | powermetrics 子进程功耗优化（常驻流式进程方案）；JSON 增量写盘 |
+| 中 | Helper 调用方校验（auditToken）与真正的卸载（bootout + 删除） |
 | 低 | Developer ID 签名 + 公证（发布前） |

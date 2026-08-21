@@ -1,35 +1,43 @@
 import Foundation
 
-final class PowerSampler: ObservableObject, @unchecked Sendable {
+/// 采样与 UI 状态中枢。
+///
+/// 隔离模型：整个类隔离在 MainActor，@Published 状态只允许主线程变更，
+/// 消除旧实现 `@unchecked Sendable` 下定时器 / 后台队列并发写 @Published 的数据竞争。
+/// 阻塞调用（system_profiler 健康度、XPC helper、powermetrics）通过 Task.detached
+/// 移出主线程，结果回写主线程；休眠回调用 MainActor.assumeIsolated 同步执行，
+/// 避免 willSleep 到系统入睡之间 Task 排队延迟导致睡眠统计丢失。
+@MainActor
+final class PowerSampler: ObservableObject {
     private let reader = BatteryReader()
-    private let cycleTracker = CycleTracker()
+    private let cycleTracker: CycleTracker
     private let sleepWatcher = SleepWatcher()
     private var dispatchTimer: DispatchSourceTimer?
     private var storageTimer: Timer?
     private var refreshObserver: NSObjectProtocol?
     private var staticInfoObserver: NSObjectProtocol?
 
-    @Published var currentLevel: Double = 0
-    @Published var currentIsCharging: Bool = false
-    @Published var currentWattage: Double = 0
-    @Published var currentTemperature: Double = 0
-    @Published var currentVoltage: Double = 0
-    @Published var currentAmperage: Double = 0
-    @Published var currentInfo: BatteryInfo?
-    @Published var systemHealthPercent: Double = 100
-    @Published var lastUpdateTime: Date = Date()
-    @Published var tick: Bool = false
+    @Published private(set) var currentLevel: Double = 0
+    @Published private(set) var currentIsCharging: Bool = false
+    @Published private(set) var currentWattage: Double = 0
+    @Published private(set) var currentTemperature: Double = 0
+    @Published private(set) var currentVoltage: Double = 0
+    @Published private(set) var currentAmperage: Double = 0
+    @Published private(set) var currentInfo: BatteryInfo?
+    @Published private(set) var systemHealthPercent: Double = 100
+    @Published private(set) var lastUpdateTime: Date = Date()
+    @Published private(set) var tick: Bool = false
 
-    @Published var cpuPower: Double = 0
-    @Published var gpuPower: Double = 0
-    @Published var displayPower: Double = 0
-    @Published var dramPower: Double = 0
+    @Published private(set) var cpuPower: Double = 0
+    @Published private(set) var gpuPower: Double = 0
+    @Published private(set) var displayPower: Double = 0
+    @Published private(set) var dramPower: Double = 0
 
-    @Published var helperNeedsUpdate: Bool = false
+    @Published private(set) var helperNeedsUpdate: Bool = false
 
     // 放电/充电速率缓存：每 30 个 UI tick 重算一次，避免 View body 每 tick 全量扫描 DataStore
-    @Published var cachedDrainRate: Double = 0
-    @Published var cachedChargeRate: Double = 0
+    @Published private(set) var cachedDrainRate: Double = 0
+    @Published private(set) var cachedChargeRate: Double = 0
     private var rateCacheTick: Int = 0
     private let rateCacheInterval: Int = 30
 
@@ -53,7 +61,12 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
     private var isSleeping: Bool = false
     private var sleepStartTime: Date?
     private var isStarted: Bool = false
-    var uiInterval: TimeInterval = 1
+    private(set) var uiInterval: TimeInterval = 1
+
+    init() {
+        // 循环落盘通过闭包注入，便于单元测试用 stub 收集
+        self.cycleTracker = CycleTracker(onSave: { DataStore.shared.saveCycle($0) })
+    }
 
     func start() {
         guard !isStarted else { return }
@@ -87,11 +100,12 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
         }
 
         // 接线 SleepWatcher：通过系统休眠/唤醒事件维护 isSleeping 与睡眠时长
+        // NSWorkspace 通知在主线程派发（SleepWatcher 内 queue: .main），assumeIsolated 安全
         sleepWatcher.onSleep = { [weak self] in
-            self?.handleSleep()
+            MainActor.assumeIsolated { self?.handleSleep() }
         }
         sleepWatcher.onWake = { [weak self] in
-            self?.handleWake()
+            MainActor.assumeIsolated { self?.handleWake() }
         }
         sleepWatcher.start()
 
@@ -101,7 +115,9 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
             object: nil,
             queue: .main
         ) { [weak self] note in
-            if let interval = note.object as? Double {
+            let interval = note.object as? Double
+            Task { @MainActor [weak self] in
+                guard let interval else { return }
                 self?.uiInterval = interval
                 self?.restartTimer()
             }
@@ -110,10 +126,13 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
         sampleUI()
         sampleStorage()
 
-        // 后台读取系统健康度
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let health = self?.reader.readSystemHealthPercent() ?? 100
-            DispatchQueue.main.async { self?.systemHealthPercent = health }
+        // 后台读取系统健康度（system_profiler 耗时 1-3s，不能阻塞主线程）
+        let reader = reader
+        Task { @MainActor in
+            let health = await Task.detached(priority: .userInitiated) {
+                reader.readSystemHealthPercent()
+            }.value
+            self.systemHealthPercent = health
         }
 
         // 后台预加载静态信息（机器型号、序列号、制造商），避免主线程每秒 spawn system_profiler
@@ -123,23 +142,28 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
             forName: .init("BatteryReaderStaticInfoLoaded"),
             object: nil, queue: .main
         ) { [weak self] _ in
-            self?.objectWillChange.send()
-            NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)
-        }
-
-        // Helper 服务：仅在用户开启时检查/安装
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard self?.helperEnabled == true else { return }
-            if self?.reader.needsHelperUpdate() == true {
-                let installed = self?.reader.installHelperIfNeeded() ?? false
-                DispatchQueue.main.async {
-                    self?.helperNeedsUpdate = !installed
-                    self?.objectWillChange.send()
-                }
+            Task { @MainActor [weak self] in
+                self?.objectWillChange.send()
+                NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)
             }
         }
 
-        // 存储定时器
+        // Helper 服务：仅在用户开启时检查/安装（XPC 版本检测 + osascript 均为阻塞调用）
+        if helperEnabled {
+            Task { @MainActor in
+                let needsUpdate = await Task.detached(priority: .utility) {
+                    reader.needsHelperUpdate()
+                }.value
+                guard needsUpdate else { return }
+                let installed = await Task.detached(priority: .utility) {
+                    reader.installHelperIfNeeded()
+                }.value
+                self.helperNeedsUpdate = !installed
+                self.objectWillChange.send()
+            }
+        }
+
+        // 存储定时器（Timer + target/selector 在主 RunLoop 触发，无隔离问题）
         let st = Timer(timeInterval: 60, target: self, selector: #selector(fireStorage), userInfo: nil, repeats: true)
         RunLoop.main.add(st, forMode: .common)
         storageTimer = st
@@ -176,7 +200,9 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now(), repeating: uiInterval)
         timer.setEventHandler { [weak self] in
-            self?.sampleUI()
+            Task { @MainActor [weak self] in
+                self?.sampleUI()
+            }
         }
         timer.resume()
         dispatchTimer = timer
@@ -219,8 +245,6 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
     private func sampleUI() {
         let ps = reader.readPowerSource()
         let info = reader.readBatteryInfo()
-
-        objectWillChange.send()
 
         let previousCharging = currentIsCharging
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
@@ -270,24 +294,26 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
 
         // 每 10 个 UI tick 读取一次分项功耗（仅在 Helper 开启时）
         // 用计数器而非时间戳取模，避免 uiInterval 非 1s 时采样周期不可控
+        // readComponentPower 内部是 XPC + semaphore（最多 3s），必须离开主线程
         componentPowerTick += 1
         if helperEnabled && componentPowerTick % 10 == 0 {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let componentPower = self?.reader.readComponentPower() ?? ComponentPower(cpu: 0, gpu: 0, display: 0, other: 0, dram: 0)
-                let displayPower = self?.reader.estimateDisplayPower() ?? 0
-                DispatchQueue.main.async {
-                    self?.cpuPower = componentPower.cpu
-                    self?.gpuPower = componentPower.gpu
-                    self?.displayPower = displayPower
-                    self?.dramPower = componentPower.dram
-                }
+            let reader = reader
+            Task { @MainActor in
+                let (component, display) = await Task.detached(priority: .userInitiated) { () -> (ComponentPower, Double) in
+                    (reader.readComponentPower(), reader.estimateDisplayPower())
+                }.value
+                self.cpuPower = component.cpu
+                self.gpuPower = component.gpu
+                self.displayPower = display
+                self.dramPower = component.dram
             }
         }
 
-        // 每 rateCacheInterval 个 tick 重算一次放电/充电速率（DrainRateCalculator 内部会扫描 DataStore）
+        // 每 rateCacheInterval 个 tick 重算一次放电/充电速率（DrainRateCalculator 内部会扫描快照）
         // 节流避免每 tick 全量扫描，View 直接读取 cachedDrainRate / cachedChargeRate
         rateCacheTick += 1
         if rateCacheTick % rateCacheInterval == 0 {
+            let snapshots = DataStore.shared.recentSnapshots(1440)
             cachedDrainRate = DrainRateCalculator.drainRate(
                 level: currentLevel,
                 isCharging: currentIsCharging,
@@ -295,9 +321,10 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
                 voltage: currentVoltage,
                 maxCapacity: currentInfo?.maxCapacity ?? 0,
                 healthPercent: systemHealthPercent,
-                dischargeStart: dischargeStartTime
+                dischargeStart: dischargeStartTime,
+                snapshots: snapshots
             )
-            cachedChargeRate = Self.smoothRate(old: cachedChargeRate, measured: DrainRateCalculator.chargeRate())
+            cachedChargeRate = Self.smoothRate(old: cachedChargeRate, measured: DrainRateCalculator.chargeRate(snapshots: snapshots))
         }
     }
 
@@ -358,10 +385,8 @@ final class PowerSampler: ObservableObject, @unchecked Sendable {
         if installed {
             UserDefaults.standard.set(true, forKey: "BatteryBarHelperEnabled")
         }
-        DispatchQueue.main.async {
-            self.helperNeedsUpdate = !installed
-            self.objectWillChange.send()
-        }
+        helperNeedsUpdate = !installed
+        objectWillChange.send()
         return installed
     }
 

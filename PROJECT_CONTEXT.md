@@ -1,7 +1,7 @@
 # BatteryBar — 项目上下文
 
 > 维护工程师入门文档。读完此文档即可理解整体架构、数据流与约束。
-> 更新日期：2026-08-04
+> 更新日期：2026-08-22
 
 ---
 
@@ -14,6 +14,7 @@
 - 构建：纯 SPM，无 Xcode 工程；**本机无 Xcode 时依赖 GitHub Actions 云编译**（`.github/workflows/build.yml`，推 main 分支自动构建，产物用 `gh run download` 下载）
 - 分发：DMG / `update.sh` 直接装到 `/Applications`（云编译产物建议装 `~/Applications`，旧 root 版本无法覆盖）
 - 权限：默认零权限运行；CPU/GPU 分项功耗需用户在 PowerTab 手动开启 Helper（安装时弹一次管理员密码）
+- 开机自启动：`SMAppService.mainApp`（macOS 13+ Login Item），状态栏右键菜单开关；要求 app 为正规 bundle 且位于 /Applications 或 ~/Applications，直接跑 .build 裸二进制注册会失败（开关弹提示说明）
 
 ---
 
@@ -94,48 +95,55 @@ battery/
 
 ```
 BatteryBarApp (@main)
-  ├─ AppDelegate（持有唯一的 PowerSampler + SyncEngine 实例）
+  ├─ AppDelegate（@MainActor；持有唯一的 PowerSampler + SyncEngine 实例）
   │    ├─ NSStatusItem + NSStatusBarButton + 子 NSTextField（纯文字百分比）
   │    │    ├─ statusItem.length = ceil(fittingSize.width) + 2（固定宽度，消除系统 padding）
   │    │    ├─ textField.textColor = .labelColor（自动跟随系统深色/浅色模式）
-  │    │    ├─ textField 右对齐到 button 右边缘，余量在左侧（% 紧贴系统电池图标）
-  │    │    └─ 点击 button → togglePopover
-  │    ├─ NSPopover → PopoverMenuBarView
+  │    │    ├─ ≤20% 且未充电时文字变 .systemRed（低电量变红）
+  │    │    ├─ sendAction(on: [.leftMouseUp, .rightMouseUp])：左键 togglePopover，右键 NSMenu
+  │    │    │    （打开主窗口 / 开机自启动勾选 / 电池设置 / 关于 / 退出）
+  │    │    └─ 右键菜单临时挂到 statusItem.menu，performClick 显示后置 nil 恢复左键行为
+  │    ├─ NSPopover → PopoverMenuBarView(sampler:onOpenDetails:)
+  │    ├─ showMainWindow()：NSWindow + NSHostingController(ContentView)，frameAutosaveName 记忆位置，
+  │    │    isReleasedWhenClosed = false（关窗不销毁，可反复打开）；
+  │    │    开窗 setActivationPolicy(.regular)，windowWillClose 后回 .accessory
+  │    ├─ 开机自启动：SMAppService.mainApp register/unregister（右键菜单开关）
   │    └─ syncEngine.start(config:)（若 isEnabled && syncInterval != .manual）
-  └─ WindowGroup("main") → ContentView → TabView(4 个 Tab)
-       ├─ environmentObject(appDelegate.sampler)
-       └─ environmentObject(appDelegate.syncEngine)
+  └─ Scene 仅 Settings { EmptyView() }（占位；主窗口不走 WindowGroup，
+     启动不开窗，避免自动开窗与激活策略切换的时序问题）
 ```
 
-AppDelegate 持有唯一的 PowerSampler 和 SyncEngine 实例，主窗口通过 `appDelegate.sampler` / `appDelegate.syncEngine` 共享同一实例。`start()` 内部 `guard !isStarted` 保证幂等。SyncTab 通过 `@ObservedObject syncEngine` 实时显示同步状态（idle/syncing/success/failed）。
+AppDelegate 为 @MainActor，持有唯一的 PowerSampler 和 SyncEngine 实例，主窗口通过 `environmentObject` 注入共享。`start()` 内部 `guard !isStarted` 保证幂等。SyncTab 通过 `@ObservedObject syncEngine` 实时显示同步状态（idle/syncing/success/failed）。
 
-### 4.2 采样循环（`PowerSampler`）
+### 4.2 采样循环（`PowerSampler`，@MainActor）
 
 ```
 start()
  ├─ sampleUI()          // 立即一次
  ├─ sampleStorage()     // 立即一次
- ├─ DispatchSourceTimer 每 uiInterval(=1s, 可持久化配置) → sampleUI()
- ├─ Timer 每 60s → fireStorage() → sampleStorage()
- ├─ SleepWatcher.start()
- ├─ 后台 readSystemHealthPercent()
+ ├─ DispatchSourceTimer 每 uiInterval(=1s, 可持久化配置) → Task { @MainActor } → sampleUI()
+ ├─ Timer(target: fireStorage) 每 60s → sampleStorage()
+ ├─ SleepWatcher.start()（回调经 MainActor.assumeIsolated 同步直达，
+ │   避免 willSleep → 入睡间 Task 排队延迟丢失睡眠统计）
+ ├─ Task.detached 后台 readSystemHealthPercent()（system_profiler 1-3s，不能上主线程）
  ├─ reader.prefetchStaticInfo() → 后台加载机型/序列号（避免每秒 spawn system_profiler）
- └─ 观察刷新间隔变更通知 + 静态信息加载完成通知
+ └─ 观察刷新间隔变更通知 + 静态信息加载完成通知（Task { @MainActor } 回主线程）
 
 sampleUI():
  ├─ reader.readPowerSource()         // IOPS
  ├─ reader.readBatteryInfo()         // IORegistry（读缓存，不再每秒 spawn system_profiler）
- ├─ 更新 @Published 状态
- ├─ NotificationCenter.post("PowerSamplerDidUpdate") → AppDelegate 刷新 button.title
+ ├─ 更新 @Published 状态（全部 private(set)，仅主线程可写）
+ ├─ NotificationCenter.post("PowerSamplerDidUpdate") → AppDelegate 刷新状态栏文字
  ├─ NotificationManager.checkLowBattery(level, isCharging:)（充电时不触发低电量）
  ├─ 插拔检测（拔电立即重置统计，30 秒内重插拔平滑过渡）
- ├─ 每 10 个 tick readComponentPower（仅 helperEnabled 时，用独立计数器避免时间戳取模）
- └─ 每 30 个 tick 重算 cachedDrainRate / cachedChargeRate（DrainRateCalculator 共享实现，避免 View 每 tick 全量扫描 DataStore）
+ ├─ 每 10 个 tick readComponentPower（仅 helperEnabled 时；XPC 阻塞调用经 Task.detached 出主线程）
+ └─ 每 30 个 tick 重算 cachedDrainRate / cachedChargeRate
+     （DrainRateCalculator 纯函数，快照数组由调用方传入，避免 View 每 tick 全量扫描 DataStore）
 
 sampleStorage():
  ├─ 构造 BatterySnapshot → DataStore.saveSnapshot
  ├─ screenOnMinutes / sleepMinutes += 1
- ├─ CycleTracker.update(isCharging, level, wattage)
+ ├─ CycleTracker.update(isCharging, level, wattage)（时钟与落盘 init 注入，可测试）
  └─ 每 5 分钟持久化 UsageState
 ```
 
@@ -151,10 +159,12 @@ sampleStorage():
 ### 4.3.1 放电/充电速率计算（`DrainRateCalculator`）
 
 - 统一算法（抽取自 UsageTab 和 PopoverView 的重复实现）：历史放电段速率 0.6 权重 + 当前功率 0.4 权重融合
-- 机型基准放电速率通过 `sysctl hw.model` 检测（MacBookAir/Pro，M1/M2/M3/M4/Intel 区分）
-- 健康度因子：`100 / max(50, healthPercent)` 调整基准速率
+- 纯函数：快照数组与 `now` 由参数注入，不读 DataStore / 系统时钟；配套单测 `DrainRateCalculatorTests`
+- 机型基准：优先「机型典型功耗 ÷ 实测电池能量（满充容量 × 电压）」；容量未知才退回固定速率表 × 健康度因子
+  （注意：不能用 hw.model 的 "m1"/"m2" 子串判断芯片代次——Apple Silicon 的 hw.model 是
+  "Mac14,2" 平台键或 "MacBookAir10,1"，子串永远匹配不到，2026-08-22 修复）
 - 拔电初期（前 120s）优先历史数据，无历史用机型基准
-- PowerSampler 每 30 个 tick 缓存一次到 `@Published cachedDrainRate / cachedChargeRate`
+- PowerSampler 每 30 个 tick 取 recentSnapshots(1440) 调用一次，缓存到 `@Published cachedDrainRate / cachedChargeRate`
 
 ### 4.4 持久化（`DataStore`）
 
@@ -165,6 +175,7 @@ sampleStorage():
   - `usage-state.json`（screenOnMinutes、sleepMinutes、lastPlugInTime 等）
 - 串行 `DispatchQueue(label: "com.batterybar.store", qos: .utility)`
 - 对外访问全部通过 `queue.sync` 包装的访问器：`allSnapshots()` / `recentSnapshots(_:)` / `allCycles()` / `currentConfig()` / `updateConfig(_:)`
+- **解码失败兜底**：load() 中 snapshots/cycles/config 解码失败时先把原文件移为 `*.bak`（覆盖旧备份）再从空数据重建，os.Logger 记录；写盘失败同样记日志，不再静默吞错
 
 ### 4.5 Privileged Helper（可选，默认关闭）
 
@@ -265,14 +276,17 @@ SyncEngine.sync(config:)
 3. **IOKit 读取必须用户态**，不要求额外权限
 4. **Helper 默认关闭**，用户手动开启时才安装；未开启时不显示 CPU/GPU/内存功耗
 5. **电池使用时间统计**：拔电立即重置，30 秒内重插拔平滑过渡，仅离电时累加
-6. **drain rate 计算**：由 `DrainRateCalculator` 统一实现（历史 0.6 + 功率 0.4 权重），PowerSampler 每 30 个 tick 缓存到 `@Published cachedDrainRate`；禁止在 View body 里全量扫描 DataStore
+6. **drain rate 计算**：由 `DrainRateCalculator` 统一实现（历史 0.6 + 功率 0.4 权重），纯函数——快照数组与时间由参数注入，不直接读 DataStore / 系统时钟；PowerSampler 每 30 个 tick 取 recentSnapshots(1440) 调用并缓存到 `@Published cachedDrainRate`；禁止在 View body 里全量扫描 DataStore
 7. **本地优先**：所有数据先写本地，同步是可选功能
-8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间。用 `NSTextField.sizeToFit() + fittingSize` 测量文字精确宽度（`NSString.size` 会因小数丢损失裁切 `%`），`ceil + 2pt` 余量设为 `statusItem.length`（固定值，非 variableLength），消除 NSStatusBarButton 系统默认 padding；textField 右对齐到 button 右边缘，余量在左侧（`%` 紧贴系统电池图标）
-9. **状态栏深色/浅色模式自动跟随**：`textField.textColor = .labelColor`，系统外观切换时自动更新，无需手动监听
+8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间；≤20% 且未充电时变红。用 `NSTextField.sizeToFit() + fittingSize` 测量文字精确宽度（`NSString.size` 会因小数丢损失裁切 `%`），`ceil + 2pt` 余量设为 `statusItem.length`（固定值，非 variableLength），消除 NSStatusBarButton 系统默认 padding；textField 右对齐到 button 右边缘，余量在左侧（`%` 紧贴系统电池图标）
+9. **状态栏深色/浅色模式自动跟随**：`textField.textColor = .labelColor`（低电量时 `.systemRed`，同为动态色），系统外观切换时自动更新，无需手动监听
 10. **SyncEngine 并发保护**：`tryStartSyncing()` / `endSyncing()` 同步函数封装 NSLock（async 函数中不能直接调用 NSLock.lock/unlock）
-11. **修改前先读代码**，修改后运行 `swift build` 验证；无 Xcode 环境时用 `xcrun swiftc -parse` 做语法级检查，推送后由 GitHub Actions 验证完整编译，产物安装到 `~/Applications` 实机确认
+11. **修改前先读代码**，修改后运行 `swift build` 验证；无 Xcode 环境时用 `xcrun swiftc -parse` 做语法级检查，非视图文件可用 `xcrun swiftc -typecheck -swift-version 6`（数据/同步/计算层 + PopoverView 不含 @State 宏，可本地完整类型检查），推送后由 GitHub Actions 验证完整编译，产物安装到 `~/Applications` 实机确认
 12. **macOS 27 IOKit 字段兼容**：顶层 `DesignCapacity` 已移除、`MaxCapacity` 语义变为百分比，容量类字段必须优先读 `BatteryData` 嵌套字典（`DesignCapacity`/`FullChargeCapacity`），保留旧系统回退；`Temperature` 键可能不存在，UI 必须容忍 0 值（显示「—」，不得当作 0°C 参与算法）
 13. **Popover 卡片化设计**：分区用圆角卡片（`.quaternary` 填充），禁用 Divider；充电/已插电未充电/放电三种状态统一结构且均带电量进度条；电压/电流只能作为次要小字展示
+14. **并发隔离**：`PowerSampler` 与 `AppDelegate` 均为 `@MainActor`，`@Published` 一律 `private(set)`；阻塞调用（system_profiler / XPC helper）必须经 `Task.detached` 出主线程；休眠回调用 `MainActor.assumeIsolated`（SleepWatcher 通知在主线程派发）
+15. **主窗口不走 SwiftUI WindowGroup**：AppDelegate `showMainWindow()` 以 NSWindow + NSHostingController 创建，`isReleasedWhenClosed = false`；新开窗入口（右键菜单 / Popover 查看详情）一律调 `showMainWindow()`，不要恢复 `@Environment(\.openWindow)`
+16. **CycleTracker / DrainRateCalculator 可测试性**：时钟与落盘经 init/参数注入，配套单测在 `Tests/BatteryBarTests/`；修改算法必须同步更新测试
 
 ---
 

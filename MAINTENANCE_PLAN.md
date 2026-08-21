@@ -21,16 +21,16 @@
 
 | 编号 | 问题 | 文件 | 状态 |
 |------|------|------|------|
-| T-01 | `powermetrics` 每 10s 子进程，CPU 占用不可忽略（自身功耗可能 >0.5W） | BatteryReader.swift | 待办（设计如此，无法避免） |
+| T-01 | `powermetrics` 每 10s 子进程，CPU 占用不可忽略（自身功耗可能 >0.5W） | BatteryReader.swift | 待办（方案：Helper 内常驻流式 powermetrics 进程） |
 | T-02 | `system_profiler` 极慢（1-3s），首次/过期后阻塞后台队列 | BatteryReader.swift | ✅ 已修复（后台 prefetchStaticInfo 缓存） |
-| T-03 | JSON 全量重写：`saveJSON` 每 60s 把整个数组重新编码写盘 | DataStore.swift | 待办 |
+| T-03 | JSON 全量重写：`saveJSON` 每 60s 把整个数组重新编码写盘 | DataStore.swift | 部分修复（2026-08-22 补解码失败 .bak 备份 + 写盘错误日志；增量写盘仍待办） |
 
 ### 中等
 
 | 编号 | 问题 | 文件 | 状态 |
 |------|------|------|------|
 | T-04 | `BatteryReader.cachedHealthPercent` / `healthCacheTime` 是 `nonisolated(unsafe) static`，多线程读写无同步 | BatteryReader.swift | ✅ 已修复（NSLock 保护 + nonisolated(unsafe) 标注） |
-| T-05 | `PowerSampler` / `CycleTracker` 标 `@unchecked Sendable`，模式脆弱 | PowerSampler.swift / CycleTracker.swift | 待办（需重构为 actor） |
+| T-05 | `PowerSampler` / `CycleTracker` 标 `@unchecked Sendable`，模式脆弱 | PowerSampler.swift / CycleTracker.swift | ✅ 已修复（2026-08-22 PowerSampler 重构为 @MainActor，@Published 全部 private(set)；CycleTracker 改为普通类 + 注入时钟/落盘） |
 | T-06 | `refreshInterval` 未生效：SyncTab 修改后 post 通知但 PowerSampler 未观察 | PowerSampler.swift | ✅ 已修复（观察通知 + 持久化到 refresh-interval.json） |
 | T-07 | `HelperProtocol` 重复定义：BatteryReader.swift 与 BatteryBarHelper/main.swift 各一份 | BatteryReader.swift / main.swift | 保留（@objc optional 是有意兼容设计） |
 | T-08 | 密码每次按键都写 Keychain：SyncTab SecureField.onChange 每字符调用 setPassword | SyncTab.swift | ✅ 已修复（0.6s 防抖 Task） |
@@ -55,6 +55,8 @@
 | T-22 | onChange 旧语法 deprecation | SyncTab.swift | ✅ 已修复（迁移到零参数新语法） |
 | T-23 | BatteryBarApp 双层 thickMaterial | BatteryBarApp.swift | ✅ 已修复（移除 WindowGroup 那层） |
 | T-24 | PowerSampler previousLevel 未使用 | PowerSampler.swift | ✅ 已修复（删除） |
+| T-25 | CycleTracker totalEnergy 重复累加：每 tick 累加「起始电量-当前电量」，同一差值被反复累加，长循环虚增 | CycleTracker.swift | ✅ 已修复（2026-08-22 改为相邻 tick 正向差值累加，配套 CycleTrackerTests） |
+| T-26 | 机型基准 "m1"/"m2" 子串永不匹配：Apple Silicon hw.model 是 "Mac14,2" 平台键或 "MacBookAir10,1"，子串分类是死代码 | DrainRateCalculator.swift | ✅ 已修复（2026-08-22 改为典型功耗 ÷ 实测电池能量，容量未知才退回固定表，配套单测） |
 
 ---
 
@@ -103,6 +105,37 @@ swift test
 ---
 
 ## 五、变更日志
+
+### 2026-08-22 — 并发收尾（@MainActor）+ 状态栏功能补全 + 可测试化重构 + 两个算法 bug 修复
+
+> 背景：工作区遗留一次未完成的 PowerSampler 单例重构（文件被截断、引用未定义成员，不可编译），已恢复基线后一次性重做；同时补齐 REQUIREMENTS 高优先级待办与算法测试。
+
+#### 并发与架构（T-05 收尾）
+- **PowerSampler 重构为 `@MainActor`**：删除 `@unchecked Sendable`，全部 `@Published` 改 `private(set)`，状态只允许主线程写。阻塞调用改经 `Task.detached` 出主线程（system_profiler 健康度、XPC 版本检测/安装、readComponentPower）；SleepWatcher 回调用 `MainActor.assumeIsolated` 同步直达（willSleep 到系统入睡间隔极短，不能走 Task 排队）；通知观察者回调经 `Task { @MainActor }` 回主线程
+- **AppDelegate 标注 `@MainActor`**（持有 @MainActor 的 sampler，非隔离类的属性初始化会编译失败）；状态栏刷新通知闭包用 `assumeIsolated`，消除 HEAD 遗留的隔离警告
+- **主窗口从 SwiftUI WindowGroup 改为 AppDelegate 管理的 NSWindow + NSHostingController**：启动保持纯菜单栏不开窗；PopoverView 的 `openWindow` 环境与 `findExistingMainWindow`（私有类名 + 宽度猜测的脆弱启发式）删除，开窗入口统一为 `showMainWindow()`（右键菜单 / Popover「查看详情」）；`isReleasedWhenClosed = false` 关窗不销毁，`frameAutosaveName` 记忆位置
+- 删除 init() 里写 `/tmp/batterybar_started.txt` 的调试残留
+
+#### 状态栏功能（REQUIREMENTS 高优先级待办清零）
+- **右键菜单**：打开主窗口 / 开机自启动（勾选态） / 电池设置 / 关于 / 退出；`sendAction(on: [.leftMouseUp, .rightMouseUp])` 分流，菜单临时挂 `statusItem.menu`、显示后置 nil 恢复左键行为
+- **开机自启动**：`SMAppService.mainApp` register/unregister；注册失败（裸二进制/非正规安装位置）弹 NSAlert 说明
+- **低电量变红**：≤20% 且未充电时状态栏文字 `.systemRed`，插电恢复
+
+#### 算法 bug 修复（均配套单测）
+- **T-25 CycleTracker totalEnergy 虚增**：旧实现每分钟累加「起始电量 − 当前电量」，同一差值被重复累加（100→80 掉 20% 的一小时循环会累计出约 110%）；改为相邻 tick 正向差值累加，电量读数回跳不计负值
+- **T-26 机型基准死代码**：hw.model 按 "m1"..."m4" 子串分类永远匹配不到（Apple Silicon 是 "Mac14,2" 平台键，过渡期 "MacBookAir10,1" 也不含 "m1" 子串）；改为「机型典型功耗（Air 6W / Pro 9W / 默认 8W）÷ 实测电池能量（满充容量 × 电压）」，容量未知才退回固定速率表 × 健康度因子
+
+#### 可测试化与数据底线
+- **DrainRateCalculator 纯函数化**：快照数组与 `now` 参数注入，不再内部读 DataStore / 系统时钟；新增 `DrainRateCalculatorTests`（充电速率窗口/门槛/限幅、放电初期历史优先、融合权重、基准三条路径）
+- **CycleTracker 注入化**：时钟与落盘经 init 注入；新增 `CycleTrackerTests`（周期记录、回跳不累计、短循环/微降过滤、启动即放电）——本地无法跑 swift test（CLT 缺 SwiftUI 宏插件），测试由 CI 验证
+- **DataStore 解码失败兜底**：snapshots/cycles/config 解码失败先移为 `*.bak` 再重建（MAINTENANCE_PLAN 回滚策略首次落地）；写盘/解码失败 os.Logger 记录，不再 `try?` 静默吞错
+
+#### 验证
+- 本地：`xcrun swiftc -parse` 全量通过；`swiftc -typecheck -swift-version 6` 覆盖 Calc/Data/Models/Sync + PopoverView + BatteryBarApp 的 AppDelegate 段（ContentView 的 @State 宏本地无法展开，交 CI）
+- 探针验证：非隔离 AppDelegate 持有 @MainActor sampler 在 Swift 5/6 模式均编译失败 → AppDelegate 必须整体 @MainActor（已采纳）
+- CI/实机验证待推送后进行
+
+---
 
 ### 2026-08-04 — GitHub Actions 云编译链路 + macOS 27 数据修复 + Popover 卡片化重设计
 
