@@ -177,24 +177,27 @@ sampleStorage():
 - 对外访问全部通过 `queue.sync` 包装的访问器：`allSnapshots()` / `recentSnapshots(_:)` / `allCycles()` / `currentConfig()` / `updateConfig(_:)`
 - **解码失败兜底**：load() 中 snapshots/cycles/config 解码失败时先把原文件移为 `*.bak`（覆盖旧备份）再从空数据重建，os.Logger 记录；写盘失败同样记日志，不再静默吞错
 
-### 4.5 Privileged Helper（可选，默认关闭）
+### 4.5 Privileged Helper（可选，默认关闭，当前版本 4.0）
 
 ```
-App 端                                  Helper（root LaunchDaemon）
-readComponentPower()  ──XPC──→  getComponentPower → powermetrics → 解析 CPU/GPU/DRAM
-                                   ↑ 5s 超时保护 + replyOnce 防重复回调
-                                   ↑ 支持 mW / uW / W 三种单位解析
+App 端                                  Helper（root LaunchDaemon，队列收敛在 powerQueue）
+readComponentPower()  ──XPC──→  getComponentPower → 返回最近采样缓存（立即回包）
+                                   ↑ 首个请求懒启动 powermetrics 流式进程（-i 10000，
+                                     每 10s 一轮采样，readabilityHandler 逐行解析缓存）
+                                   ↑ 60s 无 XPC 请求自动 terminate（app 关闭/关开关后零开销）
+                                   ↑ 活跃期内意外退出 1s 后自动重启
+shouldAcceptNewConnection → pid → SecCode 校验（签名有效 + bundle id == com.batterybar.app）
 ```
 
 - **默认关闭**：用户在 PowerTab 手动开启 Toggle 后才安装
-- 安装：`osascript ... with administrator privileges` 拷贝 + bootstrap
-- 安装成功后才写 `UserDefaults.BatteryBarHelperEnabled = true`（避免密码取消时开关仍显示开启）
-- Helper 路径：`/Library/PrivilegedHelperTools/com.batterybar.helper`
-- LaunchDaemon plist：`/Library/LaunchDaemons/com.batterybar.helper.plist`
-- 未开启时：Popover 和 PowerTab 隐藏 CPU/GPU/内存功耗行，只显示总功率
-- **powermetrics 单位兼容**：支持 mW（最常见）/ uW / W 三种输出格式，正则 `(?<![mu])W` 确保不误匹配 mW/uW 中的 W
-- **Helper 超时保护**：`DispatchQueue.global().asyncAfter(5s)` 超时 `terminate` 进程；`replyOnce` 防止超时后正常完成导致重复回调
-- **主程序端超时**：`readComponentPower` 3s semaphore，`needsHelperUpdate` 2s semaphore
+- 安装：`osascript ... with administrator privileges` 拷贝 + bootstrap；关闭开关时调用 `uninstallHelper()`（bootout + 删除二进制与 plist，弹一次管理员密码框）真正卸载
+- 版本升级：`requiredHelperVersion` 不匹配时自动重装（会弹密码框）。4.0 = 流式 powermetrics + 调用方校验
+- **流式模式**：v3 的「每次调用 spawn powermetrics + 5s 超时保护 + replyOnce」已移除，XPC 调用直接回缓存，无阻塞无超时问题；mW/uW/W 三单位解析保留
+- **采样器版本兼容**：macOS 27 起移除 `dram` 采样器（`--samplers` 带无效名会整体失败，分项功耗全 0——这是 v3 在 macOS 27 上的隐性回归，4.0 修复）；helper 按 `ProcessInfo.operatingSystemVersion` 门控，<27 才附带 dram，DRAM 功耗在 27 上为 0（UI 已按 0 隐藏）
+- **启动失败退避**：powermetrics 存活 <10s 视为启动失败，连续 3 次进入 60s 冷却，防止重启风暴
+- **调用方校验**：`processIdentifier` → `SecCodeCopyGuestWithAttributes` → `SecCodeCheckValidity`（代码未被篡改）+ bundle id 匹配。局限：ad-hoc 签名无 TeamID，无法做同开发者强校验；Developer ID 后应改为硬编码 designated requirement
+- **Helper 并发模型**：`@unchecked Sendable` + 队列收敛（所有可变状态只在 powerQueue 串行队列访问）；`getComponentPower` 的 reply 闭包在协议中标注 `@Sendable`
+- **主程序端超时**：`readComponentPower` 3s semaphore，`needsHelperUpdate` 2s semaphore（保留，兼容异常场景）
 - **HelperProtocol 双定义**：主程序端 `@objc optional`（兼容旧 helper），Helper 端必选。未抽取 shared target 是有意设计
 
 ### 4.6 WebDAV 同步（`SyncEngine` + `WebDAVClient`）

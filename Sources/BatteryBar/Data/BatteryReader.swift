@@ -548,7 +548,8 @@ final class BatteryReader: @unchecked Sendable {
     }
 
     /// 当前要求的 helper 版本（不匹配则需重新安装）
-    private static let requiredHelperVersion = "3.0"
+    /// 4.0：powermetrics 从每次调用 spawn 改为懒启动常驻流式进程 + XPC 调用方校验
+    private static let requiredHelperVersion = "4.0"
 
     /// 检查已安装的 helper 版本是否满足要求
     /// 返回 true 表示需要更新（版本不匹配或无法通信）
@@ -674,6 +675,46 @@ final class BatteryReader: @unchecked Sendable {
             try? FileManager.default.removeItem(at: tempPlist)
         }
         return false
+    }
+
+    /// 卸载 helper：bootout 停止 root 守护进程并删除二进制与 plist（弹一次管理员密码框）。
+    /// 返回 false 表示用户取消密码框或卸载失败（守护进程保留，但 app 侧不再调用；
+    /// helper 4.0 起 powermetrics 有 60s 空闲自停，保留也不产生持续开销）。
+    @discardableResult
+    func uninstallHelper() -> Bool {
+        let installPath = "/Library/PrivilegedHelperTools/\(Self.helperIdentifier)"
+        let plistPath = "/Library/LaunchDaemons/\(Self.helperIdentifier).plist"
+
+        // 已不在则无需提权
+        guard FileManager.default.fileExists(atPath: installPath)
+            || FileManager.default.fileExists(atPath: plistPath) else {
+            resetHelperConnection()
+            return true
+        }
+
+        let script = """
+        do shell script "(launchctl bootout system/\(Self.helperIdentifier) 2>/dev/null || true) && rm -f '\(installPath)' '\(plistPath)'" with administrator privileges with prompt "BatteryBar 需要移除后台服务"
+        """
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            if task.terminationStatus == 0 {
+                resetHelperConnection()
+                batteryReaderLogger.info("Helper uninstalled")
+                return true
+            }
+            batteryReaderLogger.error("Helper uninstall cancelled or failed")
+            return false
+        } catch {
+            batteryReaderLogger.error("Failed to uninstall helper: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// 打开系统电池设置

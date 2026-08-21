@@ -21,7 +21,7 @@
 
 | 编号 | 问题 | 文件 | 状态 |
 |------|------|------|------|
-| T-01 | `powermetrics` 每 10s 子进程，CPU 占用不可忽略（自身功耗可能 >0.5W） | BatteryReader.swift | 待办（方案：Helper 内常驻流式 powermetrics 进程） |
+| T-01 | `powermetrics` 每 10s 子进程，CPU 占用不可忽略（自身功耗可能 >0.5W） | BatteryReader.swift / main.swift | ✅ 已修复（2026-08-22 helper 4.0：懒启动常驻流式进程，XPC 即时回缓存；60s 空闲自停，app 关闭/关开关后零开销） |
 | T-02 | `system_profiler` 极慢（1-3s），首次/过期后阻塞后台队列 | BatteryReader.swift | ✅ 已修复（后台 prefetchStaticInfo 缓存） |
 | T-03 | JSON 全量重写：`saveJSON` 每 60s 把整个数组重新编码写盘 | DataStore.swift | 部分修复（2026-08-22 补解码失败 .bak 备份 + 写盘错误日志；增量写盘仍待办） |
 
@@ -57,6 +57,7 @@
 | T-24 | PowerSampler previousLevel 未使用 | PowerSampler.swift | ✅ 已修复（删除） |
 | T-25 | CycleTracker totalEnergy 重复累加：每 tick 累加「起始电量-当前电量」，同一差值被反复累加，长循环虚增 | CycleTracker.swift | ✅ 已修复（2026-08-22 改为相邻 tick 正向差值累加，配套 CycleTrackerTests） |
 | T-26 | 机型基准 "m1"/"m2" 子串永不匹配：Apple Silicon hw.model 是 "Mac14,2" 平台键或 "MacBookAir10,1"，子串分类是死代码 | DrainRateCalculator.swift | ✅ 已修复（2026-08-22 改为典型功耗 ÷ 实测电池能量，容量未知才退回固定表，配套单测） |
+| T-27 | macOS 27 移除 dram 采样器，v3 helper `--samplers ...,dram` 整体失败，CPU/GPU 分项功耗自系统升级以来恒为 0 | main.swift | ✅ 已修复（2026-08-22 helper 4.0 按系统版本门控采样器 + 启动失败退避） |
 
 ---
 
@@ -105,6 +106,26 @@ swift test
 ---
 
 ## 五、变更日志
+
+### 2026-08-22（第二批）— Helper 4.0：流式 powermetrics + 调用方校验 + 真卸载；同步 Tab 配置警告
+
+> 背景：CI 因私有仓库 Actions 分钟数耗尽无法运行（三次零 step 启动失败），本批全部本地验证：helper 目标 `swift build` 完整通过（Swift 6 严格模式），app 侧 `swiftc -typecheck -swift-version 6` 通过，`SyncTab` 仅语法级验证（@State 宏本地不可展开）。
+
+#### Helper 4.0（版本号 3.0 → 4.0，已装旧版会自动触发重装）
+- **powermetrics 流式化（T-01 收尾）**：v3 每次 XPC 调用 spawn 一次 powermetrics（每 10s 冷启动一个 root 子进程）；4.0 改为懒启动常驻进程（`-i 10000` 流式输出，readabilityHandler 逐行解析缓存最新值），XPC 调用立即返回缓存；60s 无请求自动 terminate（app 退出/关闭开关后零开销）；活跃期内意外退出 1s 后自动重启；v3 的 5s 超时保护 + replyOnce 机制随 spawn 模式一起移除
+- **修复 macOS 27 分项功耗隐性回归（T-27）**：实机验证发现 macOS 27 已移除 `dram` 采样器，v3 的 `--samplers cpu_power,gpu_power,dram` 在 27 上整体失败（powermetrics 报 unrecognized sampler 退出），CPU/GPU 读数自系统升级以来一直是 0；4.0 按 `ProcessInfo.operatingSystemVersion` 门控（<27 才附带 dram），并加启动失败退避（存活 <10s 计失败，连续 3 次 60s 冷却，防重启风暴）
+- **XPC 调用方校验**：`shouldAcceptNewConnection` 中 pid → SecCode 反查，`SecCodeCheckValidity`（防篡改）+ bundle id == com.batterybar.app。局限（有意接受）：ad-hoc 签名无 TeamID，无法做同开发者强校验；Developer ID 后改为硬编码 designated requirement
+- **真卸载**：`BatteryReader.uninstallHelper()`（bootout + 删除二进制/plist，osascript 提权），`PowerSampler.disableHelper()` 关闭开关时调用——旧实现只翻 UserDefaults，root 守护进程永久残留
+- **Helper 并发模型**：`@unchecked Sendable` + 队列收敛（可变状态只在 powerQueue 串行访问）；协议 reply 闭包标注 `@Sendable`；本地 `swift build --target BatteryBarHelper` Swift 6 模式完整编译通过
+
+#### 同步 Tab（REQUIREMENTS 高优先级待办清零）
+- **配置不完整警告**：启用同步且服务器地址/用户名/密码任一为空时显示橙色警告条（password 含 Keychain 预填值）
+
+#### 待验证（CI 恢复后）
+- CI 完整编译 + `swift test`（本批与第一批 270cd42 均未经 CI 验证）
+- 实机：Helper 开关（安装 4.0 / 卸载）、分项功耗显示、`ps aux | grep powermetrics` 确认空闲自停
+
+---
 
 ### 2026-08-22 — 并发收尾（@MainActor）+ 状态栏功能补全 + 可测试化重构 + 两个算法 bug 修复
 

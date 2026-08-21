@@ -82,7 +82,7 @@
 #### Tab 3：组件功耗 ✅
 
 - 系统总功耗 + 电压/电流/功率/温度卡片
-- Helper 未开启时显示开启引导；开启后显示 CPU/GPU/内存分项
+- Helper 未开启时显示开启引导；开启后显示 CPU/GPU 分项（内存分项仅 macOS < 27——27 起系统移除 dram 采样器，UI 在数值为 0 时自动隐藏该行）
 - 平均/峰值/最低功耗、功耗趋势图
 
 #### Tab 4：同步 ✅（部分待办）
@@ -92,7 +92,8 @@
 - 同步间隔：15min / 1h / 6h / 手动 ✅
 - 同步方向：双向 / 仅上传 / 仅下载 ✅
 - 同步状态显示（idle/syncing/success/failed）✅
-- 📋 待办：同步日志（最近 50 条）、下次同步倒计时、配置不完整时的警告提示
+- 配置不完整（地址/用户名/密码为空）警告 ✅（2026-08-22）
+- 📋 待办：同步日志（最近 50 条）、下次同步倒计时
 
 ### 2.4 通知 ✅
 
@@ -114,7 +115,7 @@
 | 图表 | Swift Charts | — |
 | 持久化 | JSON 文件（DataStore，串行队列保护） | 原设计 SwiftData，实现期替换 |
 | 电池数据 | IOKit（IOPS + AppleSmartBattery registry） | **已适配 macOS 27**：容量字段改读 `BatteryData` 嵌套字典 |
-| 分项功耗 | XPC Helper + `powermetrics`（root，可选） | 原设计 IOReport（私有框架不稳定） |
+| 分项功耗 | XPC Helper + `powermetrics`（root，可选） | 原设计 IOReport（私有框架不稳定）。4.0 起 powermetrics 为懒启动常驻流式进程（首个请求启动，60s 空闲自停），XPC 校验调用方（签名有效 + bundle id 匹配）；关闭开关时真正卸载守护进程 |
 | 健康度 | `system_profiler`（60s 缓存） | — |
 | 温度 | IORegistry `Temperature` 键 | Apple Silicon 部分系统不暴露，UI 显示「—」 |
 | 电源事件 | NSWorkspace 通知（SleepWatcher） | — |
@@ -168,9 +169,9 @@ BatteryInfo       静态信息（designCapacity/maxCapacity/cycleCount/serial/ma
 | 优先级 | 项目 |
 |--------|------|
 | 高 | Option+点击打开主窗口 |
-| 高 | 同步 Tab 配置不完整（用户名/密码为空）时的警告 |
 | 中 | Popover 预计总续航区块；使用时长合计行 |
 | 中 | 同步日志（最近 50 条）、下次同步倒计时 |
-| 中 | powermetrics 子进程功耗优化（常驻流式进程方案）；JSON 增量写盘 |
-| 中 | Helper 调用方校验（auditToken）与真正的卸载（bootout + 删除） |
+| 中 | JSON 增量写盘；多设备合并后的保留策略（本地 24h 裁剪与合并数据的冲突） |
+| 中 | Helper 调用方校验升级：Developer ID 后改为硬编码 designated requirement（当前 ad-hoc 只能校验 bundle id） |
 | 低 | Developer ID 签名 + 公证（发布前） |
+| 低 | 状态栏事件驱动（IOPSNotification 替代 1s 轮询，降低自身功耗） |

@@ -26,6 +26,7 @@ struct SyncTab: View {
                 .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
 
                 if config.isEnabled {
+                    configWarning
                     serverSection
                     settingsSection
                     statusSection
@@ -84,6 +85,19 @@ struct SyncTab: View {
     }
 
     // MARK: - Server
+
+    /// 启用同步但服务器地址/用户名/密码未填全时的警告（password 含 Keychain 预填）
+    @ViewBuilder
+    private var configWarning: some View {
+        if config.serverURL.isEmpty || config.username.isEmpty || password.isEmpty {
+            Label("配置不完整：请填写服务器地址、用户名与密码，否则同步不会执行", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background { RoundedRectangle(cornerRadius: 10).fill(.orange.opacity(0.08)) }
+        }
+    }
 
     private var serverSection: some View {
         VStack(alignment: .leading, spacing: 12) {

@@ -390,9 +390,13 @@ final class PowerSampler: ObservableObject {
         return installed
     }
 
-    /// 用户手动关闭 Helper：停止读取分项功耗，清零数据
+    /// 用户手动关闭 Helper：卸载 root 守护进程（弹一次管理员密码框），
+    /// 停止读取分项功耗并清零数据。
+    /// 用户取消密码框时守护进程保留，但 app 停止调用——helper 4.0 起
+    /// powermetrics 有 60s 空闲自停，保留亦无持续开销。
     func disableHelper() {
         UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
+        reader.uninstallHelper()
         objectWillChange.send()
         cpuPower = 0
         gpuPower = 0
