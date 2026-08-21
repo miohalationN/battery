@@ -28,7 +28,7 @@ jobs:
         run: bash build-app.sh
 
       - name: Run tests
-        run: swift test 2>&1 || echo "::warning::部分测试失败，不阻断打包"
+        run: swift test
 
       - name: Package artifact
         run: |

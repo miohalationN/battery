@@ -11,7 +11,7 @@
 
 - 形态：菜单栏常驻 + 可选主窗口
 - 最低系统：macOS 14（Package.swift 声明）
-- 构建：纯 SPM，无 Xcode 工程；**本机无 Xcode 时依赖 GitHub Actions 云编译**（`.github/workflows/build.yml`，推 main 分支自动构建，产物用 `gh run download` 下载）
+- 构建：纯 SPM，无 Xcode 工程；**本地 Command Line Tools 即可完整构建与测试**（2026-08-22 起视图状态迁移到 @Observable 模型，不再使用 @State 宏——其宏插件仅随 Xcode 分发）。GitHub Actions 云编译保留作分发用途（`.github/workflows/build.yml`，推 main 分支自动构建，产物用 `gh run download` 下载）
 - 分发：DMG / `update.sh` 直接装到 `/Applications`（云编译产物建议装 `~/Applications`，旧 root 版本无法覆盖）
 - 权限：默认零权限运行；CPU/GPU 分项功耗需用户在 PowerTab 手动开启 Helper（安装时弹一次管理员密码）
 - 开机自启动：`SMAppService.mainApp`（macOS 13+ Login Item），状态栏右键菜单开关；要求 app 为正规 bundle 且位于 /Applications 或 ~/Applications，直接跑 .build 裸二进制注册会失败（开关弹提示说明）
@@ -284,12 +284,13 @@ SyncEngine.sync(config:)
 8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间；≤20% 且未充电时变红。用 `NSTextField.sizeToFit() + fittingSize` 测量文字精确宽度（`NSString.size` 会因小数丢损失裁切 `%`），`ceil + 2pt` 余量设为 `statusItem.length`（固定值，非 variableLength），消除 NSStatusBarButton 系统默认 padding；textField 右对齐到 button 右边缘，余量在左侧（`%` 紧贴系统电池图标）
 9. **状态栏深色/浅色模式自动跟随**：`textField.textColor = .labelColor`（低电量时 `.systemRed`，同为动态色），系统外观切换时自动更新，无需手动监听
 10. **SyncEngine 并发保护**：`tryStartSyncing()` / `endSyncing()` 同步函数封装 NSLock（async 函数中不能直接调用 NSLock.lock/unlock）
-11. **修改前先读代码**，修改后运行 `swift build` 验证；无 Xcode 环境时用 `xcrun swiftc -parse` 做语法级检查，非视图文件可用 `xcrun swiftc -typecheck -swift-version 6`（数据/同步/计算层 + PopoverView 不含 @State 宏，可本地完整类型检查），推送后由 GitHub Actions 验证完整编译，产物安装到 `~/Applications` 实机确认
+11. **修改前先读代码**，修改后运行 `swift build` 验证；涉及算法/数据逻辑跑 `swift test`（本地 CLT 可完整构建与测试）。涉及 UI 的改动 `bash build-app.sh && open .build/debug/BatteryBar.app` 实机确认
 12. **macOS 27 IOKit 字段兼容**：顶层 `DesignCapacity` 已移除、`MaxCapacity` 语义变为百分比，容量类字段必须优先读 `BatteryData` 嵌套字典（`DesignCapacity`/`FullChargeCapacity`），保留旧系统回退；`Temperature` 键可能不存在，UI 必须容忍 0 值（显示「—」，不得当作 0°C 参与算法）
 13. **Popover 卡片化设计**：分区用圆角卡片（`.quaternary` 填充），禁用 Divider；充电/已插电未充电/放电三种状态统一结构且均带电量进度条；电压/电流只能作为次要小字展示
 14. **并发隔离**：`PowerSampler` 与 `AppDelegate` 均为 `@MainActor`，`@Published` 一律 `private(set)`；阻塞调用（system_profiler / XPC helper）必须经 `Task.detached` 出主线程；休眠回调用 `MainActor.assumeIsolated`（SleepWatcher 通知在主线程派发）
 15. **主窗口不走 SwiftUI WindowGroup**：AppDelegate `showMainWindow()` 以 NSWindow + NSHostingController 创建，`isReleasedWhenClosed = false`；新开窗入口（右键菜单 / Popover 查看详情）一律调 `showMainWindow()`，不要恢复 `@Environment(\.openWindow)`
 16. **CycleTracker / DrainRateCalculator 可测试性**：时钟与落盘经 init/参数注入，配套单测在 `Tests/BatteryBarTests/`；修改算法必须同步更新测试
+17. **视图状态用 @Observable 模型，禁止 @State**：@State 在新版 SDK 是宏（插件仅随 Xcode 分发，CLT 编译不过）。模式：每个 Tab 一个 `@Observable final class XxxModel`，由 AppDelegate 持有并注入（跨窗口关闭/重开保留状态）；视图里 `@Bindable var model` + 读侧计算属性透传（body 沿用原属性名）。**本地 `swift test` 可跑，CI 测试失败会阻断打包**（旧 `|| echo warning` 曾放过一个过期断言半个多月）
 
 ---
 

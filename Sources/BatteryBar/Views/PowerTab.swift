@@ -1,19 +1,34 @@
 import SwiftUI
 import Charts
+import Observation
+
+/// PowerTab 的视图状态模型（@Observable 说明见 CycleTabModel）
+@Observable
+final class PowerTabModel {
+    var snapshots: [BatterySnapshot] = []
+    var lastSnapshotUpdate: Date = .distantPast
+    var selectedTime: Date?
+    var timeRange: TimeRange = .day6
+    // 图表曲线显示开关
+    var showCPU = false
+    var showGPU = false
+    var showDisplay = false
+    var showDRAM = false
+    // Helper 安装中状态
+    var isInstallingHelper = false
+}
 
 struct PowerTab: View {
     @ObservedObject var sampler: PowerSampler
-    @State private var snapshots: [BatterySnapshot] = []
-    @State private var lastSnapshotUpdate: Date = .distantPast
-    @State private var selectedTime: Date?
-    @State private var timeRange: TimeRange = .day6
-    // 图表曲线显示开关
-    @State private var showCPU = false
-    @State private var showGPU = false
-    @State private var showDisplay = false
-    @State private var showDRAM = false
-    // Helper 安装中状态
-    @State private var isInstallingHelper = false
+    @Bindable var model: PowerTabModel
+
+    // 读侧透传：body 内沿用原属性名，改动面最小
+    private var snapshots: [BatterySnapshot] { model.snapshots }
+    private var timeRange: TimeRange { model.timeRange }
+    private var showCPU: Bool { model.showCPU }
+    private var showGPU: Bool { model.showGPU }
+    private var showDisplay: Bool { model.showDisplay }
+    private var showDRAM: Bool { model.showDRAM }
 
     var body: some View {
         ScrollView {
@@ -34,14 +49,14 @@ struct PowerTab: View {
             .padding(20)
         }
         .onAppear {
-            snapshots = DataStore.shared.allSnapshots()
-            lastSnapshotUpdate = Date()
+            model.snapshots = DataStore.shared.allSnapshots()
+            model.lastSnapshotUpdate = Date()
         }
         .onReceive(sampler.$tick) { _ in
             let now = Date()
-            if now.timeIntervalSince(lastSnapshotUpdate) > 60 {
-                snapshots = DataStore.shared.allSnapshots()
-                lastSnapshotUpdate = now
+            if now.timeIntervalSince(model.lastSnapshotUpdate) > 60 {
+                model.snapshots = DataStore.shared.allSnapshots()
+                model.lastSnapshotUpdate = now
             }
         }
     }
@@ -231,7 +246,7 @@ struct PowerTab: View {
                     .font(.subheadline.bold())
                     .padding(.top, 4)
                 Spacer()
-                Picker("时间范围", selection: $timeRange) {
+                Picker("时间范围", selection: $model.timeRange) {
                     ForEach(TimeRange.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
@@ -242,13 +257,13 @@ struct PowerTab: View {
             // 组件曲线勾选（仅 Helper 开启且有数据时显示）
             if sampler.helperEnabled && hasComponentData {
                 HStack(spacing: 12) {
-                    toggleChip("CPU", isOn: $showCPU, color: .blue)
-                    toggleChip("GPU", isOn: $showGPU, color: .purple)
+                    toggleChip("CPU", isOn: $model.showCPU, color: .blue)
+                    toggleChip("GPU", isOn: $model.showGPU, color: .purple)
                     if recent.contains(where: { $0.dramPower > 0 }) {
-                        toggleChip("内存", isOn: $showDRAM, color: .teal)
+                        toggleChip("内存", isOn: $model.showDRAM, color: .teal)
                     }
                     if recent.contains(where: { $0.displayPower > 0 }) {
-                        toggleChip("显示器", isOn: $showDisplay, color: .orange)
+                        toggleChip("显示器", isOn: $model.showDisplay, color: .orange)
                     }
                     Spacer()
                 }
@@ -309,22 +324,23 @@ struct PowerTab: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if isInstallingHelper {
+                if model.isInstallingHelper {
                     ProgressView().controlSize(.small)
                 } else {
                     Toggle("", isOn: Binding(
                         get: { enabled },
                         set: { newValue in
                             if newValue {
-                                isInstallingHelper = true
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    sampler.enableHelper()
-                                    DispatchQueue.main.async {
-                                        isInstallingHelper = false
-                                    }
+                                model.isInstallingHelper = true
+                                // 安装/卸载走 Task：osascript 阻塞在后台线程执行，主线程保持响应
+                                Task { @MainActor in
+                                    await sampler.enableHelperInBackground()
+                                    model.isInstallingHelper = false
                                 }
                             } else {
-                                sampler.disableHelper()
+                                Task { @MainActor in
+                                    await sampler.disableHelperInBackground()
+                                }
                             }
                         }
                     ))
@@ -400,7 +416,7 @@ struct PowerTab: View {
                         .lineStyle(StrokeStyle(lineWidth: 1))
                 }
             }
-            if let selected = selectedTime {
+            if let selected = model.selectedTime {
                 RuleMark(x: .value("选中", selected))
                     .foregroundStyle(.tertiary)
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
@@ -423,7 +439,7 @@ struct PowerTab: View {
                 }
             }
         }
-        .chartXSelection(value: $selectedTime)
+        .chartXSelection(value: $model.selectedTime)
         .chartXAxis {
             AxisMarks(values: .stride(by: timeRange.axisStride.component, count: timeRange.axisStride.count)) {
                 AxisValueLabel(format: .dateTime.hour().minute())

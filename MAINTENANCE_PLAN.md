@@ -58,6 +58,7 @@
 | T-25 | CycleTracker totalEnergy 重复累加：每 tick 累加「起始电量-当前电量」，同一差值被反复累加，长循环虚增 | CycleTracker.swift | ✅ 已修复（2026-08-22 改为相邻 tick 正向差值累加，配套 CycleTrackerTests） |
 | T-26 | 机型基准 "m1"/"m2" 子串永不匹配：Apple Silicon hw.model 是 "Mac14,2" 平台键或 "MacBookAir10,1"，子串分类是死代码 | DrainRateCalculator.swift | ✅ 已修复（2026-08-22 改为典型功耗 ÷ 实测电池能量，容量未知才退回固定表，配套单测） |
 | T-27 | macOS 27 移除 dram 采样器，v3 helper `--samplers ...,dram` 整体失败，CPU/GPU 分项功耗自系统升级以来恒为 0 | main.swift | ✅ 已修复（2026-08-22 helper 4.0 按系统版本门控采样器 + 启动失败退避） |
+| T-28 | SyncConfigTests 默认值断言过期（serverURL 应为坚果云默认而非空），CI `|| echo warning` 放水下长期未发现 | SyncConfigTests.swift / build.yml | ✅ 已修复（2026-08-22 修正断言 + 恢复 CI 测试门禁） |
 
 ---
 
@@ -106,6 +107,29 @@ swift test
 ---
 
 ## 五、变更日志
+
+### 2026-08-22（第三批）— 视图状态迁移 @Observable：本地 CLT 完整构建 + 测试跑通；仓库转公开前隐私清理
+
+> 背景：CI 因私有仓库计费问题持续不可用，且 @State 宏插件仅随 Xcode 分发（CLT 无法编译）。将视图状态全部迁到 @Observable 模型后，**本地 Command Line Tools 即可完整构建与跑单元测试**，摆脱对 Xcode 与云编译的强依赖。
+
+#### 视图状态迁移（23 处 @State → 0）
+- **模式**：每个 Tab 一个 `@Observable final class XxxModel`（UsageTabModel/CycleTabModel/PowerTabModel/SyncTabModel），由 AppDelegate 持有并注入 ContentView（跨窗口关闭/重开保留状态）；视图以 `@Bindable var model` 接收 + 读侧计算属性透传，body 改动面最小。ObservationMacros 插件 CLT 自带
+- **ContentView**：去掉 `@State selectedTab`（无程序化切 Tab 需求，TabView 不再绑 selection）；四个模型从 AppDelegate 传入
+- **UsageTab**：`selectedPoint` 经自定义 Binding 写入模型（chartXSelection 原本就是 get/set 闭包，无 $ 投影需求）
+
+#### 顺带修复
+- **PowerTab helper 安装跨线程调用（编译级 bug）**：旧代码在 `DispatchQueue.global` 里同步调用已 @MainActor 化的 `sampler.enableHelper()`，Swift 6 下无法编译（视图此前从未在本地编译过，CI 一直没跑成）。改为 `enableHelperInBackground()` / `disableHelperInBackground()`（osascript 在 Task.detached 执行，主线程保持响应），替换同步版本
+- **过期测试断言（T-28）**：`SyncConfigTests.defaultConfigValues` 期望默认 serverURL 为空，实际 2026-07-14 起默认坚果云——在 CI `|| echo warning` 放水下带病运行半个多月。修正断言
+- **CI 测试门禁恢复**：`build.yml` 移除 `swift test || echo warning`，测试失败重新阻断打包
+
+#### 隐私清理（仓库转公开前）
+- MAINTENANCE_PLAN 变更日志 19 处 `file:///Users/<用户名>/...` 链接改为仓库相对路径；全部历史提交经 filter-branch 重写清洗；提交者元数据统一为 BatteryBar \<batterybar@local\>（原两个提交带本机用户名与主机名）
+- 核查确认：`.claude/`、`.reasonix/`、`claude-np`、`.DS_Store`、`BatteryBar.dmg` 均未被 git 跟踪；代码中 password/serial 均为字段名非数据；WebDAV 凭据只存 Keychain
+
+#### 验证
+- 本地 `swift build`（Swift 6 严格模式）全量通过；`swift test` 37/37 通过（本仓首次本地跑测试）
+
+---
 
 ### 2026-08-22（第二批）— Helper 4.0：流式 powermetrics + 调用方校验 + 真卸载；同步 Tab 配置警告
 

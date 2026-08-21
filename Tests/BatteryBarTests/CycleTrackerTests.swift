@@ -7,7 +7,7 @@ import Foundation
 
     private let t0 = Date(timeIntervalSince1970: 1_720_780_800)
 
-    @Test func recordsCycleOnPlugIn() {
+    @Test func recordsCycleOnPlugIn() throws {
         var saved: [ChargeCycle] = []
         var current = t0
         let tracker = CycleTracker(now: { current }, onSave: { saved.append($0) })
@@ -35,7 +35,7 @@ import Foundation
         #expect(cycle.endDate == t0.addingTimeInterval(6000))
     }
 
-    @Test func ignoresLevelBounceInEnergy() {
+    @Test func ignoresLevelBounceInEnergy() throws {
         // 电量读数回跳（98 → 98.5 → 96.5）：只累计正向差值，不累计回跳
         var saved: [ChargeCycle] = []
         var current = t0
@@ -87,7 +87,7 @@ import Foundation
         #expect(saved.isEmpty)
     }
 
-    @Test func startsCycleAtLaunchWhenDischarging() {
+    @Test func startsCycleAtLaunchWhenDischarging() throws {
         var saved: [ChargeCycle] = []
         var current = t0
         let tracker = CycleTracker(now: { current }, onSave: { saved.append($0) })

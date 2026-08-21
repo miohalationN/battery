@@ -377,26 +377,30 @@ final class PowerSampler: ObservableObject {
         reader.openBatterySettings()
     }
 
-    /// 用户手动开启 Helper：触发安装（会弹一次管理员密码框）
-    /// 仅当安装成功后才写入 UserDefaults，避免密码取消/错误时开关仍显示开启
-    @discardableResult
-    func enableHelper() -> Bool {
-        let installed = reader.installHelperIfNeeded()
+    /// 用户手动开启 Helper：安装（osascript 弹一次管理员密码框）在后台线程执行，
+    /// 主线程保持响应；仅当安装成功后才写入 UserDefaults，避免密码取消/错误时开关仍显示开启。
+    func enableHelperInBackground() async {
+        let reader = reader
+        let installed = await Task.detached(priority: .userInitiated) {
+            reader.installHelperIfNeeded()
+        }.value
         if installed {
             UserDefaults.standard.set(true, forKey: "BatteryBarHelperEnabled")
         }
         helperNeedsUpdate = !installed
         objectWillChange.send()
-        return installed
     }
 
-    /// 用户手动关闭 Helper：卸载 root 守护进程（弹一次管理员密码框），
+    /// 用户手动关闭 Helper：后台卸载 root 守护进程（弹一次管理员密码框），
     /// 停止读取分项功耗并清零数据。
     /// 用户取消密码框时守护进程保留，但 app 停止调用——helper 4.0 起
     /// powermetrics 有 60s 空闲自停，保留亦无持续开销。
-    func disableHelper() {
+    func disableHelperInBackground() async {
+        let reader = reader
+        await Task.detached(priority: .userInitiated) {
+            _ = reader.uninstallHelper()
+        }.value
         UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
-        reader.uninstallHelper()
         objectWillChange.send()
         cpuPower = 0
         gpuPower = 0

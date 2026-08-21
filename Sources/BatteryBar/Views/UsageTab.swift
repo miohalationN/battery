@@ -1,11 +1,22 @@
 import SwiftUI
 import Charts
+import Observation
+
+/// UsageTab 的视图状态模型（@Observable 说明见 CycleTabModel）
+@Observable
+final class UsageTabModel {
+    var snapshots: [BatterySnapshot] = []
+    var lastSnapshotUpdate: Date = .distantPast
+    var selectedPoint: (relMin: Double, level: Double, time: Date)?
+}
 
 struct UsageTab: View {
     @ObservedObject var sampler: PowerSampler
-    @State private var snapshots: [BatterySnapshot] = []
-    @State private var lastSnapshotUpdate: Date = .distantPast
-    @State private var selectedPoint: (relMin: Double, level: Double, time: Date)?
+    var model: UsageTabModel
+
+    // 读侧透传：body 内沿用原属性名，改动面最小
+    private var snapshots: [BatterySnapshot] { model.snapshots }
+    private var selectedPoint: (relMin: Double, level: Double, time: Date)? { model.selectedPoint }
 
     var body: some View {
         ScrollView {
@@ -37,14 +48,14 @@ struct UsageTab: View {
             .padding(20)
         }
         .onAppear {
-            snapshots = DataStore.shared.allSnapshots()
-            lastSnapshotUpdate = Date()
+            model.snapshots = DataStore.shared.allSnapshots()
+            model.lastSnapshotUpdate = Date()
         }
         .onReceive(sampler.$tick) { _ in
             let now = Date()
-            if now.timeIntervalSince(lastSnapshotUpdate) > 60 {
-                snapshots = DataStore.shared.allSnapshots()
-                lastSnapshotUpdate = now
+            if now.timeIntervalSince(model.lastSnapshotUpdate) > 60 {
+                model.snapshots = DataStore.shared.allSnapshots()
+                model.lastSnapshotUpdate = now
             }
         }
     }
@@ -431,7 +442,7 @@ struct UsageTab: View {
             }
         }
         if let b = best {
-            selectedPoint = b
+            model.selectedPoint = b
         }
     }
 

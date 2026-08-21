@@ -34,7 +34,8 @@ import Foundation
         let config = SyncConfig.default
 
         #expect(config.isEnabled == false)
-        #expect(config.serverURL == "")
+        // 默认服务器地址为坚果云 WebDAV（2026-07-14 起；此断言曾因 CI 测试失败不阻断而长期未被发现）
+        #expect(config.serverURL == "https://dav.jianguoyun.com/dav/")
         #expect(config.remotePath == "/BatteryBar")
         #expect(config.syncInterval == .hour1)
         #expect(config.syncDirection == .bidirectional)

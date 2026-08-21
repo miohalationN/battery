@@ -21,11 +21,14 @@ macOS 菜单栏电池监控应用
 
 ## 开发
 
-本地需要完整 Xcode（仅 Command Line Tools 无法编译 SwiftUI 宏）。无 Xcode 环境时依赖 GitHub Actions 云编译：
+本地即可完整构建与测试（Command Line Tools 足够，**无需 Xcode**——视图状态用 `@Observable` 模型而非 `@State` 宏；`@State` 的宏插件仅随 Xcode 分发）：
 
 ```bash
-# 本地编译（需要 Xcode）
+# 编译（含 helper）
 swift build
+
+# 单元测试
+swift test
 
 # 运行
 open .build/debug/BatteryBar.app
@@ -34,7 +37,7 @@ open .build/debug/BatteryBar.app
 bash update.sh
 ```
 
-### 云编译（无 Xcode 环境）
+### 云编译（可选，发布用）
 
 推送代码到 GitHub 后，Actions 会自动编译并打包 `BatteryBar.app`（约 4 分钟）：
 
@@ -46,8 +49,6 @@ bash update.sh
    ditto -x -k BatteryBar.zip ~/Applications/
    open ~/Applications/BatteryBar.app
    ```
-
-本地语法预检查（无需 Xcode）：`xcrun swiftc -parse Sources/**/*.swift`
 
 ## 技术栈
 

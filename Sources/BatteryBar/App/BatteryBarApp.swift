@@ -96,6 +96,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var mainWindow: NSWindow?
     let sampler = PowerSampler()
     let syncEngine = SyncEngine()
+    // 各 Tab 视图状态模型（@Observable）：AppDelegate 持有，跨窗口关闭/重开保留
+    let usageModel = UsageTabModel()
+    let cycleModel = CycleTabModel()
+    let powerModel = PowerTabModel()
+    let syncModel = SyncTabModel()
     private var observer: NSObjectProtocol?
     private var textField: NSTextField?
 
@@ -267,9 +272,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.contentViewController = NSHostingController(
-            rootView: ContentView()
-                .environmentObject(sampler)
-                .environmentObject(syncEngine)
+            rootView: ContentView(
+                usageModel: usageModel,
+                cycleModel: cycleModel,
+                powerModel: powerModel,
+                syncModel: syncModel
+            )
+            .environmentObject(sampler)
+            .environmentObject(syncEngine)
         )
         window.makeKeyAndOrderFront(nil)
         mainWindow = window
@@ -337,25 +347,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 struct ContentView: View {
     @EnvironmentObject var sampler: PowerSampler
     @EnvironmentObject var syncEngine: SyncEngine
-    @State private var selectedTab = 0
+    let usageModel: UsageTabModel
+    let cycleModel: CycleTabModel
+    let powerModel: PowerTabModel
+    let syncModel: SyncTabModel
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            UsageTab(sampler: sampler)
+        TabView {
+            UsageTab(sampler: sampler, model: usageModel)
                 .tabItem { Label("首页", systemImage: "house.fill") }
-                .tag(0)
 
-            CycleTab()
+            CycleTab(model: cycleModel)
                 .tabItem { Label("循环统计", systemImage: "arrow.triangle.2.circlepath") }
-                .tag(1)
 
-            PowerTab(sampler: sampler)
+            PowerTab(sampler: sampler, model: powerModel)
                 .tabItem { Label("组件功耗", systemImage: "bolt.fill") }
-                .tag(2)
 
-            SyncTab(syncEngine: syncEngine)
+            SyncTab(syncEngine: syncEngine, model: syncModel)
                 .tabItem { Label("同步", systemImage: "arrow.triangle.branch") }
-                .tag(3)
         }
         .background(.thickMaterial)
     }
