@@ -122,7 +122,7 @@
 | 通知 | UserNotifications | — |
 | WebDAV | 自建 URLSession + XMLParser | 无第三方依赖 |
 | 凭据 | Keychain（AfterFirstUnlock） | — |
-| 构建 | SPM + shell 脚本 + **GitHub Actions 云编译** | 本机无 Xcode（CLT 缺 SwiftUI 宏插件），推 main 分支云端编译 |
+| 构建 | SPM + shell 脚本 + **GitHub Actions 云编译（release）** | 视图用 @State（宏插件随 Xcode 分发），推 main 分支云端编译；分发必须 release 构建（debug 运行时空转 ~38% CPU，T-29） |
 | 签名 | ad-hoc | 原设计 Developer ID + 公证（发布时再做） |
 | App Sandbox | **未开启** | Helper 安装需 osascript 提权，沙盒下不可行 |
 

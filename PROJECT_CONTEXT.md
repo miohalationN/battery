@@ -11,7 +11,7 @@
 
 - 形态：菜单栏常驻 + 可选主窗口
 - 最低系统：macOS 14（Package.swift 声明）
-- 构建：纯 SPM，无 Xcode 工程；**本地 Command Line Tools 即可完整构建与测试**（2026-08-22 起视图状态迁移到 @Observable 模型，不再使用 @State 宏——其宏插件仅随 Xcode 分发）。GitHub Actions 云编译保留作分发用途（`.github/workflows/build.yml`，推 main 分支自动构建，产物用 `gh run download` 下载）
+- 构建：纯 SPM，无 Xcode 工程；视图使用 @State（宏插件仅随 Xcode 分发），**编译依赖 Xcode——走 GitHub Actions 云编译**（`.github/workflows/build.yml`，推 main 分支自动构建，产物用 `gh run download` 下载装 `~/Applications`）。本地 CLT 可做语法检查与非视图层类型检查；曾于 2026-08-22 短暂迁移 @Observable 实现过本地构建，后因窗口材质退化回滚（见变更日志第五批）
 - 分发：DMG / `update.sh` 直接装到 `/Applications`（云编译产物建议装 `~/Applications`，旧 root 版本无法覆盖）
 - 权限：默认零权限运行；CPU/GPU 分项功耗需用户在 PowerTab 手动开启 Helper（安装时弹一次管理员密码）
 - 开机自启动：`SMAppService.mainApp`（macOS 13+ Login Item），状态栏右键菜单开关；要求 app 为正规 bundle 且位于 /Applications 或 ~/Applications，直接跑 .build 裸二进制注册会失败（开关弹提示说明）
@@ -96,24 +96,22 @@ battery/
 ```
 BatteryBarApp (@main)
   ├─ AppDelegate（@MainActor；持有唯一的 PowerSampler + SyncEngine 实例）
-  │    ├─ NSStatusItem + NSStatusBarButton + 子 NSTextField（纯文字百分比）
-  │    │    ├─ statusItem.length = ceil(fittingSize.width) + 2（固定宽度，消除系统 padding）
-  │    │    ├─ textField.textColor = .labelColor（自动跟随系统深色/浅色模式）
-  │    │    ├─ ≤20% 且未充电时文字变 .systemRed（低电量变红）
+  │    ├─ NSStatusItem + NSStatusBarButton（纯文字百分比）
+  │    │    ├─ attributedTitle + 固定 statusItem.length（NSAttributedString 测宽 + ceil + 2pt）
+  │    │    ├─ ≤20% 且未充电时前景色变 .systemRed；labelColor 动态跟随深浅模式
   │    │    ├─ sendAction(on: [.leftMouseUp, .rightMouseUp])：左键 togglePopover，右键 NSMenu
-  │    │    │    （打开主窗口 / 开机自启动勾选 / 电池设置 / 关于 / 退出）
-  │    │    └─ 右键菜单临时挂到 statusItem.menu，performClick 显示后置 nil 恢复左键行为
-  │    ├─ NSPopover → PopoverMenuBarView(sampler:onOpenDetails:)
-  │    ├─ showMainWindow()：NSWindow + NSHostingController(ContentView)，frameAutosaveName 记忆位置，
-  │    │    isReleasedWhenClosed = false（关窗不销毁，可反复打开）；
-  │    │    开窗 setActivationPolicy(.regular)，windowWillClose 后回 .accessory
+  │    │    │    （打开主窗口[经 OpenWindowRelay 通知] / 开机自启动勾选 / 电池设置 / 关于 / 退出）
+  │    │    └─ 右键菜单临时挂 statusItem.menu，performClick 显示后置 nil 恢复左键行为
+  │    ├─ NSPopover → PopoverMenuBarView（内含 openWindow 环境与 findExistingMainWindow）
   │    ├─ 开机自启动：SMAppService.mainApp register/unregister（右键菜单开关）
   │    └─ syncEngine.start(config:)（若 isEnabled && syncInterval != .manual）
-  └─ Scene 仅 Settings { EmptyView() }（占位；主窗口不走 WindowGroup，
-     启动不开窗，避免自动开窗与激活策略切换的时序问题）
+  └─ WindowGroup("main") → ContentView → TabView(4 个 Tab)
+       ├─ environmentObject(appDelegate.sampler) / environmentObject(appDelegate.syncEngine)
+       ├─ onAppear/onDisappear 切换 Dock 图标显示（.regular/.accessory）
+       └─ background(OpenWindowRelay())：右键菜单「打开主窗口」通知 → openWindow(id:"main")
 ```
 
-AppDelegate 为 @MainActor，持有唯一的 PowerSampler 和 SyncEngine 实例，主窗口通过 `environmentObject` 注入共享。`start()` 内部 `guard !isStarted` 保证幂等。SyncTab 通过 `@ObservedObject syncEngine` 实时显示同步状态（idle/syncing/success/failed）。
+AppDelegate 为 @MainActor，持有唯一的 PowerSampler 和 SyncEngine 实例，主窗口通过 `appDelegate.sampler` / `appDelegate.syncEngine` 共享。`start()` 内部 `guard !isStarted` 保证幂等。SyncTab 通过 `@ObservedObject syncEngine` 实时显示同步状态（idle/syncing/success/failed）。
 
 ### 4.2 采样循环（`PowerSampler`，@MainActor）
 
@@ -290,10 +288,10 @@ SyncEngine.sync(config:)
 14. **并发隔离**：`PowerSampler` 与 `AppDelegate` 均为 `@MainActor`，`@Published` 一律 `private(set)`；阻塞调用（system_profiler / XPC helper）必须经 `Task.detached` 出主线程；休眠回调用 `MainActor.assumeIsolated`（SleepWatcher 通知在主线程派发）
 15. **主窗口不走 SwiftUI WindowGroup**：AppDelegate `showMainWindow()` 以 NSWindow + NSHostingController 创建，`isReleasedWhenClosed = false`；新开窗入口（右键菜单 / Popover 查看详情）一律调 `showMainWindow()`，不要恢复 `@Environment(\.openWindow)`
 16. **CycleTracker / DrainRateCalculator 可测试性**：时钟与落盘经 init/参数注入，配套单测在 `Tests/BatteryBarTests/`；修改算法必须同步更新测试
-17. **视图状态用 @Observable 模型，禁止 @State**：@State 在新版 SDK 是宏（插件仅随 Xcode 分发，CLT 编译不过）。模式：每个 Tab 一个 `@Observable final class XxxModel`，由 AppDelegate 持有并注入（跨窗口关闭/重开保留状态）；视图里 `@Bindable var model` + 读侧计算属性透传（body 沿用原属性名）。**本地 `swift test` 可跑，CI 测试失败会阻断打包**（旧 `|| echo warning` 曾放过一个过期断言半个多月）
+17. **视图状态用 @State（SwiftUI 标准方式），主窗口走 WindowGroup**：曾迁移 @Observable + 裸 NSWindow 以实现本地 CLT 构建，导致窗口材质/液态玻璃渲染退化，2026-08-22 按用户要求回滚。CI 测试失败会阻断打包（旧 `|| echo warning` 曾放过一个过期断言半个多月）
 18. **@Published 必须值变才写**：每秒无条件写会让 objectWillChange 风暴式触发所有观察视图重算（曾在无窗口时烧约 40% CPU）；`sampleUI` 对 level/isCharging/wattage(0.05W 阈值)/温度/电压/电流/BatteryInfo(需 Equatable) 全部门控，`lastUpdateTime` 非 @Published，已删除每秒翻转的 `tick`（视图用 60s Timer 刷新快照）
 19. **分发必须 release 构建**：Swift 6 debug 构建的运行时在本机实测空转约 38% CPU（release 同代码为 0，T-29）；`build-app.sh`/`build.sh`/`build-dmg.sh`/`update.sh`/CI 均已 `-c release`
-20. **入口为纯 AppKit**：`@main enum BatteryBarApp` 直接 `NSApplication.shared.run()`，无 SwiftUI Scene；SwiftUI 仅用于 Popover 与主窗口内容（NSHostingController）
+20. **状态栏刷新门控保留**：refreshTitle 文字/低电量态未变时跳过 title/length 赋值；宽度用 `button.attributedTitle` + `NSAttributedString.size()` 测宽 + 固定 length（禁止 NSTextField 子视图，见 T-30）
 
 ---
 
