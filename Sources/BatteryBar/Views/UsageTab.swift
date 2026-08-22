@@ -10,6 +10,14 @@ struct UsageTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                PageHeader(
+                    title: "电池概览",
+                    subtitle: "续航、健康与当前充放电状态",
+                    systemImage: statusIcon,
+                    tint: statusColor,
+                    badge: "\(Int(sampler.currentLevel))%"
+                )
+
                 // 1. 状态英雄卡片
                 statusHeroCard
 
@@ -34,7 +42,9 @@ struct UsageTab: View {
                 // 6. 电池信息卡片
                 batteryInfoCard
             }
-            .padding(20)
+            .padding(.horizontal, BBDesign.pagePadding)
+            .padding(.top, 46)
+            .padding(.bottom, BBDesign.pagePadding)
         }
         .onAppear {
             snapshots = DataStore.shared.allSnapshots()
@@ -66,7 +76,7 @@ struct UsageTab: View {
         if isFullCharge { return .green }
         if sampler.currentIsCharging { return .green }
         if sampler.currentLevel <= 20 { return .red }
-        return .accentColor
+        return .bbBlue
     }
 
     private var statusIcon: String {
@@ -108,7 +118,7 @@ struct UsageTab: View {
                 Text("健康度").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbMint)
     }
 
     private var chargingHero: some View {
@@ -145,7 +155,7 @@ struct UsageTab: View {
                     .font(.system(size: 10, design: .rounded).monospacedDigit()).foregroundStyle(.tertiary)
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbMint)
     }
 
     private var dischargingHero: some View {
@@ -186,15 +196,15 @@ struct UsageTab: View {
                     .font(.system(size: 10, design: .rounded).monospacedDigit()).foregroundStyle(.tertiary)
             }
         }
-        .glassCard()
+        .glassCard(accent: statusColor)
     }
 
     // MARK: - 2. 关键指标 4 格
 
     private var metricsGrid: some View {
         HStack(spacing: BBDesign.itemSpacing) {
-            StatTile(icon: "arrow.triangle.2.circlepath", tint: .blue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环")
-            StatTile(icon: "heart.fill", tint: .green, value: String(format: "%.0f", sampler.systemHealthPercent), unit: "%", label: "健康度")
+            StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环")
+            StatTile(icon: "heart.fill", tint: .bbMint, value: String(format: "%.0f", sampler.systemHealthPercent), unit: "%", label: "健康度")
             StatTile(icon: "thermometer", tint: .orange,
                      value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
                      unit: sampler.currentTemperature > 0.5 ? "°C" : "", label: "温度")
@@ -246,7 +256,7 @@ struct UsageTab: View {
                     SectionHeader(
                         title: sampler.currentIsCharging ? "充电曲线" : "耗电曲线",
                         systemImage: "chart.line.uptrend.xyaxis",
-                        tint: sampler.currentIsCharging ? .green : .accentColor
+                        tint: sampler.currentIsCharging ? .bbMint : .bbBlue
                     )
                     if let first = recent.first {
                         Text("起始 \(Int(first.level))%")
@@ -258,20 +268,35 @@ struct UsageTab: View {
                     }
                 }
 
-                if points.isEmpty {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 6) {
-                            Image(systemName: "chart.line.uptrend.xyaxis").font(.system(size: 24)).foregroundStyle(.quaternary)
-                            Text("数据采集中…").font(.system(size: 11)).foregroundStyle(.secondary)
-                        }.frame(height: 140)
-                        Spacer()
+                HStack(spacing: 12) {
+                    ChartLegendItem(
+                        label: "电量",
+                        color: sampler.currentIsCharging ? .bbMint : .bbBlue,
+                        value: points.last.map { "\(Int($0.level))%" }
+                    )
+                    if let first = points.first, let last = points.last {
+                        let delta = last.level - first.level
+                        Text(String(format: "%@%.0f%%", delta > 0 ? "+" : "", delta))
+                            .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
+                            .foregroundStyle(delta >= 0 ? Color.bbMint : Color.secondary)
                     }
+                    Spacer()
+                    Text("拖动曲线查看时点")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+
+                if points.isEmpty {
+                    EmptyChartState(
+                        title: "正在建立电量曲线",
+                        detail: "电量出现变化后会自动绘制",
+                        systemImage: "chart.line.uptrend.xyaxis"
+                    )
                 } else {
                     chartContent(points: points, windowMin: windowMin)
                 }
             }
-            .glassCard()
+            .glassCard(accent: sampler.currentIsCharging ? .bbMint : .bbBlue)
         }
     }
 
@@ -306,13 +331,19 @@ struct UsageTab: View {
 
     /// 曲线图表内容（拆分出来避免编译器超时）
     private func chartContent(points: [(relMin: Double, level: Double, time: Date)], windowMin: Double) -> some View {
-        let lineColor: Color = sampler.currentIsCharging ? .green : .accentColor
+        let lineColor: Color = sampler.currentIsCharging ? .bbMint : .bbBlue
         let startTime = points.first?.time ?? Date()
         let stepMin = strideStep(windowMin)
+        let yDomain = batteryYDomain(points)
         return Chart {
             ForEach(Array(points.enumerated()), id: \.offset) { _, p in
                 lineMark(p: p, color: lineColor)
                 areaMark(p: p, color: lineColor)
+            }
+            if let latest = points.last {
+                PointMark(x: .value("时长", latest.relMin), y: .value("电量", latest.level))
+                    .foregroundStyle(lineColor)
+                    .symbolSize(28)
             }
             if let selected = selectedPoint {
                 RuleMark(x: .value("时长", selected.relMin))
@@ -349,25 +380,30 @@ struct UsageTab: View {
             }
         }
         .chartYAxis {
-            AxisMarks(values: [0, 25, 50, 75, 100]) {
-                AxisValueLabel()
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
+                AxisValueLabel {
+                    if let level = value.as(Double.self) {
+                        Text("\(Int(level))%")
+                            .font(.system(size: 9, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
                     .foregroundStyle(.quinary)
             }
         }
         .chartXScale(domain: 0...windowMin)
-        .chartYScale(domain: 0...100)
-        .frame(height: 140)
+        .chartYScale(domain: yDomain)
+        .frame(height: 165)
+        .chartSurface()
     }
 
     @ChartContentBuilder
     private func lineMark(p: (relMin: Double, level: Double, time: Date), color: Color) -> some ChartContent {
         LineMark(x: .value("时长", p.relMin), y: .value("电量", p.level))
             .foregroundStyle(color.gradient)
-            .interpolationMethod(.catmullRom)
-            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+            .interpolationMethod(.monotone)
+            .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
     }
 
     @ChartContentBuilder
@@ -376,7 +412,21 @@ struct UsageTab: View {
             .foregroundStyle(LinearGradient(
                 colors: [color.opacity(0.16), color.opacity(0)],
                 startPoint: .top, endPoint: .bottom))
-            .interpolationMethod(.catmullRom)
+            .interpolationMethod(.monotone)
+    }
+
+    /// 让小幅电量变化仍然可读，同时保持至少 20% 的纵轴窗口，避免夸大波动。
+    private func batteryYDomain(_ points: [(relMin: Double, level: Double, time: Date)]) -> ClosedRange<Double> {
+        guard let minimum = points.map(\.level).min(),
+              let maximum = points.map(\.level).max() else { return 0...100 }
+        let desiredSpan = max(20, maximum - minimum + 12)
+        var lower = max(0, floor((minimum - 6) / 5) * 5)
+        var upper = min(100, lower + desiredSpan)
+        if upper - lower < desiredSpan {
+            lower = max(0, upper - desiredSpan)
+        }
+        upper = min(100, ceil(upper / 5) * 5)
+        return lower...max(lower + 5, upper)
     }
 
     /// 根据窗口大小决定刻度间隔
@@ -395,7 +445,11 @@ struct UsageTab: View {
             Text("\(Int(selected.level))%").font(.caption.bold())
         }
         .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+        }
     }
 
     /// 选中最近的数据点
@@ -432,7 +486,7 @@ struct UsageTab: View {
                     miniStat("起始", value: "\(Int(first.level))%")
                     miniStat("当前", value: "\(Int(last.level))%")
                 }
-                .glassCard()
+                .glassCard(accent: isCharging ? .bbMint : .bbBlue)
             }
         }
     }
@@ -531,7 +585,7 @@ struct UsageTab: View {
                     labelStat("适配器", value: adapterWattsString, icon: "power")
                 }
             }
-            .glassCard()
+            .glassCard(accent: .bbMint)
         }
     }
 
@@ -546,18 +600,18 @@ struct UsageTab: View {
 
         return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             HStack {
-                SectionHeader(title: label, systemImage: "clock.fill", tint: .indigo)
+                SectionHeader(title: label, systemImage: "clock.fill", tint: .bbPurple)
                 if !isDischarging && totalMin == 0 {
                     Text("暂无记录").font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
             }
             HStack(spacing: BBDesign.itemSpacing) {
-                StatTile(icon: "sun.max.fill", tint: .yellow, value: formatMinutes(screenMin), unit: "", label: "亮屏")
+                StatTile(icon: "sun.max.fill", tint: .bbAmber, value: formatMinutes(screenMin), unit: "", label: "亮屏")
                 StatTile(icon: "moon.fill", tint: .indigo, value: formatMinutes(sleepMin), unit: "", label: "休眠")
-                StatTile(icon: "clock.fill", tint: .blue, value: formatMinutes(totalMin), unit: "", label: "总计")
+                StatTile(icon: "clock.fill", tint: .bbBlue, value: formatMinutes(totalMin), unit: "", label: "总计")
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbPurple)
     }
 
     // MARK: - 6. 电池信息卡片
@@ -565,7 +619,7 @@ struct UsageTab: View {
     private var batteryInfoCard: some View {
         let info = sampler.currentInfo
         return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "电池信息", systemImage: "info.circle.fill", tint: .teal)
+            SectionHeader(title: "电池信息", systemImage: "info.circle.fill", tint: .bbTeal)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 infoTile("制造商", value: info?.manufacturer ?? "—", icon: "building.2")
                 infoTile("序列号", value: info?.serialNumber ?? "—", icon: "number")
@@ -577,7 +631,7 @@ struct UsageTab: View {
                 infoTile("适配器功率", value: adapterWattsString, icon: "power")
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbTeal)
     }
 
     private func infoTile(_ label: String, value: String, icon: String) -> some View {

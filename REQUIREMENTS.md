@@ -18,18 +18,19 @@
 
 | 项目 | 状态 | 说明 |
 |------|------|------|
-| 显示内容 | ✅ 已实现 | **纯文字百分比**（`XX%`），NSTextField 精确控宽，紧贴系统电池图标 |
-| 深色/浅色跟随 | ✅ 已实现 | `textColor = .labelColor` 自动切换 |
+| 显示内容 | ✅ 已实现 | **纯文字百分比**（`XX%`），NSStatusBarButton attributedTitle 精确控宽，紧贴系统电池图标 |
+| 深色/浅色跟随 | ✅ 已实现 | attributedTitle 使用动态 `.labelColor` |
 | 低电量变红 | ✅ 已实现 | ≤20% 且未充电时文字变 `.systemRed`，插电后恢复 |
 | 点击行为 | ✅ 已实现 | 左键展开 Popover 面板 |
 | 右键菜单 | ✅ 已实现 | 打开主窗口 / 开机自启动（勾选） / 电池设置 / 关于 / 退出 |
 | 开机自启动 | ✅ 已实现 | SMAppService Login Item，右键菜单开关；应用需安装在 /Applications 或 ~/Applications |
-| 电池图标自绘 | 🚫 决策放弃 | 原需求要求像素级复刻系统图标，迭代 12 版无法达成，2026-07-16 决定改为纯文字 |
+| 状态栏电池图标自绘 | 🚫 决策放弃 | 状态栏保持纯文字百分比，不复刻系统私有图标；应用本身使用独立 App 图标 |
+| 应用图标 | ✅ 已实现 | 1024px PNG + 多尺寸 ICNS，构建脚本自动写入 App Bundle |
 | Option+点击打开主窗口 | 📋 待办 | — |
 
 ### 2.2 Popover 面板（点击状态栏展开）
 
-**布局：** 宽度 340pt，高度自适应，`.regularMaterial` 毛玻璃背景，卡片分组（圆角 12pt 半透明卡片，不用分隔线）
+**布局：** 340×536pt，`.regularMaterial` 毛玻璃背景，卡片分组（圆角 12pt 半透明卡片，不用分隔线）
 
 ```
 ┌─────────────────────────────────────┐
@@ -59,7 +60,7 @@
 
 ### 2.3 主窗口（详细视图）
 
-**窗口规格：** 默认 760×580pt（最小 560×420），可调整，位置与大小记忆（frameAutosaveName），`.thickMaterial` 背景。主窗口由 AppDelegate 以 NSWindow + NSHostingController 管理（2026-08-22 决策）：启动保持纯菜单栏不开窗；打开主窗口时显示 Dock 图标，关闭后回到纯菜单栏模式。入口：右键菜单、Popover「查看详情」。
+**窗口规格：** 默认 940×660pt（最小 840×580），可调整。主窗口由 `WindowGroup(id: "main")` 管理，采用固定侧栏 + 内容画布；打开时显示 Dock 图标，关闭后回到纯菜单栏模式。入口：右键菜单、Popover「查看详情」。
 
 #### Tab 1：首页（使用记录）✅
 
@@ -110,7 +111,7 @@
 | 层 | 选型 | 与原设计差异 |
 |----|------|-------------|
 | 语言 | Swift 6.2（严格并发） | — |
-| UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSTextField（原设计 MenuBarExtra，为精确控宽弃用）；主窗口 NSWindow + NSHostingController（原 WindowGroup，为启动不开窗 + 任意入口拉起弃用） |
+| UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSStatusBarButton；主窗口用 WindowGroup + 自定义侧栏，AppKit 负责状态栏与系统菜单 |
 | 并发模型 | PowerSampler / AppDelegate 隔离在 @MainActor | 2026-08-22 重构：阻塞调用（system_profiler / XPC helper）经 Task.detached 出主线程，结果回主线程 |
 | 图表 | Swift Charts | — |
 | 持久化 | JSON 文件（DataStore，串行队列保护） | 原设计 SwiftData，实现期替换 |

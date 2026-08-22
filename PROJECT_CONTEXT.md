@@ -35,7 +35,7 @@ battery/
 ├── update.sh                           # 重新构建并装到 /Applications
 └── Sources/
     ├── BatteryBar/
-    │   ├── App/BatteryBarApp.swift     # @main 入口；AppDelegate（状态栏 + syncEngine）；ContentView（主窗口 TabView）
+    │   ├── App/BatteryBarApp.swift     # @main 入口；AppDelegate；ContentView（主窗口自定义侧栏导航）
     │   ├── Calc/
     │   │   └── DrainRateCalculator.swift # 放电/充电速率共享计算器（sysctl 机型检测）
     │   ├── Data/
@@ -57,11 +57,15 @@ battery/
     │   │   ├── WebDAVClient.swift      # WebDAV HTTP 客户端 + XML 解析
     │   │   ├── SyncEngine.swift        # 同步调度
     │   │   └── KeychainHelper.swift    # Keychain 读写
-    │   └── Views/
-    │       ├── UsageTab.swift          # 首页 Tab（电量曲线、使用时间）
-    │       ├── CycleTab.swift          # 循环统计 Tab
-    │       ├── PowerTab.swift          # 组件功耗 Tab
-    │       └── SyncTab.swift           # 同步设置 Tab
+    │   ├── Views/
+    │       ├── DesignSystem.swift      # 设计令牌、页面标题、卡片、图表图例与空态
+    │       ├── UsageTab.swift          # 电池概览（电量曲线、使用时间）
+    │       ├── CycleTab.swift          # 循环统计
+    │       ├── PowerTab.swift          # 组件功耗
+    │       └── SyncTab.swift           # 同步设置
+    │   └── Resources/
+    │       ├── AppIcon.png             # 运行时/Dock 1024px 图标
+    │       └── AppIcon.icns            # Finder/App Bundle 图标
     └── BatteryBarHelper/
         └── main.swift                  # XPC privileged helper（root，读取 powermetrics）
 ```
@@ -105,7 +109,7 @@ BatteryBarApp (@main)
   │    ├─ NSPopover → PopoverMenuBarView（内含 openWindow 环境与 findExistingMainWindow）
   │    ├─ 开机自启动：SMAppService.mainApp register/unregister（右键菜单开关）
   │    └─ syncEngine.start(config:)（若 isEnabled && syncInterval != .manual）
-  └─ WindowGroup("main") → ContentView → TabView(4 个 Tab)
+  └─ WindowGroup("main") → ContentView → 固定侧栏导航（4 个功能区）
        ├─ environmentObject(appDelegate.sampler) / environmentObject(appDelegate.syncEngine)
        ├─ onAppear/onDisappear 切换 Dock 图标显示（.regular/.accessory）
        └─ background(OpenWindowRelay())：右键菜单「打开主窗口」通知 → openWindow(id:"main")
@@ -279,16 +283,16 @@ SyncEngine.sync(config:)
 5. **电池使用时间统计**：拔电立即重置，30 秒内重插拔平滑过渡，仅离电时累加
 6. **drain rate 计算**：由 `DrainRateCalculator` 统一实现（历史 0.6 + 功率 0.4 权重），纯函数——快照数组与时间由参数注入，不直接读 DataStore / 系统时钟；PowerSampler 每 30 个 tick 取 recentSnapshots(1440) 调用并缓存到 `@Published cachedDrainRate`；禁止在 View body 里全量扫描 DataStore
 7. **本地优先**：所有数据先写本地，同步是可选功能
-8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间；≤20% 且未充电时 attributedTitle 变红（`.systemRed`，`.labelColor` 为动态色自动跟随深浅模式）。宽度控制：`button.attributedTitle` + 固定 `statusItem.length`（`NSAttributedString.size()` 测宽 + `ceil` + 2pt 余量）。**禁止把 NSTextField 嵌入 NSStatusBarButton**——macOS 27 实测会触发 AppKit 布局引擎持续重排，空转约 37% CPU（T-30，2026-08-22 用 20 行最小复现定位）；也禁止 `@main` SwiftUI App/Scene 脚手架（debug 构建下同样空转，见约束 18）
-9. **状态栏深色/浅色模式自动跟随**：`textField.textColor = .labelColor`（低电量时 `.systemRed`，同为动态色），系统外观切换时自动更新，无需手动监听
+8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间；≤20% 且未充电时 attributedTitle 变红（`.systemRed`，`.labelColor` 为动态色自动跟随深浅模式）。宽度控制：`button.attributedTitle` + 固定 `statusItem.length`（`NSAttributedString.size()` 测宽 + `ceil` + 2pt 余量）。**禁止把 NSTextField 嵌入 NSStatusBarButton**——macOS 27 实测会触发 AppKit 布局引擎持续重排，空转约 37% CPU（T-30，2026-08-22 用 20 行最小复现定位）
+9. **状态栏深色/浅色模式自动跟随**：`attributedTitle` 使用动态 `.labelColor`（低电量时 `.systemRed`），无需手动监听外观切换
 10. **SyncEngine 并发保护**：`tryStartSyncing()` / `endSyncing()` 同步函数封装 NSLock（async 函数中不能直接调用 NSLock.lock/unlock）
-11. **修改前先读代码**，修改后运行 `swift build` 验证；涉及算法/数据逻辑跑 `swift test`（本地 CLT 可完整构建与测试）。涉及 UI 的改动 `bash build-app.sh && open .build/debug/BatteryBar.app` 实机确认
+11. **修改前先读代码**；本机只有 CLT 时先运行 `xcrun swiftc -parse`，完整 `swift build` / `swift test` 与 UI 实机验收必须在带 Xcode 的环境或 CI 完成
 12. **macOS 27 IOKit 字段兼容**：顶层 `DesignCapacity` 已移除、`MaxCapacity` 语义变为百分比，容量类字段必须优先读 `BatteryData` 嵌套字典（`DesignCapacity`/`FullChargeCapacity`），保留旧系统回退；`Temperature` 键可能不存在，UI 必须容忍 0 值（显示「—」，不得当作 0°C 参与算法）
-13. **Popover 卡片化设计**：分区用圆角卡片（`.quaternary` 填充），禁用 Divider；充电/已插电未充电/放电三种状态统一结构且均带电量进度条；电压/电流只能作为次要小字展示
+13. **Popover 卡片化设计**：分区用紧凑圆角卡片与淡彩边缘，禁用 Divider；充电/已插电未充电/放电三种状态统一结构且均带电量进度条；电压/电流只能作为次要小字展示
 14. **并发隔离**：`PowerSampler` 与 `AppDelegate` 均为 `@MainActor`，`@Published` 一律 `private(set)`；阻塞调用（system_profiler / XPC helper）必须经 `Task.detached` 出主线程；休眠回调用 `MainActor.assumeIsolated`（SleepWatcher 通知在主线程派发）
-15. **主窗口不走 SwiftUI WindowGroup**：AppDelegate `showMainWindow()` 以 NSWindow + NSHostingController 创建，`isReleasedWhenClosed = false`；新开窗入口（右键菜单 / Popover 查看详情）一律调 `showMainWindow()`，不要恢复 `@Environment(\.openWindow)`
+15. **主窗口走 SwiftUI WindowGroup**：由 `WindowGroup(id: "main")` 保留系统窗口材质与生命周期；ContentView 使用自定义侧栏导航，不恢复系统 TabView 顶栏
 16. **CycleTracker / DrainRateCalculator 可测试性**：时钟与落盘经 init/参数注入，配套单测在 `Tests/BatteryBarTests/`；修改算法必须同步更新测试
-17. **视图状态用 @State（SwiftUI 标准方式），主窗口走 WindowGroup**：曾迁移 @Observable + 裸 NSWindow 以实现本地 CLT 构建，导致窗口材质/液态玻璃渲染退化，2026-08-22 按用户要求回滚。CI 测试失败会阻断打包（旧 `|| echo warning` 曾放过一个过期断言半个多月）
+17. **视图状态用 @State（SwiftUI 标准方式）**：曾迁移 @Observable + 裸 NSWindow 以实现本地 CLT 构建，导致窗口材质渲染退化，2026-08-22 已回滚；CI 测试失败必须阻断打包
 18. **@Published 必须值变才写**：每秒无条件写会让 objectWillChange 风暴式触发所有观察视图重算（曾在无窗口时烧约 40% CPU）；`sampleUI` 对 level/isCharging/wattage(0.05W 阈值)/温度/电压/电流/BatteryInfo(需 Equatable) 全部门控，`lastUpdateTime` 非 @Published，已删除每秒翻转的 `tick`（视图用 60s Timer 刷新快照）
 19. **分发必须 release 构建**：Swift 6 debug 构建的运行时在本机实测空转约 38% CPU（release 同代码为 0，T-29）；`build-app.sh`/`build.sh`/`build-dmg.sh`/`update.sh`/CI 均已 `-c release`
 20. **状态栏刷新门控保留**：refreshTitle 文字/低电量态未变时跳过 title/length 赋值；宽度用 `button.attributedTitle` + `NSAttributedString.size()` 测宽 + 固定 length（禁止 NSTextField 子视图，见 T-30）

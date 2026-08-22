@@ -46,6 +46,10 @@ let package = Package(
             name: "BatteryBar",
             dependencies: [],
             path: "Sources/BatteryBar",
+            resources: [
+                .copy("Resources/AppIcon.png"),
+                .copy("Resources/AppIcon.icns"),
+            ],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("AppKit"),

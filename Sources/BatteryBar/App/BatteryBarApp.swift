@@ -28,12 +28,23 @@ struct BatteryBarApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 760, height: 580)
+        .defaultSize(width: 940, height: 660)
     }
 
     init() {
-        // 设置 App 图标（运行时绘制，无需外部资源）
-        NSApplication.shared.applicationIconImage = Self.drawAppIcon()
+        // App bundle 优先使用正式图标；直接运行 SPM 裸二进制时保留代码绘制兜底。
+        #if SWIFT_PACKAGE
+        let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png")
+            ?? Bundle.module.url(forResource: "AppIcon", withExtension: "png")
+        #else
+        let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png")
+        #endif
+        if let url = iconURL,
+           let image = NSImage(contentsOf: url) {
+            NSApplication.shared.applicationIconImage = image
+        } else {
+            NSApplication.shared.applicationIconImage = Self.drawAppIcon()
+        }
     }
 
     /// 用 CoreGraphics 绘制 1024×1024 电池图标作为 App 图标
@@ -152,7 +163,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 创建 popover
         let popover = NSPopover()
-        popover.contentSize = NSSize(width: 340, height: 480)
+        popover.contentSize = NSSize(width: 340, height: 536)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
             rootView: PopoverMenuBarView(sampler: sampler)
@@ -289,34 +300,208 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// 主窗口内容
-/// 沉浸式顶栏：.hiddenTitleBar 隐藏系统标题栏，系统 TabView 的居中液态玻璃
-/// Tab 模块上移至红绿灯同一层；内容与顶栏之间无分割线
+private enum AppSection: Int, CaseIterable, Identifiable {
+    case overview
+    case cycles
+    case power
+    case sync
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: return "电池概览"
+        case .cycles: return "循环与趋势"
+        case .power: return "功耗分析"
+        case .sync: return "数据与同步"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .overview: return "概览"
+        case .cycles: return "循环"
+        case .power: return "功耗"
+        case .sync: return "同步"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .overview: return "battery.75percent"
+        case .cycles: return "arrow.triangle.2.circlepath"
+        case .power: return "waveform.path.ecg"
+        case .sync: return "arrow.triangle.branch"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .overview: return .bbMint
+        case .cycles: return .bbBlue
+        case .power: return .bbAmber
+        case .sync: return .bbPurple
+        }
+    }
+}
+
+/// 主窗口采用固定侧栏 + 内容画布，稳定承载高密度图表并保留 macOS 原生窗口行为。
 struct ContentView: View {
     @EnvironmentObject var sampler: PowerSampler
     @EnvironmentObject var syncEngine: SyncEngine
-    @State private var selectedTab = 0
+    @State private var selectedSection: AppSection = .overview
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            UsageTab(sampler: sampler)
-                .tabItem { Label("首页", systemImage: "house.fill") }
-                .tag(0)
-
-            CycleTab()
-                .tabItem { Label("循环统计", systemImage: "arrow.triangle.2.circlepath") }
-                .tag(1)
-
-            PowerTab(sampler: sampler)
-                .tabItem { Label("组件功耗", systemImage: "bolt.fill") }
-                .tag(2)
-
-            SyncTab(syncEngine: syncEngine)
-                .tabItem { Label("同步", systemImage: "arrow.triangle.branch") }
-                .tag(3)
+        ZStack {
+            AppBackdrop()
+            HStack(spacing: 0) {
+                appSidebar
+                Group {
+                    switch selectedSection {
+                    case .overview:
+                        UsageTab(sampler: sampler)
+                    case .cycles:
+                        CycleTab()
+                    case .power:
+                        PowerTab(sampler: sampler)
+                    case .sync:
+                        SyncTab(syncEngine: syncEngine)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
-        .padding(.top, 2)
-        .background(.thickMaterial)
+        .frame(minWidth: 840, minHeight: 580)
+    }
+
+    private var appSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 34, height: 34)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .shadow(color: Color.black.opacity(0.14), radius: 6, x: 0, y: 3)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("BatteryBar")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                    Text("ENERGY MONITOR")
+                        .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                        .tracking(0.7)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 24)
+
+            VStack(spacing: 5) {
+                ForEach(AppSection.allCases) { section in
+                    sidebarButton(section)
+                }
+            }
+            .padding(.horizontal, 10)
+
+            Spacer(minLength: 16)
+            sidebarBatteryStatus
+                .padding(12)
+        }
+        .padding(.top, 48)
+        .frame(width: BBDesign.sidebarWidth)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(width: 1)
+        }
+    }
+
+    private func sidebarButton(_ section: AppSection) -> some View {
+        let isSelected = selectedSection == section
+        return Button {
+            withAnimation(.easeOut(duration: 0.16)) {
+                selectedSection = section
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: section.systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isSelected ? section.tint : Color.secondary)
+                    .frame(width: 18)
+                Text(section.shortTitle)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                Spacer()
+                if isSelected {
+                    Circle()
+                        .fill(section.tint)
+                        .frame(width: 5, height: 5)
+                        .shadow(color: section.tint.opacity(0.55), radius: 3)
+                }
+            }
+            .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? section.tint.opacity(0.105) : Color.clear)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(isSelected ? section.tint.opacity(0.14) : Color.clear, lineWidth: 1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var sidebarBatteryStatus: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("当前电量")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Circle()
+                    .fill(sidebarStatusColor)
+                    .frame(width: 6, height: 6)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text("\(Int(sampler.currentLevel))")
+                    .font(.system(size: 25, weight: .bold, design: .rounded).monospacedDigit())
+                Text("%")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: sampler.currentIsCharging ? "bolt.fill" : "battery.75percent")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(sidebarStatusColor)
+            }
+            GeometryReader { geometry in
+                Capsule()
+                    .fill(Color.primary.opacity(0.07))
+                    .overlay(alignment: .leading) {
+                        Capsule()
+                            .fill(sidebarStatusColor.gradient)
+                            .frame(width: max(4, geometry.size.width * sampler.currentLevel / 100))
+                    }
+            }
+            .frame(height: 5)
+            Text(sampler.currentIsCharging ? "正在充电" : String(format: "实时 %.1f W", sampler.currentWattage))
+                .font(.system(size: 9, design: .rounded).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+        }
+    }
+
+    private var sidebarStatusColor: Color {
+        if sampler.currentIsCharging { return .bbMint }
+        if sampler.currentLevel <= 20 { return .red }
+        return .bbBlue
     }
 }
 

@@ -11,6 +11,7 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME.dmg"
 DMG_DIR="$BUILD_DIR/dmg"
 VOLUME_NAME="BatteryBar"
+ICON_DIR="Sources/BatteryBar/Resources"
 
 echo "=== Building $APP_NAME ==="
 swift build -c release
@@ -20,6 +21,8 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+cp "$ICON_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
+cp "$ICON_DIR/AppIcon.png" "$APP_BUNDLE/Contents/Resources/"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,6 +37,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>BatteryBar</string>
     <key>CFBundleDisplayName</key>
     <string>BatteryBar</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>

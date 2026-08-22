@@ -13,6 +13,7 @@ BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 BUNDLE_ID="com.batterybar.app"
 HELPER_BUNDLE_ID="com.batterybar.helper"
+ICON_DIR="Sources/BatteryBar/Resources"
 
 echo "=== 编译 $APP_NAME 和 $HELPER_NAME（release） ==="
 swift build -c release
@@ -27,6 +28,8 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 # 复制主应用
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+cp "$ICON_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
+cp "$ICON_DIR/AppIcon.png" "$APP_BUNDLE/Contents/Resources/"
 
 # === Helper 打包 ===
 # Helper 暂存为 bundle（保留 Info.plist 和签名步骤），最终只把已签名的可执行文件
@@ -53,6 +56,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <string>$APP_NAME</string>
     <key>CFBundleDisplayName</key>
     <string>$APP_NAME</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>

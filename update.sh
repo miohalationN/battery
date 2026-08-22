@@ -8,6 +8,7 @@ APP_NAME="BatteryBar"
 APP_PATH="/Applications/$APP_NAME.app"
 BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
+ICON_DIR="Sources/BatteryBar/Resources"
 
 echo "=== 正在更新 $APP_NAME ==="
 
@@ -28,6 +29,8 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 # 复制主应用
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+cp "$ICON_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
+cp "$ICON_DIR/AppIcon.png" "$APP_BUNDLE/Contents/Resources/"
 
 # 复制 helper 到 Resources（app 内自动安装用）
 cp "$BUILD_DIR/BatteryBarHelper" "$APP_BUNDLE/Contents/Resources/"
@@ -45,6 +48,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>BatteryBar</string>
     <key>CFBundleDisplayName</key>
     <string>BatteryBar</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>

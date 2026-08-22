@@ -7,6 +7,7 @@ struct PopoverView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            brandBar
             header
             statusCard
             powerCard
@@ -15,7 +16,42 @@ struct PopoverView: View {
         }
         .padding(14)
         .frame(width: 340)
-        .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
+        .background {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay {
+                    LinearGradient(
+                        colors: [Color.bbBlue.opacity(0.065), Color.clear, Color.bbMint.opacity(0.045)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.065), lineWidth: 1)
+        }
+    }
+
+    private var brandBar: some View {
+        HStack(spacing: 8) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 24, height: 24)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            VStack(alignment: .leading, spacing: 0) {
+                Text("BatteryBar")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                Text("电池与能耗监控")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            LiveBadge(text: "实时", tint: .bbMint)
+        }
+        .padding(.horizontal, 2)
     }
 
     // MARK: - 顶部：电量 + 状态
@@ -50,13 +86,13 @@ struct PopoverView: View {
             batteryBar
             if !isChargingNow, !isPluggedIn {
                 HStack(spacing: 0) {
-                    durationItem("亮屏", minutes: sampler.screenOnTime, icon: "sun.max.fill", color: .yellow)
+                    durationItem("亮屏", minutes: sampler.screenOnTime, icon: "sun.max.fill", color: .bbAmber)
                     durationItem("休眠", minutes: sampler.sleepTime, icon: "moon.fill", color: .indigo)
                     powerItem
                 }
             }
         }
-        .cardStyle()
+        .cardStyle(accent: barColor)
     }
 
     @ViewBuilder
@@ -112,7 +148,7 @@ struct PopoverView: View {
 
     private var powerItem: some View {
         VStack(spacing: 4) {
-            Image(systemName: "bolt.fill").font(.system(size: 14)).foregroundStyle(.orange)
+            Image(systemName: "bolt.fill").font(.system(size: 14)).foregroundStyle(Color.bbAmber)
             Text(wattageText).font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
             Text("当前功率").font(.system(size: 10)).foregroundStyle(.secondary)
         }
@@ -134,10 +170,10 @@ struct PopoverView: View {
     private var powerCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle("实时功耗")
-            powerRow("总功率", value: String(format: "%.1f W", sampler.currentWattage), icon: "bolt.fill", color: .orange)
+            powerRow("总功率", value: String(format: "%.1f W", sampler.currentWattage), icon: "bolt.fill", color: .bbAmber)
             if sampler.helperEnabled {
-                powerRow("CPU", value: String(format: "%.1f W", sampler.cpuPower), icon: "cpu", color: .blue)
-                powerRow("GPU", value: String(format: "%.1f W", sampler.gpuPower), icon: "gpu", color: .green)
+                powerRow("CPU", value: String(format: "%.1f W", sampler.cpuPower), icon: "cpu", color: .bbBlue)
+                powerRow("GPU", value: String(format: "%.1f W", sampler.gpuPower), icon: "gpu", color: .bbPurple)
                 if sampler.dramPower > 0 {
                     powerRow("内存", value: String(format: "%.1f W", sampler.dramPower), icon: "memorychip", color: .teal)
                 }
@@ -155,7 +191,7 @@ struct PopoverView: View {
                 }
             }
         }
-        .cardStyle()
+        .cardStyle(accent: .bbAmber)
     }
 
     private var formatAmperage: String {
@@ -183,7 +219,7 @@ struct PopoverView: View {
             healthRow("满充容量", value: capacityText, icon: "battery.100")
             healthRow("温度", value: temperatureText, icon: "thermometer")
         }
-        .cardStyle()
+        .cardStyle(accent: .bbMint)
     }
 
     private var capacityText: String {
@@ -217,9 +253,13 @@ struct PopoverView: View {
             } label: {
                 Label("查看详情", systemImage: "chart.bar.xaxis")
                     .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 7)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                    .background(
+                        LinearGradient(colors: [Color.bbBlue, Color.bbTeal], startPoint: .leading, endPoint: .trailing),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
             }
             .buttonStyle(.plain)
 
@@ -301,20 +341,20 @@ struct PopoverView: View {
     }
 
     private var drainColor: Color {
-        sampler.currentLevel <= 20 ? .red : .accentColor
+        sampler.currentLevel <= 20 ? .red : .bbBlue
     }
 
     private var barColor: Color {
         if isChargingNow { return .green }
         if sampler.currentLevel <= 20 { return .red }
-        return .accentColor
+        return .bbBlue
     }
 
     private var statusColor: Color {
         if sampler.currentLevel >= 100 { return .green }
         if sampler.currentIsCharging { return .green }
         if sampler.currentLevel <= 20 { return .red }
-        return .accentColor
+        return .bbBlue
     }
 
     private var statusText: String {
@@ -384,11 +424,26 @@ struct PopoverView: View {
 // MARK: - 卡片样式
 
 private extension View {
-    /// 统一卡片样式：圆角 + 半透明填充，替代旧版的 Divider 分隔
-    func cardStyle() -> some View {
+    /// Popover 专用紧凑卡片：用淡彩边缘区分信息类型，不增加厚重阴影。
+    func cardStyle(accent: Color = .clear) -> some View {
         self
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.038))
+                    .overlay {
+                        LinearGradient(
+                            colors: [accent.opacity(0.085), Color.clear],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.065), lineWidth: 1)
+            }
     }
 }

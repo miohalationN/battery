@@ -18,6 +18,13 @@ struct PowerTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
+                PageHeader(
+                    title: "功耗分析",
+                    subtitle: "总功率、组件占比与历史波动",
+                    systemImage: "waveform.path.ecg",
+                    tint: .bbAmber,
+                    badge: String(format: "%.1f W", sampler.currentWattage)
+                )
                 powerHeroCard
                 powerGrid
                 componentBreakdownCard
@@ -31,7 +38,9 @@ struct PowerTab: View {
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 4)
             }
-            .padding(20)
+            .padding(.horizontal, BBDesign.pagePadding)
+            .padding(.top, 46)
+            .padding(.bottom, BBDesign.pagePadding)
         }
         .onAppear {
             snapshots = DataStore.shared.allSnapshots()
@@ -63,11 +72,11 @@ struct PowerTab: View {
         return HStack(spacing: 16) {
             ZStack {
                 Circle()
-                    .fill(Color.yellow.opacity(0.12))
+                    .fill(Color.bbAmber.opacity(0.14))
                     .frame(width: 54, height: 54)
                 Image(systemName: "bolt.fill")
                     .font(.system(size: 22))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.bbAmber)
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("系统总功耗")
@@ -79,17 +88,20 @@ struct PowerTab: View {
                     Text("W")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.tertiary)
+                    Image(systemName: trend.arrow)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(trend.color)
                 }
             }
             Spacer()
             if sampler.helperEnabled {
                 VStack(alignment: .trailing, spacing: 8) {
-                    heroChip(icon: "cpu", label: "CPU", value: sampler.cpuPower, color: .blue)
-                    heroChip(icon: "square.stack.3d.up", label: "GPU", value: sampler.gpuPower, color: .purple)
+                    heroChip(icon: "cpu", label: "CPU", value: sampler.cpuPower, color: .bbBlue)
+                    heroChip(icon: "square.stack.3d.up", label: "GPU", value: sampler.gpuPower, color: .bbPurple)
                 }
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbAmber)
     }
 
     private func heroChip(icon: String, label: String, value: Double, color: Color) -> some View {
@@ -110,9 +122,9 @@ struct PowerTab: View {
 
     private var powerGrid: some View {
         HStack(spacing: BBDesign.itemSpacing) {
-            StatTile(icon: "bolt", tint: .blue, value: String(format: "%.0f", sampler.currentVoltage), unit: "mV", label: "电压")
-            StatTile(icon: "arrow.left.arrow.right", tint: .green, value: String(format: "%.0f", sampler.currentAmperage), unit: "mA", label: "电流")
-            StatTile(icon: "bolt.fill", tint: .yellow, value: String(format: "%.1f", sampler.currentWattage), unit: "W", label: "功率")
+            StatTile(icon: "bolt", tint: .bbBlue, value: String(format: "%.0f", sampler.currentVoltage), unit: "mV", label: "电压")
+            StatTile(icon: "arrow.left.arrow.right", tint: .bbMint, value: String(format: "%.0f", sampler.currentAmperage), unit: "mA", label: "电流")
+            StatTile(icon: "bolt.fill", tint: .bbAmber, value: String(format: "%.1f", sampler.currentWattage), unit: "W", label: "功率")
             StatTile(icon: "thermometer", tint: .orange,
                      value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
                      unit: sampler.currentTemperature > 0.5 ? "°C" : "", label: "温度")
@@ -123,11 +135,11 @@ struct PowerTab: View {
 
     private var componentBreakdownCard: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "组件功耗明细", systemImage: "cpu.fill", tint: .purple)
+            SectionHeader(title: "组件功耗明细", systemImage: "cpu.fill", tint: .bbPurple)
 
             if sampler.helperEnabled {
-                componentBar(label: "CPU", value: sampler.cpuPower, total: sampler.currentWattage, icon: "cpu", color: .blue)
-                componentBar(label: "GPU", value: sampler.gpuPower, total: sampler.currentWattage, icon: "square.stack.3d.up", color: .purple)
+                componentBar(label: "CPU", value: sampler.cpuPower, total: sampler.currentWattage, icon: "cpu", color: .bbBlue)
+                componentBar(label: "GPU", value: sampler.gpuPower, total: sampler.currentWattage, icon: "square.stack.3d.up", color: .bbPurple)
                 if sampler.dramPower > 0 {
                     componentBar(label: "内存", value: sampler.dramPower, total: sampler.currentWattage, icon: "memorychip", color: .teal)
                 }
@@ -158,7 +170,7 @@ struct PowerTab: View {
                 .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbPurple)
     }
 
     private func componentBar(label: String, value: Double, total: Double, icon: String, color: Color) -> some View {
@@ -192,12 +204,12 @@ struct PowerTab: View {
 
     private var powerStatsRow: some View {
         let cutoff = Date().addingTimeInterval(-timeRange.hours * 3600)
-        let watts = snapshots.filter { $0.timestamp >= cutoff }.map { $0.wattage }
+        let watts = snapshots.filter { $0.timestamp >= cutoff && $0.wattage > 0.05 }.map { $0.wattage }
         let avg = watts.isEmpty ? 0 : watts.reduce(0, +) / Double(watts.count)
         let peak = watts.max() ?? 0
         let low = watts.min() ?? 0
         return HStack(spacing: BBDesign.itemSpacing) {
-            StatTile(icon: "chart.bar.fill", tint: .blue, value: String(format: "%.1f", avg), unit: "W", label: "平均功耗")
+            StatTile(icon: "chart.bar.fill", tint: .bbBlue, value: String(format: "%.1f", avg), unit: "W", label: "平均功耗")
             StatTile(icon: "arrow.up.circle.fill", tint: .red, value: String(format: "%.1f", peak), unit: "W", label: "峰值功耗")
             StatTile(icon: "arrow.down.circle.fill", tint: .green, value: String(format: "%.1f", low), unit: "W", label: "最低功耗")
         }
@@ -207,12 +219,12 @@ struct PowerTab: View {
 
     private var powerHistoryChart: some View {
         let cutoff = Date().addingTimeInterval(-timeRange.hours * 3600)
-        let recent = snapshots.filter { $0.timestamp >= cutoff }
+        let recent = snapshots.filter { $0.timestamp >= cutoff }.sorted { $0.timestamp < $1.timestamp }
         let hasComponentData = recent.contains { $0.cpuPower > 0 || $0.gpuPower > 0 || $0.dramPower > 0 }
 
         return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             HStack {
-                SectionHeader(title: "功耗趋势", systemImage: "waveform.path.ecg", tint: .yellow)
+                SectionHeader(title: "功耗趋势", systemImage: "waveform.path.ecg", tint: .bbAmber)
                 Picker("时间范围", selection: $timeRange) {
                     ForEach(TimeRange.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
@@ -221,11 +233,23 @@ struct PowerTab: View {
                 .labelsHidden()
             }
 
+            HStack(spacing: 13) {
+                ChartLegendItem(
+                    label: "系统总功耗",
+                    color: .bbAmber,
+                    value: recent.last.map { String(format: "%.1fW", $0.wattage) }
+                )
+                Spacer()
+                Text("拖动曲线查看采样点")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+
             // 组件曲线勾选（仅 Helper 开启且有数据时显示）
             if sampler.helperEnabled && hasComponentData {
                 HStack(spacing: 8) {
-                    toggleChip("CPU", isOn: $showCPU, color: .blue)
-                    toggleChip("GPU", isOn: $showGPU, color: .purple)
+                    toggleChip("CPU", isOn: $showCPU, color: .bbBlue)
+                    toggleChip("GPU", isOn: $showGPU, color: .bbPurple)
                     if recent.contains(where: { $0.dramPower > 0 }) {
                         toggleChip("内存", isOn: $showDRAM, color: .teal)
                     }
@@ -237,22 +261,16 @@ struct PowerTab: View {
             }
 
             if recent.isEmpty {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 6) {
-                        Image(systemName: "bolt.slash")
-                            .font(.system(size: 24))
-                            .foregroundStyle(.quaternary)
-                        Text("数据采集中…").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    .frame(height: 150)
-                    Spacer()
-                }
+                EmptyChartState(
+                    title: "正在建立功耗趋势",
+                    detail: "采样数据将在这里持续更新",
+                    systemImage: "bolt.slash"
+                )
             } else {
                 powerChartContent(recent: recent)
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbAmber)
     }
 
     private func toggleChip(_ label: String, isOn: Binding<Bool>, color: Color) -> some View {
@@ -335,32 +353,33 @@ struct PowerTab: View {
             }
             .foregroundStyle(.tertiary)
         }
-        .glassCard()
+        .glassCard(accent: enabled ? .bbMint : .clear)
     }
 
     // MARK: - 图表内容
 
     @ViewBuilder
     private func powerChartContent(recent: [BatterySnapshot]) -> some View {
+        let yMaximum = powerYMaximum(recent)
         Chart {
             // 系统总功耗（始终显示，粗主线 + 面积）
             ForEach(recent, id: \.id) { snap in
                 AreaMark(x: .value("时间", snap.timestamp), y: .value("功率", snap.wattage))
                     .foregroundStyle(
-                        LinearGradient(colors: [.yellow.opacity(0.14), .yellow.opacity(0)], startPoint: .top, endPoint: .bottom)
+                        LinearGradient(colors: [Color.bbAmber.opacity(0.18), Color.bbAmber.opacity(0)], startPoint: .top, endPoint: .bottom)
                     )
-                    .interpolationMethod(.catmullRom)
+                    .interpolationMethod(.monotone)
                 LineMark(x: .value("时间", snap.timestamp), y: .value("功率", snap.wattage))
-                    .foregroundStyle(Color.yellow.gradient)
-                    .interpolationMethod(.catmullRom)
-                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .foregroundStyle(Color.bbAmber.gradient)
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
             }
             // CPU
             if showCPU {
                 ForEach(recent, id: \.id) { snap in
                     LineMark(x: .value("时间", snap.timestamp), y: .value("CPU", snap.cpuPower))
-                        .foregroundStyle(.blue)
-                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(Color.bbBlue)
+                        .interpolationMethod(.monotone)
                         .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
                 }
             }
@@ -368,8 +387,8 @@ struct PowerTab: View {
             if showGPU {
                 ForEach(recent, id: \.id) { snap in
                     LineMark(x: .value("时间", snap.timestamp), y: .value("GPU", snap.gpuPower))
-                        .foregroundStyle(.purple)
-                        .interpolationMethod(.catmullRom)
+                        .foregroundStyle(Color.bbPurple)
+                        .interpolationMethod(.monotone)
                         .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
                 }
             }
@@ -378,7 +397,7 @@ struct PowerTab: View {
                 ForEach(recent, id: \.id) { snap in
                     LineMark(x: .value("时间", snap.timestamp), y: .value("内存", snap.dramPower))
                         .foregroundStyle(.teal)
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.monotone)
                         .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
                 }
             }
@@ -387,7 +406,7 @@ struct PowerTab: View {
                 ForEach(recent, id: \.id) { snap in
                     LineMark(x: .value("时间", snap.timestamp), y: .value("显示器", snap.displayPower))
                         .foregroundStyle(.orange)
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.monotone)
                         .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
                 }
             }
@@ -397,7 +416,7 @@ struct PowerTab: View {
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
                 if let closest = recent.min(by: { abs($0.timestamp.timeIntervalSince(selected)) < abs($1.timestamp.timeIntervalSince(selected)) }) {
                     PointMark(x: .value("时间", closest.timestamp), y: .value("功率", closest.wattage))
-                        .foregroundStyle(.yellow)
+                        .foregroundStyle(Color.bbAmber)
                         .symbolSize(60)
                         .annotation(position: .top, alignment: .center) {
                             VStack(spacing: 2) {
@@ -406,8 +425,8 @@ struct PowerTab: View {
                                     .foregroundStyle(.tertiary)
                                 Text(String(format: "总 %.1fW", closest.wattage))
                                     .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
-                                if showCPU { Text(String(format: "CPU %.1fW", closest.cpuPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(.blue) }
-                                if showGPU { Text(String(format: "GPU %.1fW", closest.gpuPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(.purple) }
+                                if showCPU { Text(String(format: "CPU %.1fW", closest.cpuPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(Color.bbBlue) }
+                                if showGPU { Text(String(format: "GPU %.1fW", closest.gpuPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(Color.bbPurple) }
                                 if showDRAM { Text(String(format: "内存 %.1fW", closest.dramPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(.teal) }
                                 if showDisplay { Text(String(format: "显示器 %.1fW", closest.displayPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(.orange) }
                             }
@@ -429,15 +448,31 @@ struct PowerTab: View {
             }
         }
         .chartYAxis {
-            AxisMarks {
-                AxisValueLabel()
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
+                AxisValueLabel {
+                    if let watts = value.as(Double.self) {
+                        Text(String(format: "%.0fW", watts))
+                            .font(.system(size: 9, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
                     .foregroundStyle(.quinary)
             }
         }
-        .chartYAxisLabel("W")
-        .frame(height: 150)
+        .chartYScale(domain: 0...yMaximum)
+        .frame(height: 176)
+        .chartSurface()
+    }
+
+    /// 纵轴留出约 18% 顶部空间，并向上取到易读的 2W 刻度。
+    private func powerYMaximum(_ recent: [BatterySnapshot]) -> Double {
+        var values = recent.map(\.wattage)
+        if showCPU { values.append(contentsOf: recent.map(\.cpuPower)) }
+        if showGPU { values.append(contentsOf: recent.map(\.gpuPower)) }
+        if showDRAM { values.append(contentsOf: recent.map(\.dramPower)) }
+        if showDisplay { values.append(contentsOf: recent.map(\.displayPower)) }
+        let maximum = max(2, values.max() ?? 2)
+        return ceil(maximum * 1.18 / 2) * 2
     }
 }

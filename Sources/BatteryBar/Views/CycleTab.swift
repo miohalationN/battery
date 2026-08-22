@@ -9,11 +9,20 @@ struct CycleTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
+                PageHeader(
+                    title: "循环与趋势",
+                    subtitle: "观察每次离电周期的续航变化",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    tint: .bbBlue,
+                    badge: "\(validCycles.count) 次记录"
+                )
                 summaryCard
-                if cycles.count >= 2 { trendCard }
+                if validCycles.count >= 2 { trendCard }
                 listCard
             }
-            .padding(20)
+            .padding(.horizontal, BBDesign.pagePadding)
+            .padding(.top, 46)
+            .padding(.bottom, BBDesign.pagePadding)
         }
         .onAppear {
             cycles = DataStore.shared.allCycles()
@@ -31,49 +40,76 @@ struct CycleTab: View {
     // MARK: - 概览
 
     private var avgDuration: TimeInterval {
-        cycles.isEmpty ? 0 : cycles.map(\.duration).reduce(0, +) / Double(cycles.count)
+        validCycles.isEmpty ? 0 : validCycles.map(\.duration).reduce(0, +) / Double(validCycles.count)
+    }
+
+    /// 旧版本曾把充电段误存为放电循环；这些记录会制造反向电量与零耗电曲线，UI 层不再展示。
+    private var validCycles: [ChargeCycle] {
+        cycles
+            .filter { $0.duration >= 300 && $0.startLevel - $0.endLevel >= 1 }
+            .sorted { $0.startDate < $1.startDate }
     }
 
     private var summaryCard: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "循环概览", systemImage: "arrow.triangle.2.circlepath", tint: .green)
+            SectionHeader(title: "循环概览", systemImage: "arrow.triangle.2.circlepath", tint: .bbMint)
             HStack(spacing: BBDesign.itemSpacing) {
-                StatTile(icon: "arrow.triangle.2.circlepath", tint: .green, value: "\(cycles.count)", unit: "次", label: "循环次数")
-                StatTile(icon: "clock.arrow.circlepath", tint: .blue, value: fmt(avgDuration), unit: "", label: "平均续航")
-                StatTile(icon: "trophy.fill", tint: .orange, value: fmt(cycles.max(by: { $0.duration < $1.duration })?.duration ?? 0), unit: "", label: "最长循环")
+                StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbMint, value: "\(validCycles.count)", unit: "次", label: "有效循环")
+                StatTile(icon: "clock.arrow.circlepath", tint: .bbBlue, value: fmt(avgDuration), unit: "", label: "平均续航")
+                StatTile(icon: "trophy.fill", tint: .bbAmber, value: fmt(validCycles.max(by: { $0.duration < $1.duration })?.duration ?? 0), unit: "", label: "最长循环")
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbMint)
     }
 
     // MARK: - 趋势图
 
     private var trendCard: some View {
+        let chartCycles = validCycles
+        let averageHours = avgDuration / 3600
+        let maximumHours = max(1, chartCycles.map { $0.duration / 3600 }.max() ?? 1)
+        let yMaximum = ceil(maximumHours * 1.18 * 2) / 2
+        let timeSpan = (chartCycles.last?.startDate.timeIntervalSince(chartCycles.first?.startDate ?? Date())) ?? 0
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "续航能力趋势", systemImage: "chart.line.uptrend.xyaxis", tint: .blue)
-            Text("每次放电周期时长，变短可能意味着电池老化")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+            HStack {
+                SectionHeader(title: "续航能力趋势", systemImage: "chart.line.uptrend.xyaxis", tint: .bbBlue)
+                ChartLegendItem(label: "周期时长", color: .bbBlue, value: "平均 \(fmt(avgDuration))")
+            }
+            HStack {
+                Text("按时间排序的有效放电周期；曲线采用单调插值，不制造额外峰谷")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Text("拖动查看记录")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
             Chart {
-                ForEach(cycles, id: \.id) { cycle in
+                ForEach(chartCycles, id: \.id) { cycle in
                     AreaMark(x: .value("循环", cycle.startDate), y: .value("时长", cycle.duration / 3600))
                         .foregroundStyle(
-                            LinearGradient(colors: [.accentColor.opacity(0.12), .accentColor.opacity(0)], startPoint: .top, endPoint: .bottom)
+                            LinearGradient(colors: [Color.bbBlue.opacity(0.16), Color.bbBlue.opacity(0)], startPoint: .top, endPoint: .bottom)
                         )
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.monotone)
                     LineMark(x: .value("循环", cycle.startDate), y: .value("时长", cycle.duration / 3600))
-                        .foregroundStyle(Color.accentColor.gradient)
-                        .interpolationMethod(.catmullRom)
-                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .foregroundStyle(Color.bbBlue.gradient)
+                        .interpolationMethod(.monotone)
+                        .lineStyle(StrokeStyle(lineWidth: 2.6, lineCap: .round, lineJoin: .round))
+                    PointMark(x: .value("循环", cycle.startDate), y: .value("时长", cycle.duration / 3600))
+                        .foregroundStyle(Color.bbBlue)
+                        .symbolSize(22)
                 }
+                RuleMark(y: .value("平均", averageHours))
+                    .foregroundStyle(Color.bbBlue.opacity(0.34))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                 if let selected = selectedCycleDate {
                     RuleMark(x: .value("选中", selected))
                         .foregroundStyle(.quaternary)
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
-                    if let closest = cycles.min(by: { abs($0.startDate.timeIntervalSince(selected)) < abs($1.startDate.timeIntervalSince(selected)) }) {
+                    if let closest = chartCycles.min(by: { abs($0.startDate.timeIntervalSince(selected)) < abs($1.startDate.timeIntervalSince(selected)) }) {
                         PointMark(x: .value("循环", closest.startDate), y: .value("时长", closest.duration / 3600))
-                            .foregroundStyle(Color.accentColor)
-                            .symbolSize(60)
+                            .foregroundStyle(Color.bbBlue)
+                            .symbolSize(72)
                             .annotation(position: .top, alignment: .center) {
                                 trendTooltip(closest)
                             }
@@ -82,26 +118,40 @@ struct CycleTab: View {
             }
             .chartXSelection(value: $selectedCycleDate)
             .chartXAxis {
-                AxisMarks(values: .stride(by: .day)) {
-                    AxisValueLabel(format: .dateTime.month().day())
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                AxisMarks(values: .automatic(desiredCount: 5)) { value in
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            if timeSpan > 86_400 * 2 {
+                                Text(date, format: .dateTime.month().day())
+                            } else {
+                                Text(date, format: .dateTime.hour().minute())
+                            }
+                        }
+                    }
+                    .font(.system(size: 9, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.tertiary)
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3]))
                         .foregroundStyle(.quaternary)
                 }
             }
             .chartYAxis {
-                AxisMarks {
-                    AxisValueLabel()
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                    AxisValueLabel {
+                        if let hours = value.as(Double.self) {
+                            Text(String(format: "%.1fh", hours))
+                                .font(.system(size: 9, design: .rounded).monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
                         .foregroundStyle(.quinary)
                 }
             }
+            .chartYScale(domain: 0...yMaximum)
             .frame(height: 190)
+            .chartSurface()
         }
-        .glassCard()
+        .glassCard(accent: .bbBlue)
     }
 
     /// 悬停数据点提示（玻璃小卡）
@@ -120,8 +170,11 @@ struct CycleTab: View {
             .foregroundStyle(.secondary)
         }
         .padding(8)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.06)))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+        }
     }
 
     // MARK: - 循环记录列表
@@ -129,42 +182,34 @@ struct CycleTab: View {
     private var listCard: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             HStack {
-                SectionHeader(title: "循环记录", systemImage: "clock.arrow.circlepath", tint: .teal)
-                Text("共 \(cycles.count) 条")
+                SectionHeader(title: "循环记录", systemImage: "clock.arrow.circlepath", tint: .bbTeal)
+                Text("共 \(validCycles.count) 条")
                     .font(.system(size: 10, design: .rounded).monospacedDigit())
                     .foregroundStyle(.tertiary)
                     .padding(.trailing, 2)
             }
-            if cycles.isEmpty {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 8) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.quaternary)
-                        Text("暂无循环记录")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                        Text("完成一次完整的充放电后将自动记录")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.vertical, 28)
-                    Spacer()
-                }
+            if validCycles.isEmpty {
+                EmptyChartState(
+                    title: "暂无有效放电循环",
+                    detail: "完成一次超过 1% 的离电使用后会自动记录",
+                    systemImage: "arrow.triangle.2.circlepath"
+                )
             } else {
                 VStack(spacing: 4) {
-                    ForEach(cycles.reversed(), id: \.id) { cycle in
+                    ForEach(validCycles.reversed(), id: \.id) { cycle in
                         cycleRow(cycle)
                     }
                 }
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbTeal)
     }
 
     private func cycleRow(_ cycle: ChargeCycle) -> some View {
         HStack(alignment: .center, spacing: 12) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(Color.bbTeal)
+                .frame(width: 3, height: 34)
             // 起止电量胶囊
             Text("\(Int(cycle.startLevel))% → \(Int(cycle.endLevel))%")
                 .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())

@@ -1,57 +1,150 @@
 import SwiftUI
 
-/// 统一设计令牌与复用组件（macOS 26+ Liquid Glass 风格）
+/// BatteryBar 的视觉令牌与复用组件。
 ///
-/// 原则：
-/// - 材质分层：页面级卡片用 regularMaterial + 细描边；卡片内信息块用 primary 低透明度填充，
-///   层级压在卡片之下，不再每块都上材质 + 阴影
-/// - 连续圆角（.continuous）取代普通圆角
-/// - 描边代替投影：1pt primary 6% 描边提供玻璃边缘感
-/// - 数字排版：大号 rounded + monospacedDigit；说明文字 caption2 + tertiary
-/// - 色彩克制：每区块一个强调色，只用于图标底与图形，正文保持中性
+/// 设计语言围绕三件事：石墨色背景承载长期使用、薄荷绿表达电池状态、
+/// 暖黄色表达实时能量。卡片只承担分组，不用大面积灰底争夺图表注意力。
 enum BBDesign {
-    static let cornerRadius: CGFloat = 16
-    static let cornerRadiusSmall: CGFloat = 10
-    static let cardPadding: CGFloat = 20
+    static let cornerRadius: CGFloat = 18
+    static let cornerRadiusSmall: CGFloat = 11
+    static let cardPadding: CGFloat = 18
+    static let pagePadding: CGFloat = 22
     static let sectionSpacing: CGFloat = 14
     static let itemSpacing: CGFloat = 10
+    static let sidebarWidth: CGFloat = 184
+}
+
+extension Color {
+    static let bbMint = Color(red: 0.20, green: 0.80, blue: 0.58)
+    static let bbTeal = Color(red: 0.13, green: 0.68, blue: 0.72)
+    static let bbBlue = Color(red: 0.25, green: 0.55, blue: 0.96)
+    static let bbAmber = Color(red: 0.98, green: 0.66, blue: 0.18)
+    static let bbPurple = Color(red: 0.61, green: 0.45, blue: 0.94)
+}
+
+/// 整个主窗口的环境底色。彩色光晕非常克制，避免浅色模式下变成一整片灰。
+struct AppBackdrop: View {
+    var body: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            LinearGradient(
+                colors: [Color.bbBlue.opacity(0.055), Color.clear, Color.bbMint.opacity(0.045)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            RadialGradient(
+                colors: [Color.bbMint.opacity(0.07), Color.clear],
+                center: .topTrailing,
+                startRadius: 0,
+                endRadius: 520
+            )
+        }
+        .ignoresSafeArea()
+    }
 }
 
 extension View {
-    /// 页面级玻璃卡片：材质 + 细描边 + 连续圆角，不加投影
-    func glassCard() -> some View {
+    /// 页面级卡片：系统材质、淡彩层与双层边缘共同提供清晰但安静的层级。
+    func glassCard(accent: Color = .clear) -> some View {
         self
             .padding(BBDesign.cardPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous))
-            .overlay(
+            .background {
                 RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-            )
+                    .fill(.regularMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [accent.opacity(0.075), Color.clear],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.24), Color.primary.opacity(0.075)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            }
+            .shadow(color: Color.black.opacity(0.055), radius: 16, x: 0, y: 7)
     }
 
-    /// 卡片内信息小块：低透明度填充，层级低于卡片材质
+    /// 卡片内部的次级信息块。
     func insetTile(cornerRadius: CGFloat = BBDesign.cornerRadiusSmall) -> some View {
         self
             .padding(12)
             .frame(maxWidth: .infinity)
-            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .background(
+                Color.primary.opacity(0.042),
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.055), lineWidth: 1)
+            }
+    }
+
+    /// 图表绘图区的统一底板。
+    func chartSurface() -> some View {
+        self
+            .padding(.horizontal, 2)
+            .padding(.top, 6)
+            .background(
+                LinearGradient(
+                    colors: [Color.primary.opacity(0.018), Color.clear],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
     }
 }
 
-/// 区块标题：SF Symbol 彩色渐变圆角底 + 标题（系统设置风格）
+/// 页面首屏标题。把当前页面意图固定下来，替代旧 TabView 只显示一个小标签的弱层级。
+struct PageHeader: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let tint: Color
+    var badge: String? = nil
+
+    var body: some View {
+        HStack(spacing: 12) {
+            IconBadge(systemImage: systemImage, tint: tint, size: 38, symbolSize: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 23, weight: .bold, design: .rounded))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let badge {
+                LiveBadge(text: badge, tint: tint)
+            }
+        }
+        .padding(.horizontal, 2)
+        .padding(.bottom, 2)
+    }
+}
+
+/// 区块标题：彩色图标只承担定位，正文保持中性。
 struct SectionHeader: View {
     let title: String
     let systemImage: String
     let tint: Color
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 26, height: 26)
-                .background(tint.gradient, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        HStack(spacing: 9) {
+            IconBadge(systemImage: systemImage, tint: tint, size: 28, symbolSize: 12)
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
             Spacer()
@@ -59,7 +152,30 @@ struct SectionHeader: View {
     }
 }
 
-/// 数字统计块：图标 + 大数字 + 单位 + 标签（卡片内嵌块的标准形）
+struct IconBadge: View {
+    let systemImage: String
+    let tint: Color
+    var size: CGFloat = 28
+    var symbolSize: CGFloat = 12
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: symbolSize, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(
+                LinearGradient(
+                    colors: [tint.opacity(0.82), tint],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: size * 0.29, style: .continuous)
+            )
+            .shadow(color: tint.opacity(0.23), radius: 6, x: 0, y: 3)
+    }
+}
+
+/// 数字统计块。强调色只出现在图标、描边与轻微渐变，不用整块实色。
 struct StatTile: View {
     let icon: String
     let tint: Color
@@ -68,25 +184,109 @@ struct StatTile: View {
     let label: String
 
     var body: some View {
-        VStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(tint)
-            HStack(alignment: .firstTextBaseline, spacing: 1) {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 24, height: 24)
+                    .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                Spacer(minLength: 4)
+                Text(label)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(value)
-                    .font(.system(size: 17, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 18, weight: .bold, design: .rounded).monospacedDigit())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
                 if !unit.isEmpty {
                     Text(unit)
-                        .font(.system(size: 9))
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.tertiary)
                 }
             }
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [tint.opacity(0.105), Color.primary.opacity(0.035)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous)
+                .strokeBorder(tint.opacity(0.13), lineWidth: 1)
+        }
+    }
+}
+
+struct LiveBadge: View {
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(tint)
+                .frame(width: 6, height: 6)
+                .shadow(color: tint.opacity(0.6), radius: 3)
+            Text(text)
+                .font(.system(size: 10, weight: .semibold, design: .rounded).monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(tint.opacity(0.09), in: Capsule())
+        .overlay(Capsule().strokeBorder(tint.opacity(0.16), lineWidth: 1))
+    }
+}
+
+struct ChartLegendItem: View {
+    let label: String
+    let color: Color
+    var value: String? = nil
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Capsule()
+                .fill(color)
+                .frame(width: 14, height: 3)
             Text(label)
-                .font(.system(size: 10))
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+            if let value {
+                Text(value)
+                    .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+        }
+    }
+}
+
+struct EmptyChartState: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Image(systemName: systemImage)
+                .font(.system(size: 23, weight: .medium))
+                .foregroundStyle(.quaternary)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(detail)
+                .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
+        .frame(maxWidth: .infinity, minHeight: 146)
     }
 }

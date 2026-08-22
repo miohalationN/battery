@@ -13,6 +13,13 @@ struct SyncTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
+                PageHeader(
+                    title: "数据与同步",
+                    subtitle: "控制采样频率并备份历史记录",
+                    systemImage: "arrow.triangle.branch",
+                    tint: .bbPurple,
+                    badge: config.isEnabled ? "WebDAV 已启用" : "仅本机"
+                )
                 refreshSection
                 syncToggleCard
                 if config.isEnabled {
@@ -23,7 +30,9 @@ struct SyncTab: View {
                     actionButtons
                 }
             }
-            .padding(20)
+            .padding(.horizontal, BBDesign.pagePadding)
+            .padding(.top, 46)
+            .padding(.bottom, BBDesign.pagePadding)
         }
         .onAppear {
             // 从 DataStore 恢复用户上次设置的刷新间隔
@@ -37,7 +46,7 @@ struct SyncTab: View {
 
     private var refreshSection: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "数据刷新", systemImage: "arrow.clockwise.circle.fill", tint: .blue)
+            SectionHeader(title: "数据刷新", systemImage: "arrow.clockwise.circle.fill", tint: .bbBlue)
             HStack {
                 Text("采样间隔").font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
@@ -65,7 +74,7 @@ struct SyncTab: View {
                 Text("秒").font(.system(size: 11)).foregroundStyle(.tertiary)
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbBlue)
     }
 
     // MARK: - 启用开关
@@ -74,12 +83,12 @@ struct SyncTab: View {
         HStack(spacing: 12) {
             Image(systemName: config.isEnabled ? "checkmark.circle.fill" : "circle.dotted")
                 .font(.system(size: 17))
-                .foregroundStyle(config.isEnabled ? Color.green : Color.secondary)
+                .foregroundStyle(config.isEnabled ? Color.bbMint : Color.secondary)
             Text("启用 WebDAV 同步").font(.system(size: 13, weight: .semibold))
             Spacer()
             Toggle("", isOn: $config.isEnabled).labelsHidden().onChange(of: config.isEnabled) { save() }
         }
-        .glassCard()
+        .glassCard(accent: config.isEnabled ? .bbMint : .clear)
     }
 
     private func applyRefreshInterval() {
@@ -114,7 +123,7 @@ struct SyncTab: View {
 
     private var serverSection: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "服务器配置", systemImage: "server.rack", tint: .indigo)
+            SectionHeader(title: "服务器配置", systemImage: "server.rack", tint: .bbPurple)
             glassField("服务器地址", text: $config.serverURL, placeholder: "https://dav.jianguoyun.com/dav/")
             glassField("用户名", text: $config.username, placeholder: "username")
             glassField("远程路径", text: $config.remotePath, placeholder: "/BatteryBar")
@@ -136,7 +145,7 @@ struct SyncTab: View {
                 }
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbPurple)
     }
 
     /// 密码防抖：停止输入 0.6s 后才写入 Keychain。
@@ -157,7 +166,7 @@ struct SyncTab: View {
 
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "同步设置", systemImage: "gearshape", tint: .cyan)
+            SectionHeader(title: "同步设置", systemImage: "gearshape", tint: .bbTeal)
             VStack(alignment: .leading, spacing: 8) {
                 Text("同步间隔").font(.system(size: 11)).foregroundStyle(.secondary)
                 Picker("", selection: $config.syncInterval) { ForEach(SyncInterval.allCases, id: \.self) { Text($0.label).tag($0) } }
@@ -169,14 +178,14 @@ struct SyncTab: View {
                     .pickerStyle(.segmented).onChange(of: config.syncDirection) { save() }
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbTeal)
     }
 
     // MARK: - 同步状态
 
     private var statusSection: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "同步状态", systemImage: "arrow.triangle.2.circlepath", tint: .green)
+            SectionHeader(title: "同步状态", systemImage: "arrow.triangle.2.circlepath", tint: .bbMint)
             statusRow("上次同步") {
                 if let last = config.lastSyncAt {
                     Text(last, format: .dateTime.month().day().hour().minute())
@@ -194,7 +203,7 @@ struct SyncTab: View {
                     .textSelection(.enabled)
             }
         }
-        .glassCard()
+        .glassCard(accent: .bbMint)
     }
 
     private func statusRow<Content: View>(_ title: String, @ViewBuilder value: () -> Content) -> some View {
@@ -220,10 +229,10 @@ struct SyncTab: View {
             }
         case .success(let date):
             HStack(spacing: 5) {
-                Circle().fill(.green).frame(width: 6, height: 6)
+                Circle().fill(Color.bbMint).frame(width: 6, height: 6)
                 Text("成功 \(date, format: .dateTime.hour().minute().second())")
                     .font(.system(size: 12, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Color.bbMint)
             }
         case .failed(let msg):
             HStack(spacing: 5) {
@@ -259,6 +268,10 @@ struct SyncTab: View {
             TextField(placeholder, text: text).textFieldStyle(.plain).font(.system(size: 12))
                 .padding(9)
                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+                }
                 .onChange(of: text.wrappedValue) { save() }
         }
     }

@@ -1,17 +1,17 @@
 # BatteryBar — 维护计划
 
 > 配合 `PROJECT_CONTEXT.md` 使用。本文件定义维护原则、验证策略与变更日志。
-> 更新日期：2026-07-17
+> 更新日期：2026-08-23
 
 ---
 
 ## 一、维护原则
 
-1. **不破坏已有功能**：状态栏百分比、Popover、主窗口 4 个 Tab、同步、通知是核心功能，不能出现回归
+1. **不破坏已有功能**：状态栏百分比、Popover、主窗口 4 个功能区、同步、通知是核心功能，不能出现回归
 2. **Bug 优先于性能，性能优先于重构**
 3. **最小改动**：只改必要的代码，不顺手重构无关模块
 4. **修改前必读代码**：理解上下文，禁止盲改
-5. **修改后必验证**：至少 `swift build` 通过；涉及 UI 的改动需 `open .build/debug/BatteryBar.app` 跑一次
+5. **修改后必验证**：CLT 环境至少完成全量语法检查；完整构建、测试与 UI 改动实机检查需在 Xcode/CI 环境完成
 
 ---
 
@@ -69,19 +69,23 @@
 ### 编译验证（每次改动）
 
 ```bash
-swift build
+# 仅 Command Line Tools
+xcrun swiftc -parse $(rg --files Sources -g '*.swift')
+
+# 安装 Xcode 的环境 / CI
+swift build && swift test
 ```
 
 ### 运行验证（涉及 UI / 行为）
 
 ```bash
-bash build-app.sh && open .build/debug/BatteryBar.app
+bash build-app.sh && open .build/release/BatteryBar.app
 ```
 
 涉及以下场景必须人工 smoke test：
 - 状态栏百分比显示（充电/非充电/满电）
 - Popover 弹出、数据显示
-- 主窗口 4 个 Tab 切换
+- 主窗口 4 个侧栏功能区切换
 - 通知（低电量、充满）
 - 同步测试连接 + 立即同步
 - PowerTab Helper 开关（安装/卸载）
@@ -109,6 +113,26 @@ swift test
 ---
 
 ## 五、变更日志
+
+### 2026-08-23 — 主窗口、曲线图表与应用图标统一重设计
+
+#### 前端视觉系统
+- 主窗口从系统 TabView 顶栏改为固定侧栏 + 内容画布，默认尺寸调整为 940×660pt，保留 WindowGroup 的系统材质与生命周期
+- 新设计系统统一石墨底、薄荷绿电池状态、暖黄实时能量与蓝/紫组件数据；补齐页面标题、卡片、指标块、图例、实时徽标和图表空态
+- 首页、循环、功耗、同步四个页面与 Popover 统一卡片边缘、排版和状态色
+
+#### 曲线可信度与交互
+- 电量、循环、功耗曲线全部从 Catmull–Rom 改为单调插值，避免真实离散数据出现不存在的峰谷
+- 循环趋势强制按时间排序，过滤旧版本误存的反向/零耗电记录，增加数据点、平均参考线、动态时间刻度与交互提示
+- 电量曲线使用最小 20% 的动态纵轴窗口；功耗曲线按当前可见序列生成易读纵轴并忽略 0W 无效统计点
+
+#### App 图标与打包
+- 新增 1024px PNG 和含 10 个标准尺寸的 ICNS；运行时、Finder、Dock 与自定义侧栏共用同一图标
+- SwiftPM 声明图标资源；build/build-app/build-dmg/update 四条打包路径均复制图标并写入 CFBundleIconFile
+
+#### 验证
+- 全量 Swift 源码 `swiftc -parse`、DesignSystem 独立类型检查、Package manifest、4 个 shell 脚本、4 份 Info.plist 与 ICNS 全尺寸解包验证通过
+- 本机仅有 Command Line Tools，`swift build` 仍被环境缺少 SwiftUIMacros 阻断；完整应用构建、单测与新界面实机截图留给现有 Xcode CI
 
 ### 2026-08-22（第四批）— CPU 空转根因修复：0.1% 达标（40% → 0.1%）
 
