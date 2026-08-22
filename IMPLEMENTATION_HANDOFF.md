@@ -87,10 +87,20 @@ BatterySnapshotTests / DrainRateCalculatorTests 原有用例不改语义。
   `retained.count != snapshots.count` 每分钟成立 → 每分钟一次全量重写。
   证据：70s 观察窗内行数不变、文件被原子替换（size +13B、前缀哈希变化）。
 
-### 第二轮（最终）
-- 触发提交：_待填写_
-- Run URL：_待填写_（build + test 全绿）
-- Artifact sha256：_待下载后填写_
+### 第二轮（最终，全部通过）
+- 触发提交：`686cb60`（Compact snapshot journal on accumulated expiries, not every minute）
+- Run URL：https://github.com/miohalationN/battery/actions/runs/32596337196
+- 结果：build ✓ + test ✓ —— `Test run with 74 tests in 11 suites passed`
+- Artifact sha256：
+  - `Contents/MacOS/BatteryBar`: `84f47380a8a44d0d182e5112b9d8b00382b377f275720c1176a3cdadb48348b8`
+  - `Contents/Resources/BatteryBarHelper`: `d498d03c81827dc558203989f7f433cabfa90b307948b21f227b45b30623d5e1`
+- 安装：ditto 至 `/Users/mio/Applications/BatteryBar.app`；
+  `codesign --verify --deep --strict` 通过；安装后二进制 sha256 与 artifact 完全一致
+- 数据备份（第二轮安装前）：`~/Library/Application Support/BatteryBar-backup-cf2e345`
+- 第二轮运行时验证（安装后 130s 观察窗）：
+  - `snapshots.jsonl` inode 不变、行数 1438→1440 —— 稳态纯追加、零重写 ✓
+  - BatteryBar 进程 CPU 0.0%（不劣于基线 0.1%）✓
+  - 零 `powermetrics` 进程（Helper 关闭，defaults BatteryBarHelperEnabled=0）✓
 
 ### 实机验证（第一轮安装期间采集，口径与行为证据仍然有效）
 - 安装前数据备份：`~/Library/Application Support/BatteryBar-backup-be5f3eb`（复制，原数据未动）
