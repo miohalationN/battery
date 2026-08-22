@@ -12,19 +12,9 @@ struct SyncTab: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
                 refreshSection
-
-                HStack {
-                    Image(systemName: config.isEnabled ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(config.isEnabled ? .green : .secondary)
-                    Text("启用 WebDAV 同步").font(.headline)
-                    Spacer()
-                    Toggle("", isOn: $config.isEnabled).labelsHidden().onChange(of: config.isEnabled) { save() }
-                }
-                .padding(20)
-                .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
-
+                syncToggleCard
                 if config.isEnabled {
                     configWarning
                     serverSection
@@ -46,37 +36,50 @@ struct SyncTab: View {
     // MARK: - 刷新频率
 
     private var refreshSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "数据刷新", systemImage: "arrow.clockwise.circle.fill", tint: .blue)
             HStack {
-                Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(.blue)
-                Text("数据刷新").font(.headline)
+                Text("采样间隔").font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 HStack(spacing: 0) {
                     Button { if refreshInterval > 1 { refreshInterval -= 1; applyRefreshInterval() } } label: {
                         Image(systemName: "minus")
-                            .font(.system(size: 13, weight: .medium))
-                            .frame(width: 28, height: 28)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(width: 26, height: 26)
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     .buttonStyle(.plain)
 
                     Text("\(refreshInterval)")
-                        .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
-                        .frame(width: 36)
+                        .font(.system(size: 14, weight: .semibold, design: .rounded).monospacedDigit())
+                        .frame(width: 34)
 
                     Button { if refreshInterval < 30 { refreshInterval += 1; applyRefreshInterval() } } label: {
                         Image(systemName: "plus")
-                            .font(.system(size: 13, weight: .medium))
-                            .frame(width: 28, height: 28)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(width: 26, height: 26)
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     .buttonStyle(.plain)
                 }
-                Text("秒").font(.subheadline).foregroundStyle(.secondary)
+                Text("秒").font(.system(size: 11)).foregroundStyle(.tertiary)
             }
         }
-        .padding(20)
-        .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
+        .glassCard()
+    }
+
+    // MARK: - 启用开关
+
+    private var syncToggleCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: config.isEnabled ? "checkmark.circle.fill" : "circle.dotted")
+                .font(.system(size: 17))
+                .foregroundStyle(config.isEnabled ? .green : .tertiary)
+            Text("启用 WebDAV 同步").font(.system(size: 13, weight: .semibold))
+            Spacer()
+            Toggle("", isOn: $config.isEnabled).labelsHidden().onChange(of: config.isEnabled) { save() }
+        }
+        .glassCard()
     }
 
     private func applyRefreshInterval() {
@@ -84,44 +87,56 @@ struct SyncTab: View {
         NotificationCenter.default.post(name: .init("RefreshIntervalChanged"), object: Double(refreshInterval))
     }
 
-    // MARK: - Server
+    // MARK: - 配置不完整警告
 
     /// 启用同步但服务器地址/用户名/密码未填全时的警告（password 含 Keychain 预填）
     @ViewBuilder
     private var configWarning: some View {
         if config.serverURL.isEmpty || config.username.isEmpty || password.isEmpty {
-            Label("配置不完整：请填写服务器地址、用户名与密码，否则同步不会执行", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background { RoundedRectangle(cornerRadius: 10).fill(.orange.opacity(0.08)) }
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                Text("配置不完整：请填写服务器地址、用户名与密码，否则同步不会执行")
+                    .font(.system(size: 11))
+            }
+            .foregroundStyle(.orange)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous)
+                    .strokeBorder(.orange.opacity(0.25), lineWidth: 1)
+            )
         }
     }
 
+    // MARK: - 服务器配置
+
     private var serverSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("服务器配置", systemImage: "server.rack").font(.headline)
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "服务器配置", systemImage: "server.rack", tint: .indigo)
             glassField("服务器地址", text: $config.serverURL, placeholder: "https://dav.jianguoyun.com/dav/")
             glassField("用户名", text: $config.username, placeholder: "username")
             glassField("远程路径", text: $config.remotePath, placeholder: "/BatteryBar")
             HStack(spacing: 8) {
-                Image(systemName: "lock").font(.system(size: 12)).foregroundStyle(.secondary)
-                SecureField("密码", text: $password).textFieldStyle(.plain).font(.system(size: 13))
+                Image(systemName: "lock").font(.system(size: 11)).foregroundStyle(.tertiary)
+                SecureField("密码", text: $password).textFieldStyle(.plain).font(.system(size: 12))
                     .onChange(of: password) { schedulePasswordSave() }
             }
-            .padding(10).background { RoundedRectangle(cornerRadius: 10).fill(.quaternary) }
+            .padding(10)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
 
             HStack {
                 Button { testing = true; testResult = nil; Task { await testConnection(); testing = false } } label: {
                     HStack(spacing: 6) { if testing { ProgressView().controlSize(.mini) } else { Image(systemName: "network") }; Text("测试连接") }
                 }
                 .disabled(testing || config.serverURL.isEmpty).buttonStyle(.bordered)
-                if let r = testResult { Text(r).font(.caption).foregroundStyle(r.contains("✅") ? .green : .red) }
+                if let r = testResult {
+                    Text(r).font(.system(size: 10)).foregroundStyle(r.contains("✅") ? .green : .red)
+                }
             }
         }
-        .padding(20)
-        .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
+        .glassCard()
     }
 
     /// 密码防抖：停止输入 0.6s 后才写入 Keychain。
@@ -138,63 +153,83 @@ struct SyncTab: View {
         }
     }
 
+    // MARK: - 同步设置
+
     private var settingsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("同步设置", systemImage: "gearshape").font(.headline)
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "同步设置", systemImage: "gearshape", tint: .cyan)
             VStack(alignment: .leading, spacing: 8) {
-                Text("同步间隔").font(.subheadline).foregroundStyle(.secondary)
+                Text("同步间隔").font(.system(size: 11)).foregroundStyle(.secondary)
                 Picker("", selection: $config.syncInterval) { ForEach(SyncInterval.allCases, id: \.self) { Text($0.label).tag($0) } }
                     .pickerStyle(.segmented).onChange(of: config.syncInterval) { save() }
             }
             VStack(alignment: .leading, spacing: 8) {
-                Text("同步方向").font(.subheadline).foregroundStyle(.secondary)
+                Text("同步方向").font(.system(size: 11)).foregroundStyle(.secondary)
                 Picker("", selection: $config.syncDirection) { ForEach(SyncDirection.allCases, id: \.self) { Text($0.label).tag($0) } }
                     .pickerStyle(.segmented).onChange(of: config.syncDirection) { save() }
             }
         }
-        .padding(20)
-        .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
+        .glassCard()
     }
 
+    // MARK: - 同步状态
+
     private var statusSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("同步状态", systemImage: "arrow.triangle.2.circlepath").font(.headline)
-            HStack {
-                Text("上次同步").foregroundStyle(.secondary); Spacer()
-                if let last = config.lastSyncAt { Text(last, format: .dateTime.month().day().hour().minute()).font(.system(size: 13, design: .rounded).monospacedDigit()) }
-                else { Text("尚未同步").foregroundStyle(.tertiary) }
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "同步状态", systemImage: "arrow.triangle.2.circlepath", tint: .green)
+            statusRow("上次同步") {
+                if let last = config.lastSyncAt {
+                    Text(last, format: .dateTime.month().day().hour().minute())
+                        .font(.system(size: 12, design: .rounded).monospacedDigit())
+                } else {
+                    Text("尚未同步").foregroundStyle(.tertiary)
+                }
             }
             // 实时同步状态（由共享 SyncEngine @Published state 驱动）
-            HStack {
-                Text("当前状态").foregroundStyle(.secondary); Spacer()
-                syncStateLabel
-            }
-            HStack {
-                Text("设备 ID").foregroundStyle(.secondary); Spacer()
-                Text(config.deviceID).font(.system(size: 11, design: .rounded).monospacedDigit()).foregroundStyle(.tertiary)
+            statusRow("当前状态") { syncStateLabel }
+            statusRow("设备 ID") {
+                Text(config.deviceID)
+                    .font(.system(size: 10, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
             }
         }
-        .font(.subheadline)
-        .padding(20)
-        .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
+        .glassCard()
+    }
+
+    private func statusRow<Content: View>(_ title: String, @ViewBuilder value: () -> Content) -> some View {
+        HStack {
+            Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+            Spacer()
+            value().font(.system(size: 12))
+        }
     }
 
     @ViewBuilder
     private var syncStateLabel: some View {
         switch syncEngine.state {
         case .idle:
-            Text("空闲").font(.system(size: 13)).foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                Circle().fill(.secondary).frame(width: 6, height: 6)
+                Text("空闲").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
         case .syncing:
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 ProgressView().controlSize(.mini)
-                Text("同步中…").font(.system(size: 13)).foregroundStyle(.blue)
+                Text("同步中…").font(.system(size: 12)).foregroundStyle(.blue)
             }
         case .success(let date):
-            Text("成功 \(date, format: .dateTime.hour().minute().second())")
-                .font(.system(size: 13, design: .rounded).monospacedDigit())
-                .foregroundStyle(.green)
+            HStack(spacing: 5) {
+                Circle().fill(.green).frame(width: 6, height: 6)
+                Text("成功 \(date, format: .dateTime.hour().minute().second())")
+                    .font(.system(size: 12, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.green)
+            }
         case .failed(let msg):
-            Text("失败：\(msg)").font(.system(size: 12)).foregroundStyle(.red).lineLimit(1)
+            HStack(spacing: 5) {
+                Circle().fill(.red).frame(width: 6, height: 6)
+                Text("失败：\(msg)").font(.system(size: 11)).foregroundStyle(.red).lineLimit(1)
+            }
         }
     }
 
@@ -220,9 +255,10 @@ struct SyncTab: View {
 
     private func glassField(_ label: String, text: Binding<String>, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            TextField(placeholder, text: text).textFieldStyle(.plain).font(.system(size: 13))
-                .padding(8).background { RoundedRectangle(cornerRadius: 10).fill(.quaternary) }
+            Text(label).font(.system(size: 10)).foregroundStyle(.tertiary)
+            TextField(placeholder, text: text).textFieldStyle(.plain).font(.system(size: 12))
+                .padding(9)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
                 .onChange(of: text.wrappedValue) { save() }
         }
     }

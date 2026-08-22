@@ -92,28 +92,23 @@ struct UsageTab: View {
     private var fullChargeHero: some View {
         HStack(spacing: 16) {
             ZStack {
-                Circle().fill(statusColor.opacity(0.12)).frame(width: 56, height: 56)
-                Image(systemName: statusIcon).font(.system(size: 26)).foregroundStyle(statusColor)
+                Circle().fill(Color.green.opacity(0.12)).frame(width: 54, height: 54)
+                Image(systemName: "checkmark.circle.fill").font(.system(size: 24)).foregroundStyle(.green)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("电池已充满").font(.title2.bold())
+                Text("电池已充满").font(.system(size: 20, weight: .bold))
                 Text("已连接电源适配器")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 1) {
                 Text(String(format: "%.0f%%", sampler.systemHealthPercent))
-                    .font(.system(size: 24, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.green)
-                Text("健康度").font(.caption2).foregroundStyle(.secondary)
+                Text("健康度").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
         }
-        .padding(18)
-        .background {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
-        }
+        .glassCard()
     }
 
     private var chargingHero: some View {
@@ -123,39 +118,34 @@ struct UsageTab: View {
 
         return HStack(spacing: 16) {
             ZStack {
-                Circle().fill(statusColor.opacity(0.12)).frame(width: 56, height: 56)
-                Image(systemName: statusIcon).font(.system(size: 26)).foregroundStyle(statusColor)
+                Circle().fill(Color.green.opacity(0.12)).frame(width: 54, height: 54)
+                Image(systemName: "bolt.fill").font(.system(size: 24)).foregroundStyle(.green)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("充电中").font(.title2.bold()).foregroundStyle(.green)
+                Text("充电中").font(.system(size: 20, weight: .bold)).foregroundStyle(.green)
                 if remaining > 0 {
                     Text("预计 \(hours)h \(mins)m 后充满")
-                        .font(.subheadline).foregroundStyle(.secondary)
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
                 } else {
-                    Text("计算中...").font(.subheadline).foregroundStyle(.secondary)
+                    Text("计算中…").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 if sampler.currentLevel >= 80 {
                     Text(sampler.currentLevel >= 95 ? "涓流充电阶段" : "减速充电阶段")
-                        .font(.caption2).foregroundStyle(.orange)
+                        .font(.system(size: 10)).foregroundStyle(.orange)
                 }
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 2) {
                     Text("\(Int(sampler.currentLevel))")
-                        .font(.system(size: 30, weight: .bold, design: .rounded).monospacedDigit())
-                    Text("%").font(.title3).foregroundStyle(.secondary)
+                        .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
+                    Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
                 }
                 Text(String(format: "%.1fW", sampler.currentWattage))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.system(size: 10, design: .rounded).monospacedDigit()).foregroundStyle(.tertiary)
             }
         }
-        .padding(18)
-        .background {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
-        }
+        .glassCard()
     }
 
     private var dischargingHero: some View {
@@ -168,20 +158,20 @@ struct UsageTab: View {
 
         return HStack(spacing: 16) {
             ZStack {
-                Circle().fill(statusColor.opacity(0.12)).frame(width: 56, height: 56)
-                Image(systemName: statusIcon).font(.system(size: 26)).foregroundStyle(statusColor)
+                Circle().fill(statusColor.opacity(0.12)).frame(width: 54, height: 54)
+                Image(systemName: statusIcon).font(.system(size: 24)).foregroundStyle(statusColor)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("预估续航").font(.caption).foregroundStyle(.secondary)
+                Text("预估续航").font(.system(size: 11)).foregroundStyle(.secondary)
                 if hasEstimate {
                     HStack(alignment: .firstTextBaseline, spacing: 2) {
                         Text("\(hours)")
-                            .font(.system(size: 32, weight: .bold, design: .rounded).monospacedDigit())
-                        Text("h \(mins)m").font(.title3).foregroundStyle(.secondary)
+                            .font(.system(size: 36, weight: .bold, design: .rounded).monospacedDigit())
+                        Text("h \(mins)m").font(.system(size: 14)).foregroundStyle(.secondary)
                     }
                 } else {
-                    Text("计算中...")
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                    Text("计算中…")
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -189,47 +179,26 @@ struct UsageTab: View {
             VStack(alignment: .trailing, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 2) {
                     Text("\(Int(sampler.currentLevel))")
-                        .font(.system(size: 30, weight: .bold, design: .rounded).monospacedDigit())
-                    Text("%").font(.title3).foregroundStyle(.secondary)
+                        .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
+                    Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
                 }
                 Text(String(format: "%.1fW", sampler.currentWattage))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.system(size: 10, design: .rounded).monospacedDigit()).foregroundStyle(.tertiary)
             }
         }
-        .padding(18)
-        .background {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
-        }
+        .glassCard()
     }
 
     // MARK: - 2. 关键指标 4 格
 
     private var metricsGrid: some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-            metricTile("循环", value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", icon: "arrow.triangle.2.circlepath", color: .blue)
-            metricTile("健康度", value: String(format: "%.0f", sampler.systemHealthPercent), unit: "%", icon: "heart.fill", color: .green)
-            metricTile("温度", value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—", unit: sampler.currentTemperature > 0.5 ? "°C" : "", icon: "thermometer", color: .orange)
-            metricTile("容量", value: capacityString, unit: "mAh", icon: "battery.100", color: .indigo)
-        }
-    }
-
-    private func metricTile(_ label: String, value: String, unit: String, icon: String, color: Color) -> some View {
-        VStack(spacing: 6) {
-            Image(systemName: icon).font(.system(size: 14)).foregroundStyle(color)
-            HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Text(value).font(.system(size: 16, weight: .bold, design: .rounded).monospacedDigit())
-                Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
-            }
-            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-        .background {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.03), radius: 2, y: 1)
+        HStack(spacing: BBDesign.itemSpacing) {
+            StatTile(icon: "arrow.triangle.2.circlepath", tint: .blue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环")
+            StatTile(icon: "heart.fill", tint: .green, value: String(format: "%.0f", sampler.systemHealthPercent), unit: "%", label: "健康度")
+            StatTile(icon: "thermometer", tint: .orange,
+                     value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
+                     unit: sampler.currentTemperature > 0.5 ? "°C" : "", label: "温度")
+            StatTile(icon: "battery.100", tint: .indigo, value: capacityString, unit: capacityString == "—" ? "" : "mAh", label: "容量")
         }
     }
 
@@ -272,14 +241,20 @@ struct UsageTab: View {
             let points = filterChangedPoints(recent: recent, start: start)
             let windowMin = max(30, ceil((points.last?.relMin ?? 0) / 30) * 30)
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
                 HStack {
-                    Text(sampler.currentIsCharging ? "充电曲线" : "耗电曲线")
-                        .font(.subheadline.bold())
-                    Spacer()
+                    SectionHeader(
+                        title: sampler.currentIsCharging ? "充电曲线" : "耗电曲线",
+                        systemImage: "chart.line.uptrend.xyaxis",
+                        tint: sampler.currentIsCharging ? .green : .accentColor
+                    )
                     if let first = recent.first {
                         Text("起始 \(Int(first.level))%")
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            .font(.system(size: 10, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.05), in: Capsule())
                     }
                 }
 
@@ -287,8 +262,8 @@ struct UsageTab: View {
                     HStack {
                         Spacer()
                         VStack(spacing: 6) {
-                            Image(systemName: "chart.line.uptrend.xyaxis").font(.title2).foregroundStyle(.tertiary)
-                            Text("数据采集中...").font(.caption).foregroundStyle(.secondary)
+                            Image(systemName: "chart.line.uptrend.xyaxis").font(.system(size: 24)).foregroundStyle(.quaternary)
+                            Text("数据采集中…").font(.system(size: 11)).foregroundStyle(.secondary)
                         }.frame(height: 140)
                         Spacer()
                     }
@@ -296,12 +271,7 @@ struct UsageTab: View {
                     chartContent(points: points, windowMin: windowMin)
                 }
             }
-            .padding(16)
-            .background {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(.regularMaterial)
-                    .shadow(color: .black.opacity(0.04), radius: 3, y: 2)
-            }
+            .glassCard()
         }
     }
 
@@ -346,9 +316,11 @@ struct UsageTab: View {
             }
             if let selected = selectedPoint {
                 RuleMark(x: .value("时长", selected.relMin))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.quaternary)
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
                 PointMark(x: .value("时长", selected.relMin), y: .value("电量", selected.level))
+                    .foregroundStyle(lineColor)
+                    .symbolSize(70)
                     .annotation(position: .top, alignment: .center) {
                         selectedAnnotation(selected)
                     }
@@ -368,15 +340,21 @@ struct UsageTab: View {
                     if let v = value.as(Double.self) {
                         let absTime = startTime.addingTimeInterval(v * 60)
                         Text(absTime, format: .dateTime.hour().minute())
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                AxisGridLine()
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3]))
+                    .foregroundStyle(.quaternary)
             }
         }
         .chartYAxis {
             AxisMarks(values: [0, 25, 50, 75, 100]) {
-                AxisValueLabel().foregroundStyle(.primary)
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2])).foregroundStyle(.quaternary)
+                AxisValueLabel()
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                    .foregroundStyle(.quinary)
             }
         }
         .chartXScale(domain: 0...windowMin)
@@ -387,17 +365,18 @@ struct UsageTab: View {
     @ChartContentBuilder
     private func lineMark(p: (relMin: Double, level: Double, time: Date), color: Color) -> some ChartContent {
         LineMark(x: .value("时长", p.relMin), y: .value("电量", p.level))
-            .foregroundStyle(color)
+            .foregroundStyle(color.gradient)
             .interpolationMethod(.catmullRom)
-            .lineStyle(StrokeStyle(lineWidth: 1.5))
+            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
     }
 
     @ChartContentBuilder
     private func areaMark(p: (relMin: Double, level: Double, time: Date), color: Color) -> some ChartContent {
         AreaMark(x: .value("时长", p.relMin), yStart: .value("底", 0), yEnd: .value("电量", p.level))
             .foregroundStyle(LinearGradient(
-                colors: [color.opacity(0.1), color.opacity(0)],
+                colors: [color.opacity(0.16), color.opacity(0)],
                 startPoint: .top, endPoint: .bottom))
+            .interpolationMethod(.catmullRom)
     }
 
     /// 根据窗口大小决定刻度间隔
@@ -453,12 +432,7 @@ struct UsageTab: View {
                     miniStat("起始", value: "\(Int(first.level))%")
                     miniStat("当前", value: "\(Int(last.level))%")
                 }
-                .padding(16)
-                .background {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(.regularMaterial)
-                        .shadow(color: .black.opacity(0.04), radius: 3, y: 2)
-                }
+                .glassCard()
             }
         }
     }
@@ -557,12 +531,7 @@ struct UsageTab: View {
                     labelStat("适配器", value: adapterWattsString, icon: "power")
                 }
             }
-            .padding(16)
-            .background {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(.regularMaterial)
-                    .shadow(color: .black.opacity(0.04), radius: 3, y: 2)
-            }
+            .glassCard()
         }
     }
 
@@ -575,50 +544,28 @@ struct UsageTab: View {
         let totalMin = screenMin + sleepMin
         let label = isDischarging ? "本次使用" : "上次使用"
 
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             HStack {
-                Text(label).font(.subheadline.bold()).foregroundStyle(.secondary)
-                Spacer()
+                SectionHeader(title: label, systemImage: "clock.fill", tint: .indigo)
                 if !isDischarging && totalMin == 0 {
-                    Text("暂无记录").font(.caption).foregroundStyle(.tertiary)
+                    Text("暂无记录").font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
             }
-            HStack(spacing: 10) {
-                statCard("亮屏", minutes: screenMin, icon: "sun.max.fill", color: .yellow)
-                statCard("休眠", minutes: sleepMin, icon: "moon.fill", color: .indigo)
-                statCard("总计", minutes: totalMin, icon: "clock.fill", color: .blue)
+            HStack(spacing: BBDesign.itemSpacing) {
+                StatTile(icon: "sun.max.fill", tint: .yellow, value: formatMinutes(screenMin), unit: "", label: "亮屏")
+                StatTile(icon: "moon.fill", tint: .indigo, value: formatMinutes(sleepMin), unit: "", label: "休眠")
+                StatTile(icon: "clock.fill", tint: .blue, value: formatMinutes(totalMin), unit: "", label: "总计")
             }
         }
-        .padding(16)
-        .background {
-            RoundedRectangle(cornerRadius: 14)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 3, y: 2)
-        }
-    }
-
-    private func statCard(_ title: String, minutes: Int, icon: String, color: Color) -> some View {
-        VStack(spacing: 6) {
-            Image(systemName: icon).font(.system(size: 18)).foregroundStyle(color)
-            Text(formatMinutes(minutes)).font(.system(size: 16, weight: .bold, design: .rounded).monospacedDigit())
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 14)
-        .background {
-            RoundedRectangle(cornerRadius: 14)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 3, y: 2)
-        }
+        .glassCard()
     }
 
     // MARK: - 6. 电池信息卡片
 
     private var batteryInfoCard: some View {
         let info = sampler.currentInfo
-        return VStack(alignment: .leading, spacing: 10) {
-            Text("电池信息").font(.subheadline.bold()).foregroundStyle(.secondary)
-
+        return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "电池信息", systemImage: "info.circle.fill", tint: .teal)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 infoTile("制造商", value: info?.manufacturer ?? "—", icon: "building.2")
                 infoTile("序列号", value: info?.serialNumber ?? "—", icon: "number")
@@ -630,26 +577,21 @@ struct UsageTab: View {
                 infoTile("适配器功率", value: adapterWattsString, icon: "power")
             }
         }
-        .padding(16)
-        .background {
-            RoundedRectangle(cornerRadius: 14)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 3, y: 2)
-        }
+        .glassCard()
     }
 
     private func infoTile(_ label: String, value: String, icon: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
-                Image(systemName: icon).font(.system(size: 10)).foregroundStyle(.secondary)
-                Text(label).font(.caption2).foregroundStyle(.secondary)
+                Image(systemName: icon).font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
             }
-            Text(value).font(.system(size: 12, weight: .medium, design: .rounded).monospacedDigit())
+            Text(value).font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
                 .lineLimit(1).minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
-        .background { RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)) }
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
     }
 
     // MARK: - 辅助
