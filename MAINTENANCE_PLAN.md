@@ -23,7 +23,7 @@
 |------|------|------|------|
 | T-01 | `powermetrics` 每 10s 子进程，CPU 占用不可忽略（自身功耗可能 >0.5W） | BatteryReader.swift / main.swift | ✅ 已修复（2026-08-22 helper 4.0：懒启动常驻流式进程，XPC 即时回缓存；60s 空闲自停，app 关闭/关开关后零开销） |
 | T-02 | `system_profiler` 极慢（1-3s），首次/过期后阻塞后台队列 | BatteryReader.swift | ✅ 已修复（后台 prefetchStaticInfo 缓存） |
-| T-03 | JSON 全量重写：`saveJSON` 每 60s 把整个数组重新编码写盘 | DataStore.swift | 部分修复（2026-08-22 补解码失败 .bak 备份 + 写盘错误日志；增量写盘仍待办） |
+| T-03 | JSON 全量重写：`saveJSON` 每 60s 把整个数组重新编码写盘 | DataStore.swift | ✅ 已修复（2026-08-23 改为追加式 `snapshots.jsonl`：每分钟一行；仅 mark synced/远端合并/超窗裁剪时原子 compact；v1 `snapshots.json` 迁移后保留作回退） |
 
 ### 中等
 
@@ -116,6 +116,37 @@ swift test
 ---
 
 ## 五、变更日志
+
+### 2026-08-23（第二批）— 信息架构、SwiftUI 性能边界、功率口径与追加存储重构
+
+#### 功率数据模型（口径修正）
+- 「系统总功耗」拆为双口径：`systemLoadWatts`（系统负载）与 `batteryPowerWatts`（电池包充入/放出功率绝对值，方向由 charging/source 表达），另带 `systemPowerAvailable` / `systemPowerIsEstimated`
+- BatteryReader 读取优先级：PowerTelemetryData.SystemLoad（实测 mW，本机实测 13759mW≈13.8W）→ 可验证旧节点 SystemPower → 离电电池放电功率（标估算）→ 接电无遥测时明确不可用；不再用电池净功率（满电接电时 0.x W）冒充系统总负载
+- 异常值过滤 `normalizedTelemetryPower`：nil/负值/非有限值/UInt64 回绕哨兵（本机 IORegistry 实测存在）/超合理范围 → 0
+- v1 快照兼容：充电快照 available=false 只作电池功率；离电快照作估算系统负载；不进入系统负载统计与曲线
+- DrainRateCalculator 功率估算改用 batteryPower；CycleTracker 平均功率同改
+- WebDAV JSONL 补齐 batteryWatt/powerAvailable/powerEstimated 三字段，下载端对远端旧格式按同一规则推导
+
+#### 持久化（T-03 关闭）
+- 新增追加式 `snapshots.jsonl`：每分钟采样只追加一行；mark synced、远端合并、超窗裁剪时才原子 compact
+- 首次启动从 snapshots.json 无损迁移；旧文件保留作回退副本；末尾半行/单行损坏跳过不致命
+- 保留窗口改为按 timestamp 裁剪 24h（±5min 时钟偏差容忍、未来点拒绝）+ 1500 条硬上限
+- dirty 同步语义不变：markSnapshotsSynced 经 compact 持久化
+
+#### 屏幕状态统计
+- SleepWatcher 增加 screensDidSleep/screensDidWake 监听；screenOn = !isSleeping && !screensSleeping
+- 显示器关闭但机器醒着的分钟计入「屏幕关闭/休眠」（文案不再声称只有系统睡眠）
+
+#### SwiftUI 性能边界与信息架构
+- PowerSampler 迁移 @Observable（属性级追踪）；删除空 staticInfoObserver 与 objectWillChange 叙述；组件样本时间戳 lastComponentPowerAt 带回 App（>30s 视为陈旧，停止显示占比）
+- 概览页重构：英雄卡（电量/状态 + 续航或充满估算 + 电池功率/系统负载双读数带来源标签）→ 健康指标 → 时段趋势+摘要合并区 → 使用时间 → 默认折叠「电池与电源详情」；时段分析进 UsageSessionModel，仅快照通知/时段切换时重算
+- 功耗页重构：系统负载主值（来源标签）→ 负载构成（占比仅在负载有效且样本新鲜时显示；显示器标注估算）→ 系统负载历史趋势（统计只含可用快照）→ 折叠「电源诊断」→ 底部「高级采样」（Helper 开关）
+- 记录页重构：「循环」更名「离电记录」（内部 ChargeCycle 保留）；新增 OffPowerRecordAnalyzer 归一化趋势（折算满电续航=时长÷降幅×100；仅下降 ≥5% 且持续 ≥15min 参与；不足显示「数据不足」）；列表 LazyVStack
+- 全部滚动页面 LazyVStack；移除卡片阴影与图标发光；SessionChartPlot/PowerChartPlot 为输入 Equatable 的隔离子树；概览电量曲线设 480 点上限
+- SyncEngine 远端解析收敛到 `BatterySnapshot.from(remoteJSON:)`
+
+#### 测试
+- 新增 TelemetryNormalizationTests / SnapshotCompatTests（v1/v2 编解码、远程往返、保留窗口）/ DataStoreJournalTests（迁移/追加/坏行/compact/dirty/裁剪，注入临时目录）/ OffPowerRecordAnalyzerTests；DrainRateCalculatorTests 增加 batteryPower 口径与 AC 排除反例
 
 ### 2026-08-23 — 主窗口、曲线图表与应用图标统一重设计
 

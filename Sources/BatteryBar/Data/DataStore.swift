@@ -16,6 +16,7 @@ final class DataStore: @unchecked Sendable {
 
     private let baseDir: URL
     private let snapshotsFile: URL
+    private let snapshotJournalFile: URL
     private let cyclesFile: URL
     private let configFile: URL
     private let usageStateFile: URL
@@ -28,10 +29,13 @@ final class DataStore: @unchecked Sendable {
     private var usageState: UsageState = UsageState()
     private var storedRefreshInterval: Double = 1
 
-    private init() {
+    /// 生产环境使用 shared（默认 Application Support 目录）；
+    /// 测试可注入临时目录隔离读写。
+    init(directory: URL? = nil) {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        baseDir = appSupport.appendingPathComponent("BatteryBar", isDirectory: true)
+        baseDir = directory ?? appSupport.appendingPathComponent("BatteryBar", isDirectory: true)
         snapshotsFile = baseDir.appendingPathComponent("snapshots.json")
+        snapshotJournalFile = baseDir.appendingPathComponent("snapshots.jsonl")
         cyclesFile = baseDir.appendingPathComponent("cycles.json")
         configFile = baseDir.appendingPathComponent("sync-config.json")
         usageStateFile = baseDir.appendingPathComponent("usage-state.json")
@@ -50,7 +54,14 @@ final class DataStore: @unchecked Sendable {
         queue.sync {
             // 核心数据文件解码失败时先备份 .bak 再从空数据重建，
             // 避免格式损坏导致的数据静默丢失（MAINTENANCE_PLAN 回滚策略的落地）
-            snapshots = loadJSON(from: snapshotsFile, backupOnFailure: true) ?? []
+            let journalSnapshots = loadSnapshotJournal()
+            let loaded = journalSnapshots ?? loadJSON(from: snapshotsFile, backupOnFailure: true) ?? []
+            snapshots = Self.retainedSnapshots(loaded, now: Date())
+            // 第一次启动迁移旧数组文件；之后每条采样只追加一行。
+            // 同时清掉超出保留窗口的旧记录与可能存在的末尾半行。
+            if journalSnapshots == nil || snapshots.count != loaded.count {
+                rewriteSnapshotJournal()
+            }
             cycles = loadJSON(from: cyclesFile, backupOnFailure: true) ?? []
             syncConfig = loadJSON(from: configFile, backupOnFailure: true) ?? .default
         }
@@ -61,11 +72,13 @@ final class DataStore: @unchecked Sendable {
     func saveSnapshot(_ snap: BatterySnapshot) {
         queue.async { [self] in
             snapshots.append(snap)
-            // 只保留最近 24h（1440 条）
-            if snapshots.count > 2000 {
-                snapshots = Array(snapshots.suffix(1440))
+            let retained = Self.retainedSnapshots(snapshots, now: snap.timestamp)
+            if retained.count == snapshots.count {
+                appendSnapshotToJournal(snap)
+            } else {
+                snapshots = retained
+                rewriteSnapshotJournal()
             }
-            saveJSON(snapshots, to: snapshotsFile)
             postOnMain(.batterySnapshotsDidChange)
         }
     }
@@ -89,7 +102,7 @@ final class DataStore: @unchecked Sendable {
             for i in snapshots.indices where ids.contains(snapshots[i].id) {
                 snapshots[i].dirty = false
             }
-            saveJSON(snapshots, to: snapshotsFile)
+            rewriteSnapshotJournal()
         }
     }
 
@@ -109,8 +122,11 @@ final class DataStore: @unchecked Sendable {
                     byID[snap.id] = snap
                 }
             }
-            snapshots = byID.values.sorted { $0.timestamp < $1.timestamp }
-            saveJSON(snapshots, to: snapshotsFile)
+            snapshots = Self.retainedSnapshots(
+                byID.values.sorted { $0.timestamp < $1.timestamp },
+                now: Date()
+            )
+            rewriteSnapshotJournal()
             postOnMain(.batterySnapshotsDidChange)
         }
     }
@@ -211,7 +227,73 @@ final class DataStore: @unchecked Sendable {
         }
     }
 
+    /// 测试钩子：等待队列上已入队的写操作完成（单测验证 journal 落盘结果用）
+    func flushPendingWritesForTesting() {
+        queue.sync {}
+    }
+
     // MARK: - JSON helpers
+
+    /// 只保留时间窗口内的记录，并用硬上限防御异常高频或远端脏数据。
+    static func retainedSnapshots(
+        _ source: [BatterySnapshot],
+        now: Date,
+        hours: TimeInterval = 24,
+        maxCount: Int = 1_500
+    ) -> [BatterySnapshot] {
+        guard maxCount > 0 else { return [] }
+        let cutoff = now.addingTimeInterval(-hours * 3600)
+        let recent = source
+            .filter { $0.timestamp >= cutoff && $0.timestamp <= now.addingTimeInterval(300) }
+            .sorted { $0.timestamp < $1.timestamp }
+        return recent.count > maxCount ? Array(recent.suffix(maxCount)) : recent
+    }
+
+    private func loadSnapshotJournal() -> [BatterySnapshot]? {
+        guard FileManager.default.fileExists(atPath: snapshotJournalFile.path),
+              let data = try? Data(contentsOf: snapshotJournalFile) else { return nil }
+        var decoded: [BatterySnapshot] = []
+        for line in data.split(separator: 0x0A) where !line.isEmpty {
+            do {
+                decoded.append(try JSONDecoder().decode(BatterySnapshot.self, from: Data(line)))
+            } catch {
+                // 追加日志在掉电时最多留下末尾半行；跳过坏行，保留其余历史。
+                dataStoreLogger.error("Skip corrupt snapshot journal line: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return decoded
+    }
+
+    private func appendSnapshotToJournal(_ snapshot: BatterySnapshot) {
+        do {
+            var line = try JSONEncoder().encode(snapshot)
+            line.append(0x0A)
+            if !FileManager.default.fileExists(atPath: snapshotJournalFile.path) {
+                try line.write(to: snapshotJournalFile, options: .atomic)
+                return
+            }
+            let handle = try FileHandle(forWritingTo: snapshotJournalFile)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: line)
+            try handle.close()
+        } catch {
+            dataStoreLogger.error("Append snapshots.jsonl failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func rewriteSnapshotJournal() {
+        do {
+            let encoder = JSONEncoder()
+            var data = Data()
+            for snapshot in snapshots {
+                data.append(try encoder.encode(snapshot))
+                data.append(0x0A)
+            }
+            try data.write(to: snapshotJournalFile, options: .atomic)
+        } catch {
+            dataStoreLogger.error("Compact snapshots.jsonl failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
 
     private func loadJSON<T: Decodable>(from url: URL, backupOnFailure: Bool = false) -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }

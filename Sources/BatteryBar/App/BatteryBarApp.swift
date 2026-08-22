@@ -13,7 +13,7 @@ struct BatteryBarApp: App {
         // 裸 NSWindow + NSHostingController，材质渲染退化，已回滚）。
         WindowGroup(id: "main") {
             ContentView()
-                .environmentObject(appDelegate.sampler)
+                .environment(appDelegate.sampler)
                 .environmentObject(appDelegate.syncEngine)
                 .background(OpenWindowRelay())
                 .onAppear {
@@ -311,7 +311,7 @@ private enum AppSection: Int, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .overview: return "电池概览"
-        case .cycles: return "循环与趋势"
+        case .cycles: return "离电记录"
         case .power: return "功耗分析"
         case .sync: return "数据与同步"
         }
@@ -320,7 +320,7 @@ private enum AppSection: Int, CaseIterable, Identifiable {
     var shortTitle: String {
         switch self {
         case .overview: return "概览"
-        case .cycles: return "循环"
+        case .cycles: return "记录"
         case .power: return "功耗"
         case .sync: return "同步"
         }
@@ -329,7 +329,7 @@ private enum AppSection: Int, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .overview: return "battery.75percent"
-        case .cycles: return "arrow.triangle.2.circlepath"
+        case .cycles: return "list.bullet.rectangle"
         case .power: return "waveform.path.ecg"
         case .sync: return "arrow.triangle.branch"
         }
@@ -382,7 +382,6 @@ struct ContentView: View {
                     .interpolation(.high)
                     .frame(width: 34, height: 34)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .shadow(color: Color.black.opacity(0.14), radius: 6, x: 0, y: 3)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("BatteryBar")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
@@ -464,7 +463,6 @@ struct ContentView: View {
                     Circle()
                         .fill(section.tint)
                         .frame(width: 5, height: 5)
-                        .shadow(color: section.tint.opacity(0.55), radius: 3)
                 }
             }
             .foregroundStyle(isSelected ? Color.primary : Color.secondary)
@@ -491,7 +489,7 @@ struct ContentView: View {
 
 /// 把每秒变化的实时状态隔离在小视图内，避免 ContentView 的导航与页面路由一起失效。
 private struct SidebarBatteryStatus: View {
-    @EnvironmentObject var sampler: PowerSampler
+    @Environment(PowerSampler.self) private var sampler
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -525,7 +523,7 @@ private struct SidebarBatteryStatus: View {
                     }
             }
             .frame(height: 5)
-            Text(sampler.currentIsCharging ? "正在充电" : String(format: "实时 %.1f W", sampler.currentWattage))
+            Text(sampler.currentIsCharging ? "正在充电" : sidebarPowerText)
                 .font(.system(size: 9, design: .rounded).monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -537,6 +535,15 @@ private struct SidebarBatteryStatus: View {
         }
     }
 
+    /// 离电时系统负载与电池放出功率等价（估算）；接电无遥测时负载不可用，
+    /// 显示电池功率并如实标注，不冒充系统总功耗。
+    private var sidebarPowerText: String {
+        if sampler.currentPowerAvailable {
+            return String(format: "系统负载 %.1f W", sampler.currentWattage)
+        }
+        return String(format: "电池功率 %.1f W", sampler.currentBatteryPower)
+    }
+
     private var sidebarStatusColor: Color {
         if sampler.currentIsCharging { return .bbMint }
         if sampler.currentLevel <= 20 { return .red }
@@ -546,7 +553,7 @@ private struct SidebarBatteryStatus: View {
 
 /// 状态栏弹窗
 struct PopoverMenuBarView: View {
-    @ObservedObject var sampler: PowerSampler
+    let sampler: PowerSampler
 
     var body: some View {
         PopoverView(sampler: sampler)

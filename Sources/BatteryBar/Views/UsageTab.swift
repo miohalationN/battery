@@ -2,13 +2,13 @@ import SwiftUI
 import Charts
 
 struct UsageTab: View {
-    @EnvironmentObject var sampler: PowerSampler
-    @State private var snapshots: [BatterySnapshot] = []
-    @State private var selectedPoint: (relMin: Double, level: Double, time: Date)?
+    @Environment(PowerSampler.self) private var sampler
+    @State private var session = UsageSessionModel()
+    @State private var detailExpanded = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            LazyVStack(alignment: .leading, spacing: 14) {
                 PageHeader(
                     title: "电池概览",
                     subtitle: "续航、健康与当前充放电状态",
@@ -17,43 +17,37 @@ struct UsageTab: View {
                     badge: "\(Int(sampler.currentLevel))%"
                 )
 
-                // 1. 状态英雄卡片
-                statusHeroCard
+                StatusHero(sampler: sampler)
 
-                // 2. 关键指标 4 格（循环/健康度/温度/容量）
-                metricsGrid
+                healthMetricsGrid
 
-                // 3. 电量曲线（满电不显示）
-                if !isFullCharge {
-                    chartCard
-                    cycleSummaryCard
-                }
+                SessionTrendCard(model: session)
 
-                // 4. 满电时显示充电摘要
-                if isFullCharge {
-                    chargeSessionCard
-                }
-
-                // 5. 使用时间统计
-                // 离电时显示当前周期统计；充电时显示上次离电周期统计
                 usageStatsRow
 
-                // 6. 电池信息卡片
-                batteryInfoCard
+                batteryDetailSection
             }
             .padding(.horizontal, BBDesign.pagePadding)
             .padding(.top, 46)
             .padding(.bottom, BBDesign.pagePadding)
         }
         .onAppear {
-            snapshots = DataStore.shared.allSnapshots()
+            reloadSession()
         }
         .onReceive(NotificationCenter.default.publisher(for: .batterySnapshotsDidChange)) { _ in
-            snapshots = DataStore.shared.allSnapshots()
+            reloadSession()
+        }
+        // 时段归属只随插拔/充满切换；重算在通知驱动的一处完成，body 不做任何扫描
+        .onChange(of: sessionKind) {
+            reloadSession()
         }
     }
 
-    // MARK: - 状态判断
+    // MARK: - 时段模型（重算只发生在快照变化或时段切换）
+
+    private func reloadSession() {
+        session.reload(snapshots: DataStore.shared.allSnapshots(), kind: sessionKind)
+    }
 
     /// 是否连接电源（拔电后立即变为 false，不依赖电量百分比）
     private var isPluggedIn: Bool {
@@ -64,6 +58,11 @@ struct UsageTab: View {
     /// 拔电后即使电量还是 100%，也按离电处理（显示耗电曲线 + 续航预估）。
     private var isFullCharge: Bool {
         isPluggedIn && sampler.currentLevel >= 100
+    }
+
+    private var sessionKind: UsageSessionModel.SessionKind {
+        if isFullCharge { return .lastCharge }
+        return sampler.currentIsCharging ? .currentCharge : .currentDischarge
     }
 
     private var statusColor: Color {
@@ -80,129 +79,16 @@ struct UsageTab: View {
         return "battery.75percent"
     }
 
-    // MARK: - 1. 状态英雄卡片
+    // MARK: - 健康指标（低频字段：循环次数/健康度/温度/容量）
 
-    @ViewBuilder
-    private var statusHeroCard: some View {
-        if isFullCharge {
-            fullChargeHero
-        } else if sampler.currentIsCharging {
-            chargingHero
-        } else {
-            dischargingHero
-        }
-    }
-
-    private var fullChargeHero: some View {
-        HStack(spacing: 16) {
-            ZStack {
-                Circle().fill(Color.green.opacity(0.12)).frame(width: 54, height: 54)
-                Image(systemName: "checkmark.circle.fill").font(.system(size: 24)).foregroundStyle(.green)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("电池已充满").font(.system(size: 20, weight: .bold))
-                Text("已连接电源适配器")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(String(format: "%.0f%%", sampler.systemHealthPercent))
-                    .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.green)
-                Text("健康度").font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
-        }
-        .glassCard(accent: .bbMint)
-    }
-
-    private var chargingHero: some View {
-        let remaining = estimatedChargeTime()
-        let hours = Int(remaining / 3600)
-        let mins = Int((remaining.truncatingRemainder(dividingBy: 3600)) / 60)
-
-        return HStack(spacing: 16) {
-            ZStack {
-                Circle().fill(Color.green.opacity(0.12)).frame(width: 54, height: 54)
-                Image(systemName: "bolt.fill").font(.system(size: 24)).foregroundStyle(.green)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("充电中").font(.system(size: 20, weight: .bold)).foregroundStyle(.green)
-                if remaining > 0 {
-                    Text("预计 \(hours)h \(mins)m 后充满")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                } else {
-                    Text("计算中…").font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                if sampler.currentLevel >= 80 {
-                    Text(sampler.currentLevel >= 95 ? "涓流充电阶段" : "减速充电阶段")
-                        .font(.system(size: 10)).foregroundStyle(.orange)
-                }
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 2) {
-                    Text("\(Int(sampler.currentLevel))")
-                        .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
-                    Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
-                }
-                Text(String(format: "%.1fW", sampler.currentWattage))
-                    .font(.system(size: 10, design: .rounded).monospacedDigit()).foregroundStyle(.tertiary)
-            }
-        }
-        .glassCard(accent: .bbMint)
-    }
-
-    private var dischargingHero: some View {
-        let rate = sampler.cachedDrainRate
-        // 考虑5%放电截止保护：电量到5%会自动关机，实际可用电量为 level - 5
-        let usableLevel = max(0, sampler.currentLevel - 5)
-        let remaining = rate > 0 ? usableLevel / rate : 0
-        let hours = Int(remaining); let mins = Int((remaining - Double(hours)) * 60)
-        let hasEstimate = rate > 0
-
-        return HStack(spacing: 16) {
-            ZStack {
-                Circle().fill(statusColor.opacity(0.12)).frame(width: 54, height: 54)
-                Image(systemName: statusIcon).font(.system(size: 24)).foregroundStyle(statusColor)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("预估续航").font(.system(size: 11)).foregroundStyle(.secondary)
-                if hasEstimate {
-                    HStack(alignment: .firstTextBaseline, spacing: 2) {
-                        Text("\(hours)")
-                            .font(.system(size: 36, weight: .bold, design: .rounded).monospacedDigit())
-                        Text("h \(mins)m").font(.system(size: 14)).foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("计算中…")
-                        .font(.system(size: 26, weight: .bold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 2) {
-                    Text("\(Int(sampler.currentLevel))")
-                        .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
-                    Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
-                }
-                Text(String(format: "%.1fW", sampler.currentWattage))
-                    .font(.system(size: 10, design: .rounded).monospacedDigit()).foregroundStyle(.tertiary)
-            }
-        }
-        .glassCard(accent: statusColor)
-    }
-
-    // MARK: - 2. 关键指标 4 格
-
-    private var metricsGrid: some View {
+    private var healthMetricsGrid: some View {
         HStack(spacing: BBDesign.itemSpacing) {
-            StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环")
             StatTile(icon: "heart.fill", tint: .bbMint, value: String(format: "%.0f", sampler.systemHealthPercent), unit: "%", label: "健康度")
+            StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环次数")
             StatTile(icon: "thermometer", tint: .orange,
                      value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
                      unit: sampler.currentTemperature > 0.5 ? "°C" : "", label: "温度")
-            StatTile(icon: "battery.100", tint: .indigo, value: capacityString, unit: capacityString == "—" ? "" : "mAh", label: "容量")
+            StatTile(icon: "battery.100", tint: .indigo, value: capacityString, unit: capacityString == "—" ? "" : "mAh", label: "满充容量")
         }
     }
 
@@ -211,128 +97,371 @@ struct UsageTab: View {
         return "\(info.maxCapacity)"
     }
 
-    // MARK: - 3. 电量曲线
+    // MARK: - 使用时间统计
 
-    /// 当前周期起点：找最后一次"切换到当前状态"的点。
-    /// 离电时返回拔电后第一个放电点；充电时返回插电后第一个充电点。
-    private func currentCycleStart() -> Date? {
-        guard !isFullCharge else { return nil }
-        let targetCharging = sampler.currentIsCharging
-        var prevCharging: Bool?
-        var lastSwitch: Date?
-        for snap in snapshots {
-            if let prev = prevCharging, prev != snap.isCharging {
-                // snap 是切换后的第一个点
-                if snap.isCharging == targetCharging {
-                    lastSwitch = snap.timestamp
+    private var usageStatsRow: some View {
+        let isDischarging = !isPluggedIn
+        let screenMin = isDischarging ? sampler.screenOnTime : sampler.lastScreenOnTime
+        let sleepMin = isDischarging ? sampler.sleepTime : sampler.lastSleepTime
+        let totalMin = screenMin + sleepMin
+        let label = isDischarging ? "本次使用" : "上次使用"
+
+        return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            HStack {
+                SectionHeader(title: label, systemImage: "clock.fill", tint: .bbPurple)
+                if !isDischarging && totalMin == 0 {
+                    Text("暂无记录").font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
+                Spacer()
+                Text("屏幕关闭期间计入右侧，不等同系统睡眠")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
             }
-            prevCharging = snap.isCharging
-        }
-        // 没找到切换点，但有数据且状态一致：从第一个同状态点开始
-        if lastSwitch == nil {
-            for snap in snapshots where snap.isCharging == targetCharging {
-                return snap.timestamp
+            HStack(spacing: BBDesign.itemSpacing) {
+                StatTile(icon: "sun.max.fill", tint: .bbAmber, value: formatMinutes(screenMin), unit: "", label: "亮屏")
+                StatTile(icon: "moon.fill", tint: .indigo, value: formatMinutes(sleepMin), unit: "", label: "屏幕关闭/休眠")
+                StatTile(icon: "clock.fill", tint: .bbBlue, value: formatMinutes(totalMin), unit: "", label: "总计")
             }
         }
-        return lastSwitch ?? snapshots.first?.timestamp
+        .glassCard(accent: .bbPurple)
+    }
+
+    // MARK: - 电池与电源详情（默认折叠）
+
+    @ViewBuilder
+    private var batteryDetailSection: some View {
+        let info = sampler.currentInfo
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            DisclosureGroup(isExpanded: $detailExpanded) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    infoTile("设备名称", value: info?.deviceName ?? "—", icon: "laptopcomputer")
+                    infoTile("制造商", value: info?.manufacturer ?? "—", icon: "building.2")
+                    infoTile("序列号", value: info?.serialNumber ?? "—", icon: "number")
+                    infoTile("设计容量", value: designCapacityString(info), icon: "doc.text")
+                    infoTile("电压", value: sampler.currentVoltage > 0 ? String(format: "%.0f mV", sampler.currentVoltage) : "—", icon: "bolt")
+                    infoTile("电流", value: sampler.currentAmperage != 0 ? String(format: "%.0f mA", sampler.currentAmperage) : "—", icon: "arrow.left.arrow.right")
+                    infoTile("充电协议", value: info?.adapterProtocol ?? "—", icon: "powerplug")
+                    infoTile("适配器额定", value: adapterWattsString, icon: "power")
+                }
+                .padding(.top, 6)
+            } label: {
+                SectionHeader(title: "电池与电源详情", systemImage: "info.circle.fill", tint: .bbTeal)
+            }
+        }
+        .glassCard(accent: .bbTeal)
+    }
+
+    private func infoTile(_ label: String, value: String, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+            Text(value).font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
+                .lineLimit(1).minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
+    }
+
+    private var adapterWattsString: String {
+        guard let info = sampler.currentInfo, info.adapterWatts > 0 else { return "—" }
+        return String(format: "%.0f W", info.adapterWatts)
+    }
+
+    private func designCapacityString(_ info: BatteryInfo?) -> String {
+        guard let capacity = info?.designCapacity, capacity > 0 else { return "—" }
+        return "\(capacity) mAh"
+    }
+
+    private func formatMinutes(_ minutes: Int) -> String { "\(minutes / 60)h \(minutes % 60)m" }
+}
+
+// MARK: - 英雄卡（第一屏：电量/状态 + 可信估算 + 实时读数）
+
+/// 只读取采样器实时字段的小视图：瓦数每秒变化只失效这一小块，
+/// 页面根视图与历史 Chart 不随之重建。
+private struct StatusHero: View {
+    let sampler: PowerSampler
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            headline
+            LiveReadoutsRow(sampler: sampler)
+        }
+        .glassCard(accent: accentColor)
+    }
+
+    private var isPluggedIn: Bool { sampler.currentInfo?.externalConnected ?? false }
+    private var isFullCharge: Bool { isPluggedIn && sampler.currentLevel >= 100 }
+    private var accentColor: Color {
+        if isFullCharge || sampler.currentIsCharging { return .bbMint }
+        if sampler.currentLevel <= 20 { return .red }
+        return .bbBlue
     }
 
     @ViewBuilder
-    private var chartCard: some View {
-        if let start = currentCycleStart() {
-            let recent = snapshots.filter { $0.timestamp >= start }.sorted { $0.timestamp < $1.timestamp }
-            let points = filterChangedPoints(recent: recent, start: start)
-            let windowMin = max(30, ceil((points.last?.relMin ?? 0) / 30) * 30)
-
-            VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-                HStack {
-                    SectionHeader(
-                        title: sampler.currentIsCharging ? "充电曲线" : "耗电曲线",
-                        systemImage: "chart.line.uptrend.xyaxis",
-                        tint: sampler.currentIsCharging ? .bbMint : .bbBlue
-                    )
-                    if let first = recent.first {
-                        Text("起始 \(Int(first.level))%")
-                            .font(.system(size: 10, design: .rounded).monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color.primary.opacity(0.05), in: Capsule())
+    private var headline: some View {
+        if isFullCharge {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle().fill(Color.green.opacity(0.12)).frame(width: 54, height: 54)
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 24)).foregroundStyle(.green)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("电池已充满").font(.system(size: 20, weight: .bold))
+                    Text("已连接电源适配器")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 2) {
+                        Text("\(Int(sampler.currentLevel))")
+                            .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
+                        Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
+                    }
+                    Text(String(format: "健康度 %.0f%%", sampler.systemHealthPercent))
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+            }
+        } else if sampler.currentIsCharging {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle().fill(Color.green.opacity(0.12)).frame(width: 54, height: 54)
+                    Image(systemName: "bolt.fill").font(.system(size: 24)).foregroundStyle(.green)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("充电中").font(.system(size: 20, weight: .bold)).foregroundStyle(.green)
+                    if remainingToFull > 0 {
+                        Text("预计 \(hoursText(remainingToFull)) 后充满")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    } else {
+                        Text("计算中…")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    if sampler.currentLevel >= 80 {
+                        Text(sampler.currentLevel >= 95 ? "涓流充电阶段" : "减速充电阶段")
+                            .font(.system(size: 10)).foregroundStyle(.orange)
                     }
                 }
-
-                HStack(spacing: 12) {
-                    ChartLegendItem(
-                        label: "电量",
-                        color: sampler.currentIsCharging ? .bbMint : .bbBlue,
-                        value: points.last.map { "\(Int($0.level))%" }
-                    )
-                    if let first = points.first, let last = points.last {
-                        let delta = last.level - first.level
-                        Text(String(format: "%@%.0f%%", delta > 0 ? "+" : "", delta))
-                            .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
-                            .foregroundStyle(delta >= 0 ? Color.bbMint : Color.secondary)
+                Spacer()
+                levelBadge
+            }
+        } else {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle().fill(Color.bbBlue.opacity(0.12)).frame(width: 54, height: 54)
+                    Image(systemName: sampler.currentLevel <= 20 ? "battery.25percent" : "battery.75percent")
+                        .font(.system(size: 24))
+                        .foregroundStyle(sampler.currentLevel <= 20 ? Color.red : Color.bbBlue)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("预估续航").font(.system(size: 11)).foregroundStyle(.secondary)
+                    if sampler.cachedDrainRate > 0 {
+                        // 考虑5%放电截止保护：实际可用电量为 level - 5
+                        let remaining = max(0, sampler.currentLevel - 5) / sampler.cachedDrainRate
+                        Text("\(hoursText(remaining))")
+                            .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
+                    } else {
+                        Text("计算中…")
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Text("拖动曲线查看时点")
-                        .font(.system(size: 9))
+                }
+                Spacer()
+                levelBadge
+            }
+        }
+    }
+
+    private var levelBadge: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 2) {
+            Text("\(Int(sampler.currentLevel))")
+                .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
+            Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
+        }
+    }
+
+    private var remainingToFull: TimeInterval {
+        let rate = sampler.cachedChargeRate
+        guard rate > 0 else { return 0 }
+        return (100 - sampler.currentLevel) / rate * 3600
+    }
+
+    private func hoursText(_ seconds: TimeInterval) -> String {
+        let totalMinutes = Int(seconds / 60)
+        return "\(totalMinutes / 60)h \(totalMinutes % 60)m"
+    }
+}
+
+/// 电池功率 + 系统负载双读数。系统负载标注数据来源：
+/// 「系统遥测」「电池侧估算」或「当前不可用」。
+private struct LiveReadoutsRow: View {
+    let sampler: PowerSampler
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            HStack(spacing: 18) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(readoutLabel)
+                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                    Text(String(format: "%.1f W", sampler.currentBatteryPower))
+                        .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("系统负载")
+                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                    HStack(spacing: 5) {
+                        if sampler.currentPowerAvailable {
+                            Text(String(format: "%.1f W", sampler.currentWattage))
+                                .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
+                        } else {
+                            Text("—")
+                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        }
+                        Text(loadSourceText)
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(sourceTint)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(sourceTint.opacity(0.1), in: Capsule())
+                    }
+                }
+                Spacer()
+            }
+        }
+    }
+
+    private var readoutLabel: String {
+        sampler.currentIsCharging ? "电池充入功率" : "电池放出功率"
+    }
+
+    private var loadSourceText: String {
+        if sampler.currentPowerAvailable {
+            return sampler.currentPowerIsEstimated ? "电池侧估算" : "系统遥测"
+        }
+        return "当前不可用"
+    }
+
+    private var sourceTint: Color {
+        if !sampler.currentPowerAvailable { return .secondary }
+        return sampler.currentPowerIsEstimated ? .orange : .bbMint
+    }
+}
+
+// MARK: - 时段趋势 + 摘要（合并为一个区域）
+
+/// 电量趋势与时段摘要的容器。只在 session 模型变化（快照落盘 / 时段切换）时失效；
+/// 图表本身再经 EquatableView 隔离，选中态等局部状态不外溢。
+private struct SessionTrendCard: View {
+    let model: UsageSessionModel
+
+    var body: some View {
+        let isCharging = model.isCharging
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            HStack {
+                SectionHeader(
+                    title: model.cardTitle,
+                    systemImage: "chart.line.uptrend.xyaxis",
+                    tint: isCharging ? .bbMint : .bbBlue
+                )
+                Spacer()
+                if model.summary.durationMin >= 1 {
+                    Text(hoursText(model.summary.durationMin))
+                        .font(.system(size: 10, design: .rounded).monospacedDigit())
                         .foregroundStyle(.tertiary)
                 }
-
-                if points.isEmpty {
-                    EmptyChartState(
-                        title: "正在建立电量曲线",
-                        detail: "电量出现变化后会自动绘制",
-                        systemImage: "chart.line.uptrend.xyaxis"
-                    )
-                } else {
-                    chartContent(points: points, windowMin: windowMin)
-                }
             }
-            .glassCard(accent: sampler.currentIsCharging ? .bbMint : .bbBlue)
-        }
-    }
 
-    /// 只保留电量有变化的点，避免电量不变时往右画水平线
-    private func filterChangedPoints(recent: [BatterySnapshot], start: Date) -> [(relMin: Double, level: Double, time: Date)] {
-        var filtered: [BatterySnapshot] = []
-        var lastLevel: Double? = nil
-        for snap in recent {
-            if lastLevel == nil || snap.level != lastLevel {
-                filtered.append(snap)
-                lastLevel = snap.level
+            if model.points.isEmpty {
+                EmptyChartState(
+                    title: model.emptyTitle,
+                    detail: "电量出现变化后会自动绘制",
+                    systemImage: "chart.line.uptrend.xyaxis"
+                )
+            } else {
+                legendRow
+                SessionChartPlot(isCharging: isCharging, points: model.points)
+                    .equatable()
+                summaryRow
             }
         }
-        if let last = recent.last, filtered.last?.id != last.id {
-            filtered.append(last)
-        }
-        return filtered.map { snap in
-            (snap.timestamp.timeIntervalSince(start) / 60, snap.level, snap.timestamp)
+        .glassCard(accent: isCharging ? .bbMint : .bbBlue)
+    }
+
+    private var legendRow: some View {
+        HStack(spacing: 12) {
+            ChartLegendItem(
+                label: "电量",
+                color: model.isCharging ? .bbMint : .bbBlue,
+                value: model.points.last.map { "\(Int($0.level))%" }
+            )
+            if let first = model.points.first, let last = model.points.last {
+                let delta = last.level - first.level
+                Text(String(format: "%@%.0f%%", delta > 0 ? "+" : "", delta))
+                    .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(delta >= 0 ? Color.bbMint : Color.secondary)
+            }
+            Spacer()
+            Text("拖动曲线查看时点")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
         }
     }
 
-    /// 生成 X 轴刻度数组
-    private func strideValues(from: Double, to: Double, by: Double) -> [Double] {
-        var result: [Double] = []
-        var v = from
-        while v <= to + 0.001 {
-            result.append(v)
-            v += by
+    private var summaryRow: some View {
+        let s = model.summary
+        return HStack(spacing: 16) {
+            miniStat(model.isCharging ? "已充入" : "已耗电", value: String(format: "%.0f%%", s.deltaPercent), highlight: true)
+            Spacer()
+            miniStat("平均电池功率", value: String(format: "%.1fW", s.avgBatteryWatts))
+            miniStat("起始", value: "\(Int(s.startLevel))%")
+            miniStat("当前", value: "\(Int(s.endLevel))%")
         }
-        return result
     }
 
-    /// 曲线图表内容（拆分出来避免编译器超时）
-    private func chartContent(points: [(relMin: Double, level: Double, time: Date)], windowMin: Double) -> some View {
-        let lineColor: Color = sampler.currentIsCharging ? .bbMint : .bbBlue
+    private func miniStat(_ label: String, value: String, highlight: Bool = false) -> some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: highlight ? 18 : 13, weight: highlight ? .bold : .semibold, design: .rounded).monospacedDigit())
+                .foregroundStyle(highlight ? .green : .primary)
+        }
+    }
+
+    private func hoursText(_ minutes: Double) -> String {
+        let total = Int(minutes)
+        return "\(total / 60)h \(total % 60)m"
+    }
+}
+
+/// 输入 Equatable 的隔离子树：points 不变时跳过数百个 Chart marks 的重建。
+private struct SessionChartPlot: View, @MainActor Equatable {
+    let isCharging: Bool
+    let points: [UsageSessionModel.Point]
+
+    @State private var selectedPoint: UsageSessionModel.Point?
+
+    static func == (lhs: SessionChartPlot, rhs: SessionChartPlot) -> Bool {
+        lhs.isCharging == rhs.isCharging && lhs.points == rhs.points
+    }
+
+    var body: some View {
+        let lineColor: Color = isCharging ? .bbMint : .bbBlue
+        let windowMin = max(30, ceil((points.last?.relMin ?? 0) / 30) * 30)
         let startTime = points.first?.time ?? Date()
-        let stepMin = strideStep(windowMin)
-        let yDomain = batteryYDomain(points)
         return Chart {
             ForEach(Array(points.enumerated()), id: \.offset) { _, p in
-                lineMark(p: p, color: lineColor)
-                areaMark(p: p, color: lineColor)
+                LineMark(x: .value("时长", p.relMin), y: .value("电量", p.level))
+                    .foregroundStyle(lineColor.gradient)
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
+                AreaMark(x: .value("时长", p.relMin), yStart: .value("底", 0), yEnd: .value("电量", p.level))
+                    .foregroundStyle(LinearGradient(
+                        colors: [lineColor.opacity(0.16), lineColor.opacity(0)],
+                        startPoint: .top, endPoint: .bottom))
+                    .interpolationMethod(.monotone)
             }
             if let latest = points.last {
                 PointMark(x: .value("时长", latest.relMin), y: .value("电量", latest.level))
@@ -347,7 +476,7 @@ struct UsageTab: View {
                     .foregroundStyle(lineColor)
                     .symbolSize(70)
                     .annotation(position: .top, alignment: .center) {
-                        selectedAnnotation(selected)
+                        annotation(selected)
                     }
             }
         }
@@ -355,12 +484,12 @@ struct UsageTab: View {
             get: { selectedPoint?.relMin ?? 0 },
             set: { x in
                 if let xv = x {
-                    selectClosestPoint(x: xv, points: points)
+                    selectClosestPoint(x: xv)
                 }
             }
         ))
         .chartXAxis {
-            AxisMarks(values: strideValues(from: 0, to: windowMin, by: stepMin)) { value in
+            AxisMarks(values: strideValues(from: 0, to: windowMin, by: strideStep(windowMin))) { value in
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
                         let absTime = startTime.addingTimeInterval(v * 60)
@@ -392,25 +521,7 @@ struct UsageTab: View {
         .chartSurface()
     }
 
-    @ChartContentBuilder
-    private func lineMark(p: (relMin: Double, level: Double, time: Date), color: Color) -> some ChartContent {
-        LineMark(x: .value("时长", p.relMin), y: .value("电量", p.level))
-            .foregroundStyle(color.gradient)
-            .interpolationMethod(.monotone)
-            .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
-    }
-
-    @ChartContentBuilder
-    private func areaMark(p: (relMin: Double, level: Double, time: Date), color: Color) -> some ChartContent {
-        AreaMark(x: .value("时长", p.relMin), yStart: .value("底", 0), yEnd: .value("电量", p.level))
-            .foregroundStyle(LinearGradient(
-                colors: [color.opacity(0.16), color.opacity(0)],
-                startPoint: .top, endPoint: .bottom))
-            .interpolationMethod(.monotone)
-    }
-
-    /// 让小幅电量变化仍然可读，同时保持至少 20% 的纵轴窗口，避免夸大波动。
-    private func batteryYDomain(_ points: [(relMin: Double, level: Double, time: Date)]) -> ClosedRange<Double> {
+    private var yDomain: ClosedRange<Double> {
         guard let minimum = points.map(\.level).min(),
               let maximum = points.map(\.level).max() else { return 0...100 }
         let desiredSpan = max(20, maximum - minimum + 12)
@@ -423,32 +534,25 @@ struct UsageTab: View {
         return lower...max(lower + 5, upper)
     }
 
-    /// 根据窗口大小决定刻度间隔
+    private func strideValues(from: Double, to: Double, by: Double) -> [Double] {
+        var result: [Double] = []
+        var v = from
+        while v <= to + 0.001 {
+            result.append(v)
+            v += by
+        }
+        return result
+    }
+
     private func strideStep(_ windowMin: Double) -> Double {
-        if windowMin <= 60 { return 10 }      // ≤1h: 每10分钟
-        if windowMin <= 180 { return 30 }     // ≤3h: 每30分钟
-        if windowMin <= 360 { return 60 }     // ≤6h: 每1小时
-        return 120                              // >6h: 每2小时
+        if windowMin <= 60 { return 10 }
+        if windowMin <= 180 { return 30 }
+        if windowMin <= 360 { return 60 }
+        return 120
     }
 
-    /// 选中点的标注视图
-    private func selectedAnnotation(_ selected: (relMin: Double, level: Double, time: Date)) -> some View {
-        VStack(spacing: 2) {
-            Text(selected.time, format: .dateTime.hour().minute())
-                .font(.caption2.monospacedDigit())
-            Text("\(Int(selected.level))%").font(.caption.bold())
-        }
-        .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
-        }
-    }
-
-    /// 选中最近的数据点
-    private func selectClosestPoint(x: Double, points: [(relMin: Double, level: Double, time: Date)]) {
-        var best: (relMin: Double, level: Double, time: Date)?
+    private func selectClosestPoint(x: Double) {
+        var best: UsageSessionModel.Point?
         var bestDiff = Double.infinity
         for p in points {
             let diff = abs(p.relMin - x)
@@ -462,271 +566,199 @@ struct UsageTab: View {
         }
     }
 
-    // MARK: - 周期摘要（只显示充入/耗电百分比和功耗，时间统计由 usageStatsRow 负责）
+    private func annotation(_ selected: UsageSessionModel.Point) -> some View {
+        VStack(spacing: 2) {
+            Text(selected.time, format: .dateTime.hour().minute())
+                .font(.caption2.monospacedDigit())
+            Text("\(Int(selected.level))%").font(.caption.bold())
+        }
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+        }
+    }
+}
 
-    @ViewBuilder
-    private var cycleSummaryCard: some View {
-        if let start = currentCycleStart() {
-            let snaps = snapshots.filter { $0.timestamp >= start }
-            if snaps.count >= 2, let first = snaps.first, let last = snaps.last {
-                let isCharging = sampler.currentIsCharging
-                let levelDelta = isCharging ? (last.level - first.level) : (first.level - last.level)
-                let avgWattage = snaps.map { abs($0.wattage) }.reduce(0, +) / Double(snaps.count)
+// MARK: - 时段分析模型
 
-                HStack(spacing: 16) {
-                    miniStat(isCharging ? "已充入" : "耗电", value: "\(Int(levelDelta.rounded()))%", highlight: true)
-                    Spacer()
-                    miniStat("平均功耗", value: String(format: "%.1fW", avgWattage))
-                    miniStat("起始", value: "\(Int(first.level))%")
-                    miniStat("当前", value: "\(Int(last.level))%")
-                }
-                .glassCard(accent: isCharging ? .bbMint : .bbBlue)
+/// 当前/上次充放电时段的分析结果。由快照通知与时段切换触发重算
+/// （UsageTab.reloadSession），View body 只消费结果，不做扫描与统计。
+@MainActor
+@Observable
+final class UsageSessionModel {
+    enum SessionKind: Equatable {
+        case currentDischarge
+        case currentCharge
+        case lastCharge
+    }
+
+    struct Point: Equatable {
+        let relMin: Double
+        let level: Double
+        let time: Date
+    }
+
+    struct Summary: Equatable {
+        var startLevel: Double = 0
+        var endLevel: Double = 0
+        var deltaPercent: Double = 0
+        var avgBatteryWatts: Double = 0
+        var durationMin: Double = 0
+    }
+
+    private(set) var isCharging = false
+    private(set) var points: [Point] = []
+    private(set) var summary = Summary()
+
+    var cardTitle: String {
+        switch kind {
+        case .currentDischarge: return "本次耗电趋势"
+        case .currentCharge: return "本次充电趋势"
+        case .lastCharge: return "上次充电摘要"
+        }
+    }
+
+    var emptyTitle: String {
+        kind == .lastCharge ? "暂无充电记录" : "正在建立电量曲线"
+    }
+
+    private(set) var kind: SessionKind = .currentDischarge
+
+    private static let maxPoints = 480
+
+    func reload(snapshots: [BatterySnapshot], kind: SessionKind) {
+        self.kind = kind
+        let sorted = snapshots.sorted { $0.timestamp < $1.timestamp }
+        switch kind {
+        case .currentDischarge:
+            build(from: sorted, isCharging: false, findLastSwitch: true)
+        case .currentCharge:
+            build(from: sorted, isCharging: true, findLastSwitch: true)
+        case .lastCharge:
+            buildLastCharge(from: sorted)
+        }
+    }
+
+    /// 当前时段：找最后一次切到目标状态的点；找不到时回退到第一个同状态点
+    private func build(from sorted: [BatterySnapshot], isCharging target: Bool, findLastSwitch: Bool) {
+        self.isCharging = target
+        var start: Date?
+        var prevCharging: Bool?
+        for snap in sorted {
+            if let prev = prevCharging, prev != snap.isCharging, snap.isCharging == target {
+                start = snap.timestamp
             }
+            prevCharging = snap.isCharging
         }
+        if start == nil {
+            start = sorted.first(where: { $0.isCharging == target })?.timestamp
+        }
+        guard let sessionStart = start else {
+            points = []
+            summary = Summary()
+            return
+        }
+        accumulate(from: sessionStart, sorted: sorted)
     }
 
-    private func miniStat(_ label: String, value: String, highlight: Bool = false) -> some View {
-        VStack(alignment: .trailing, spacing: 1) {
-            Text(label).font(.caption2).foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: highlight ? 18 : 13, weight: highlight ? .bold : .semibold, design: .rounded).monospacedDigit())
-                .foregroundStyle(highlight ? .green : .primary)
+    private func accumulate(from start: Date, sorted: [BatterySnapshot]) {
+        let sessionSnaps = sorted.filter { $0.timestamp >= start }
+        guard let first = sessionSnaps.first else {
+            points = []
+            summary = Summary()
+            return
         }
+        // 只保留电量有变化的点，避免电量不变时往右画水平线；末点始终保留
+        let filtered = Self.changedLevelPoints(sessionSnaps)
+        points = Self.downsample(filtered).map { snap in
+            Point(relMin: snap.timestamp.timeIntervalSince(start) / 60, level: snap.level, time: snap.timestamp)
+        }
+        summary = Self.makeSummary(sessionSnaps: sessionSnaps, start: start, isCharging: kind != .currentDischarge)
     }
 
-    // MARK: - 4. 满电：充电摘要
-
-    private func lastChargeSession() -> (start: Date, end: Date, startLevel: Double, endLevel: Double, avgWattage: Double, peakWattage: Double)? {
-        guard snapshots.count >= 2 else { return nil }
+    /// 满电时展示上一次完成的充电时段
+    private func buildLastCharge(from sorted: [BatterySnapshot]) {
+        isCharging = true
         var chargeStartIndex: Int?
-        for i in (1..<snapshots.count).reversed() {
-            if !snapshots[i-1].isCharging && snapshots[i].isCharging {
+        for i in (1..<sorted.count).reversed() {
+            if !sorted[i - 1].isCharging && sorted[i].isCharging {
                 chargeStartIndex = i
                 break
             }
         }
-        if chargeStartIndex == nil && snapshots.last?.isCharging == true {
-            chargeStartIndex = snapshots.firstIndex(where: { $0.isCharging }) ?? 0
+        if chargeStartIndex == nil && sorted.last?.isCharging == true {
+            chargeStartIndex = sorted.firstIndex(where: { $0.isCharging })
         }
-        guard let startIdx = chargeStartIndex else { return nil }
+        guard let startIdx = chargeStartIndex, startIdx < sorted.count else {
+            points = []
+            summary = Summary()
+            return
+        }
 
-        var endIdx = snapshots.count - 1
-        for i in startIdx..<snapshots.count {
-            if snapshots[i].level >= 100 || (i > startIdx && !snapshots[i].isCharging) {
+        var endIdx = sorted.count - 1
+        for i in startIdx..<sorted.count {
+            if sorted[i].level >= 100 || (i > startIdx && !sorted[i].isCharging) {
                 endIdx = i
                 break
             }
         }
-
-        let session = Array(snapshots[startIdx...endIdx])
-        guard let first = session.first, let last = session.last else { return nil }
-        let watts = session.map { abs($0.wattage) }.filter { $0 > 0 }
-        let avgWattage = watts.isEmpty ? 0 : watts.reduce(0, +) / Double(watts.count)
-        let peakWattage = watts.max() ?? 0
-        return (first.timestamp, last.timestamp, first.level, last.level, avgWattage, peakWattage)
-    }
-
-    @ViewBuilder
-    private var chargeSessionCard: some View {
-        if let s = lastChargeSession() {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("充电摘要").font(.subheadline.bold()).foregroundStyle(.secondary)
-                    Spacer()
-                    Image(systemName: "bolt.circle.fill").foregroundStyle(.green).font(.system(size: 14))
-                }
-
-                HStack(alignment: .firstTextBaseline, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("充满耗时").font(.caption2).foregroundStyle(.secondary)
-                        Text(formatHoursMinutes(s.end.timeIntervalSince(s.start)))
-                            .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("充入电量").font(.caption2).foregroundStyle(.secondary)
-                        HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            Text("\(Int(s.endLevel.rounded()) - Int(s.startLevel.rounded()))")
-                                .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
-                                .foregroundStyle(.green)
-                            Text("%").font(.headline).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                Divider()
-
-                HStack(spacing: 0) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("开始").font(.caption2).foregroundStyle(.secondary)
-                        Text(s.start, format: .dateTime.hour().minute())
-                            .font(.system(size: 13, weight: .medium, design: .rounded).monospacedDigit())
-                    }
-                    Spacer()
-                    Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.tertiary)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("结束").font(.caption2).foregroundStyle(.secondary)
-                        Text(s.end, format: .dateTime.hour().minute())
-                            .font(.system(size: 13, weight: .medium, design: .rounded).monospacedDigit())
-                    }
-                }
-
-                HStack(spacing: 12) {
-                    labelStat("平均", value: String(format: "%.1fW", s.avgWattage), icon: "bolt")
-                    labelStat("峰值", value: String(format: "%.1fW", s.peakWattage), icon: "bolt.fill")
-                    labelStat("协议", value: sampler.currentInfo?.adapterProtocol ?? "—", icon: "powerplug")
-                    labelStat("适配器", value: adapterWattsString, icon: "power")
-                }
-            }
-            .glassCard(accent: .bbMint)
+        let sessionSnaps = Array(sorted[startIdx...endIdx])
+        guard let first = sessionSnaps.first else {
+            points = []
+            summary = Summary()
+            return
         }
+        points = Self.downsample(Self.changedLevelPoints(sessionSnaps)).map { snap in
+            Point(relMin: snap.timestamp.timeIntervalSince(first.timestamp) / 60, level: snap.level, time: snap.timestamp)
+        }
+        summary = Self.makeSummary(sessionSnaps: sessionSnaps, start: first.timestamp, isCharging: true)
     }
 
-    // MARK: - 5. 使用时间统计
-
-    private var usageStatsRow: some View {
-        let isDischarging = !isPluggedIn
-        let screenMin = isDischarging ? sampler.screenOnTime : sampler.lastScreenOnTime
-        let sleepMin = isDischarging ? sampler.sleepTime : sampler.lastSleepTime
-        let totalMin = screenMin + sleepMin
-        let label = isDischarging ? "本次使用" : "上次使用"
-
-        return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            HStack {
-                SectionHeader(title: label, systemImage: "clock.fill", tint: .bbPurple)
-                if !isDischarging && totalMin == 0 {
-                    Text("暂无记录").font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
-            }
-            HStack(spacing: BBDesign.itemSpacing) {
-                StatTile(icon: "sun.max.fill", tint: .bbAmber, value: formatMinutes(screenMin), unit: "", label: "亮屏")
-                StatTile(icon: "moon.fill", tint: .indigo, value: formatMinutes(sleepMin), unit: "", label: "休眠")
-                StatTile(icon: "clock.fill", tint: .bbBlue, value: formatMinutes(totalMin), unit: "", label: "总计")
+    /// 只保留电量有变化的点（首点与其后每个新电量值）；末点始终保留
+    private static func changedLevelPoints(_ snaps: [BatterySnapshot]) -> [BatterySnapshot] {
+        var filtered: [BatterySnapshot] = []
+        var lastLevel: Double?
+        for snap in snaps {
+            if lastLevel == nil || snap.level != lastLevel {
+                filtered.append(snap)
+                lastLevel = snap.level
             }
         }
-        .glassCard(accent: .bbPurple)
-    }
-
-    // MARK: - 6. 电池信息卡片
-
-    private var batteryInfoCard: some View {
-        let info = sampler.currentInfo
-        return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "电池信息", systemImage: "info.circle.fill", tint: .bbTeal)
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                infoTile("制造商", value: info?.manufacturer ?? "—", icon: "building.2")
-                infoTile("序列号", value: info?.serialNumber ?? "—", icon: "number")
-                infoTile("设备名称", value: info?.deviceName ?? "—", icon: "laptopcomputer")
-                infoTile("设计容量", value: "\(info?.designCapacity ?? 0) mAh", icon: "doc.text")
-                infoTile("电压", value: String(format: "%.0f mV", sampler.currentVoltage), icon: "bolt")
-                infoTile("电流", value: String(format: "%.0f mA", sampler.currentAmperage), icon: "arrow.left.arrow.right")
-                infoTile("充电协议", value: info?.adapterProtocol ?? "—", icon: "powerplug")
-                infoTile("适配器功率", value: adapterWattsString, icon: "power")
-            }
+        if let last = snaps.last, filtered.last?.id != last.id {
+            filtered.append(last)
         }
-        .glassCard(accent: .bbTeal)
+        return filtered
     }
 
-    private func infoTile(_ label: String, value: String, icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
-                Image(systemName: icon).font(.system(size: 9)).foregroundStyle(.tertiary)
-                Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-            Text(value).font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
-                .lineLimit(1).minimumScaleFactor(0.8)
+    private static func makeSummary(sessionSnaps: [BatterySnapshot], start: Date, isCharging: Bool) -> Summary {
+        guard let first = sessionSnaps.first, let last = sessionSnaps.last else { return Summary() }
+        let delta = isCharging ? last.level - first.level : first.level - last.level
+        let watts = sessionSnaps.map(\.batteryPower).filter { $0 > 0 }
+        let avg = watts.isEmpty ? 0 : watts.reduce(0, +) / Double(watts.count)
+        return Summary(
+            startLevel: first.level,
+            endLevel: last.level,
+            deltaPercent: delta,
+            avgBatteryWatts: avg,
+            durationMin: last.timestamp.timeIntervalSince(start) / 60
+        )
+    }
+
+    /// 曲线点数上限：超出时按均匀步长抽稀并保留末点，防止长时段渲染退化
+    private static func downsample(_ snaps: [BatterySnapshot]) -> [BatterySnapshot] {
+        guard snaps.count > maxPoints else { return snaps }
+        let step = Double(snaps.count) / Double(maxPoints)
+        var result: [BatterySnapshot] = []
+        var cursor = 0.0
+        while Int(cursor) < snaps.count - 1 {
+            result.append(snaps[Int(cursor)])
+            cursor += step
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
-    }
-
-    // MARK: - 辅助
-
-    private var adapterWattsString: String {
-        guard let info = sampler.currentInfo, info.adapterWatts > 0 else { return "—" }
-        return String(format: "%.0f W", info.adapterWatts)
-    }
-
-    private func labelStat(_ label: String, value: String, icon: String) -> some View {
-        VStack(spacing: 3) {
-            Image(systemName: icon).font(.system(size: 11)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
-            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+        if let last = snaps.last, result.last?.id != last.id {
+            result.append(last)
         }
-        .frame(maxWidth: .infinity)
-    }
-
-    /// 充电预计时间（秒）。
-    /// 使用滑动平均充电速率 + 精细分段效率曲线 + 温控因素。
-    private func estimatedChargeTime() -> TimeInterval {
-        let level = sampler.currentLevel
-        // PowerSampler 已按 30 秒缓存和平滑历史充电速率。直接消费缓存，
-        // 避免每次实时功率变化导致 View body 重算时都扫描、排序 1,440 条快照。
-        let rate = sampler.cachedChargeRate
-        guard rate > 0 else { return 0 }
-
-        // === 2. 分段估算，每段5% ===
-        // 充电效率曲线（基于实际锂离子电池充电特性）：
-        //  - 0-50%: 恒流快充，效率 1.0
-        //  - 50-75%: 电流开始下降，效率 0.85
-        //  - 75-85%: 减速充电，效率 0.65
-        //  - 85-90%: 明显减速，效率 0.45
-        //  - 90-95%: 涓流阶段，效率 0.30
-        //  - 95-100%: 极慢涓流，效率 0.15
-        var totalHours = 0.0
-        var currentLevel = level
-        while currentLevel < 100 {
-            let segmentEnd = min(currentLevel + 5, 100)
-            let segmentRemain = segmentEnd - currentLevel
-            let efficiency: Double
-            switch currentLevel {
-            case 95...: efficiency = 0.15
-            case 90..<95: efficiency = 0.30
-            case 85..<90: efficiency = 0.45
-            case 75..<85: efficiency = 0.65
-            case 50..<75: efficiency = 0.85
-            default: efficiency = 1.0
-            }
-
-            // === 3. 温控因素 ===
-            // 锂电池充电最佳温度 15-35°C
-            //  - > 45°C: 高温保护，大幅降速
-            //  - 40-45°C: 减速
-            //  - 35-40°C: 轻微减速
-            //  - 15-35°C: 正常
-            //  - < 15°C: 低温减速
-            let temp = sampler.currentTemperature
-            let tempFactor: Double
-            if temp <= 0.5 {
-                // 温度不可用（Apple Silicon 部分系统不暴露 Temperature 键）：不惩罚
-                tempFactor = 1.0
-            } else {
-            switch temp {
-            case 45...: tempFactor = 0.3
-            case 40..<45: tempFactor = 0.6
-            case 35..<40: tempFactor = 0.85
-            case 15..<35: tempFactor = 1.0
-            case 10..<15: tempFactor = 0.7
-            case 5..<10: tempFactor = 0.4
-            default: tempFactor = 0.2 // 极低温
-            }
-            }
-
-            let adjustedRate = rate * efficiency * tempFactor
-            guard adjustedRate > 0 else { break }
-            totalHours += segmentRemain / adjustedRate
-            currentLevel = segmentEnd
-        }
-
-        return totalHours * 3600
-    }
-
-    private func formatMinutes(_ minutes: Int) -> String { "\(minutes / 60)h \(minutes % 60)m" }
-
-    private func formatHoursMinutes(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds / 60)
-        return "\(total / 60)h \(total % 60)m"
+        return result
     }
 }

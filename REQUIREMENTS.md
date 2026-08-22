@@ -62,29 +62,55 @@
 
 **窗口规格：** 默认 940×660pt（最小 840×580），可调整。主窗口由 `WindowGroup(id: "main")` 管理，采用固定侧栏 + 内容画布；打开时显示 Dock 图标，关闭后回到纯菜单栏模式。入口：右键菜单、Popover「查看详情」。
 
-#### Tab 1：首页（使用记录）✅
+#### Tab 1：首页（电池概览）✅（2026-08-23 信息架构重构）
 
-- 状态卡（充电中/放电中 + 预计时间 + 功耗）
-- 关键指标 4 格：循环 / 健康度 / 温度 / 容量
-- 电量曲线（Swift Charts，充电/放电分段着色，悬停查看数值）
-- 上次使用时长统计、电池信息区
+按「现在怎么样 → 为什么 → 详细信息」组织：
+
+- 英雄卡：电量/充放电状态 + 可信的续航或充满估算 + 实时读数行
+  （电池充入/放出功率 + 系统负载，系统负载标注来源：系统遥测 / 电池侧估算 / 当前不可用）
+- 健康指标 4 格：健康度 / Apple 循环次数 / 温度 / 满充容量
+- 当前时段趋势卡：离电/充电时段的电量曲线与时段摘要合并为一个区域
+- 使用时间统计：亮屏 / 屏幕关闭·休眠 / 总计（显示器关闭但机器醒着计入"屏幕关闭/休眠"）
+- 制造商、序列号、芯片名、电压、电流、协议等收进默认折叠的「电池与电源详情」
+
+失效边界：页面根视图只读低频字段；每秒变化的瓦数拆进独立小视图；
+时段曲线由快照通知/时段切换驱动的分析模型渲染，Chart 为输入 Equatable 的隔离子树。
 
 #### Tab 2：电池健康 🚫 决策合并
 
 - 原设计为独立 HealthTab（仪表盘/温度曲线/信息表）
 - 2026-07-16 决策：删除独立 Tab，健康信息合并到首页指标卡与 Popover
 
-#### Tab 2（现）：循环统计 ✅
+#### Tab 2（现）：离电记录 ✅（2026-08-23 重命名 + 趋势归一化）
 
-- 循环列表（日期、时长、起止电量、平均功率；自动过滤电量下降 <1% 的无效循环）
-- 续航能力趋势图
-- 统计摘要（平均/最长循环续航）
+- 用户可见名称从「循环」改为「离电记录」；Apple 的 CycleCount 仍叫「循环次数」（概览页）。
+  内部类型 ChargeCycle 保留，避免无意义迁移。
+- 记录列表（惰性构造）：日期、起止电量、时长、放电百分比、平均电池功率
+- 归一化趋势：折算满电续航 = 时长 ÷ 下降幅度 × 100（不同电量降幅可比）
+- 只有下降 ≥5% 且持续 ≥15 分钟的记录参与归一化；样本不足明确显示「数据不足」
 
-#### Tab 3：组件功耗 ✅
+#### Tab 3：组件功耗 ✅（2026-08-23 功率口径修正）
 
-- 系统总功耗 + 电压/电流/功率/温度卡片
-- Helper 未开启时显示开启引导；开启后显示 CPU/GPU 分项（内存分项仅 macOS < 27——27 起系统移除 dram 采样器，UI 在数值为 0 时自动隐藏该行）
-- 平均/峰值/最低功耗、功耗趋势图
+- 主值为「系统负载」，标注数据来源（系统遥测 / 电池侧估算 / 当前不可用）；
+  电池充入/放出功率作为独立次级指标，不再混叫总功耗
+- 负载构成：CPU/GPU 为 powermetrics 实测；显示器明确标「估算」；
+  占比只在系统负载有效且分项样本新鲜（<30s）时显示，否则仅显示绝对瓦数
+- 历史趋势：系统负载曲线（240 保峰点）；统计只使用系统负载可用的快照
+- 电压/电流/温度/适配器输入功率等诊断收进默认折叠的「电源诊断」
+- Helper 开关与权限说明放到底部「高级采样」区域
+
+### 功率口径（2026-08-23 定义）
+
+| 概念 | 字段 | 说明 |
+|------|------|------|
+| 系统负载 | `systemLoadWatts` | 优先 PowerTelemetryData.SystemLoad（实测 mW→W）；离电时可用电池放出功率近似（标估算）；接电无遥测时不可用，禁止用充电功率冒充 |
+| 电池功率 | `batteryPowerWatts` | abs(电压×电流)，充入/放出方向由 charging/source 表达 |
+| 可用性标记 | `systemPowerAvailable` / `systemPowerIsEstimated` | 快照与实时信息都携带；旧快照按 v1 规则推导 |
+| 适配器输入 | 实时诊断字段 | 不强制写历史 |
+
+读取优先级：PowerTelemetryData.SystemLoad → BatteryData.SystemPower（可验证的旧节点）→
+离电电池放电功率（estimated）→ 接电时不可用。
+异常值过滤：nil、负值、非有限值、UInt64 回绕哨兵、超出合理设备范围的值。
 
 #### Tab 4：同步 ✅（部分待办）
 
@@ -130,14 +156,21 @@
 ### 数据模型
 
 ```
-BatterySnapshot   id/timestamp/level/isCharging/wattage/temperature/screenOn
-                  + cpuPower/gpuPower/displayPower/dramPower + dirty
+BatterySnapshot   id/timestamp/level/isCharging/wattage(=系统负载)/batteryPower/
+                  systemPowerAvailable/systemPowerIsEstimated
+                  /temperature/screenOn/cpuPower/gpuPower/displayPower/dramPower/dirty
 ChargeCycle       id/startDate/endDate/startLevel/endLevel/totalEnergy/averageWattage/dirty
+                  （语义：一次离电使用时段，非 Apple 循环次数）
 SyncConfig        isEnabled/serverURL/username/remotePath/syncInterval/syncDirection/lastSyncAt/deviceID
 BatteryInfo       静态信息（designCapacity/maxCapacity/cycleCount/serial/manufacturer/电压/电流/温度/适配器）
 ```
 
-持久化位置：`~/Library/Application Support/BatteryBar/`（snapshots.json / cycles.json / sync-config.json / usage-state.json / refresh-interval.json）
+持久化位置：`~/Library/Application Support/BatteryBar/`
+- `snapshots.jsonl`：追加式快照日志（每分钟一行，不重写）；mark synced / 远端合并 /
+  超窗裁剪时低频原子 compact；末尾损坏行跳过不致命（2026-08-23 起）
+- `snapshots.json`：v1 全量数组，仅作迁移源与回退副本保留，不再写入
+- `cycles.json` / `sync-config.json` / `usage-state.json` / `refresh-interval.json`
+- 首次启动从 snapshots.json 无损迁移；保留窗口按 timestamp 裁剪 24h + 硬上限 1500 条
 
 ---
 
@@ -147,7 +180,7 @@ BatteryInfo       静态信息（designCapacity/maxCapacity/cycleCount/serial/ma
 |------|------|------|
 | CPU 占用 | < 1% | ✅ 2026-08-22 实测 0.1%（修复 debug 构建空转 + NSTextField 状态栏布局风暴后；此前的 ~40% 从未被发现，因无测量手段） |
 | 自身功耗 | < 0.5W | ✅ 随 CPU 修复（0.1% CPU ≈ 数十 mW） |
-| 存储 | 24h ≈ 1440 条 < 1MB | ✅ 快照超 2000 条裁剪到 1440；⚠️ JSON 每 60s 全量重写（待优化）；解码失败自动备份 .bak |
+| 存储 | 24h ≈ 1440 条 < 1MB | ✅ 追加式 `snapshots.jsonl`（每分钟一行）；24h 按 timestamp 裁剪 + 1500 硬上限；解码失败自动备份 .bak |
 | 冷启动 | < 1s | ✅ 耗时读取（system_profiler）全部后台化 |
 | 隐私 | 不配置同步则零网络请求 | ✅ |
 
@@ -172,7 +205,6 @@ BatteryInfo       静态信息（designCapacity/maxCapacity/cycleCount/serial/ma
 | 高 | Option+点击打开主窗口 |
 | 中 | Popover 预计总续航区块；使用时长合计行 |
 | 中 | 同步日志（最近 50 条）、下次同步倒计时 |
-| 中 | JSON 增量写盘；多设备合并后的保留策略（本地 24h 裁剪与合并数据的冲突） |
 | 中 | Helper 调用方校验升级：Developer ID 后改为硬编码 designated requirement（当前 ad-hoc 只能校验 bundle id） |
 | 低 | Developer ID 签名 + 公证（发布前） |
 | 低 | 状态栏事件驱动（IOPSNotification 替代 1s 轮询，降低自身功耗） |

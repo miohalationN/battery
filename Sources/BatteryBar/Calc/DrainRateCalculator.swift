@@ -163,11 +163,13 @@ enum DrainRateCalculator {
     }
 
     /// 最近 N 秒内的功率滑动平均（去掉极值），用于平滑瞬时波动。
-    /// 只使用离电快照，避免充电时的高功率拉高平均值。
+    /// 只使用离电快照的 batteryPower（电池放出功率）：
+    /// 离电时系统负载本就以电池功率估算；接电快照被排除，
+    /// 其 systemLoad（接电负载）与电池充电功率都不该进入放电速率。
     private static func smoothedWattage(snapshots: [BatterySnapshot], seconds: TimeInterval, now: Date, fallback: Double) -> Double {
         let cutoff = now.addingTimeInterval(-seconds)
         let recent = snapshots.filter { $0.timestamp >= cutoff && !$0.isCharging }
-        let watts = recent.map { abs($0.wattage) }.filter { $0 > 0.1 }
+        let watts = recent.map { abs($0.batteryPower) }.filter { $0 > 0.1 }
         guard !watts.isEmpty else { return fallback }
         let sorted = watts.sorted()
         let trim = max(1, sorted.count / 10)

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct PopoverView: View {
-    @ObservedObject var sampler: PowerSampler
+    let sampler: PowerSampler
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
 
@@ -150,7 +150,7 @@ struct PopoverView: View {
         VStack(spacing: 4) {
             Image(systemName: "bolt.fill").font(.system(size: 14)).foregroundStyle(Color.bbAmber)
             Text(wattageText).font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
-            Text("当前功率").font(.system(size: 10)).foregroundStyle(.secondary)
+            Text("电池功率").font(.system(size: 10)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
     }
@@ -169,8 +169,19 @@ struct PopoverView: View {
 
     private var powerCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionTitle("实时功耗")
-            powerRow("总功率", value: String(format: "%.1f W", sampler.currentWattage), icon: "bolt.fill", color: .bbAmber)
+            HStack {
+                sectionTitle("实时功耗")
+                Spacer()
+                Text(loadSourceText)
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(loadSourceTint)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(loadSourceTint.opacity(0.1), in: Capsule())
+            }
+            powerRow("系统负载", value: loadValueText, icon: "cpu.fill", color: .bbAmber)
+            powerRow(sampler.currentIsCharging ? "电池充入" : "电池放出",
+                     value: String(format: "%.1f W", sampler.currentBatteryPower),
+                     icon: "bolt.fill", color: .bbBlue)
             if sampler.helperEnabled {
                 powerRow("CPU", value: String(format: "%.1f W", sampler.cpuPower), icon: "cpu", color: .bbBlue)
                 powerRow("GPU", value: String(format: "%.1f W", sampler.gpuPower), icon: "gpu", color: .bbPurple)
@@ -179,7 +190,7 @@ struct PopoverView: View {
                 }
             }
             if sampler.displayPower > 0 {
-                powerRow("显示器", value: String(format: "%.1f W", sampler.displayPower), icon: "display", color: .yellow)
+                powerRow("显示器（估算）", value: String(format: "%.1f W", sampler.displayPower), icon: "display", color: .yellow)
             }
             // 原始电学量降级为次要信息
             if sampler.currentVoltage > 0 {
@@ -192,6 +203,21 @@ struct PopoverView: View {
             }
         }
         .cardStyle(accent: .bbAmber)
+    }
+
+    /// 系统负载标注数据来源；接电无遥测时明确不可用，不用充电功率冒充
+    private var loadValueText: String {
+        sampler.currentPowerAvailable ? String(format: "%.1f W", sampler.currentWattage) : "—"
+    }
+
+    private var loadSourceText: String {
+        if !sampler.currentPowerAvailable { return "负载不可用" }
+        return sampler.currentPowerIsEstimated ? "负载·电池侧估算" : "负载·系统遥测"
+    }
+
+    private var loadSourceTint: Color {
+        if !sampler.currentPowerAvailable { return .secondary }
+        return sampler.currentPowerIsEstimated ? .orange : .bbMint
     }
 
     private var formatAmperage: String {
@@ -314,7 +340,8 @@ struct PopoverView: View {
     private var isFullCharge: Bool { isPluggedIn && sampler.currentLevel >= 100 }
 
     private var wattageText: String {
-        sampler.currentWattage > 0.05 ? String(format: "%.1fW", sampler.currentWattage) : "—"
+        // 状态行跟随电池侧功率（充电=充入、放电=放出），系统负载单独标注来源
+        sampler.currentBatteryPower > 0.05 ? String(format: "%.1fW", sampler.currentBatteryPower) : "—"
     }
 
     private var chargeHeadline: String {

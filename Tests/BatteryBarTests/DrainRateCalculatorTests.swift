@@ -138,6 +138,56 @@ import Foundation
         #expect(abs(rate - expected) < 0.5)
     }
 
+    /// 口径不变量：功率估算使用 batteryPower（电池放出功率）。
+    /// 构造 wattage（系统负载）与 batteryPower 不一致的离电快照：
+    /// 若实现误用 wattage=0，功率项为 0，结果会退化为纯历史速率 30 而非融合值。
+    @Test func drainRateUsesBatteryPowerNotSystemLoadField() {
+        var snaps: [BatterySnapshot] = []
+        for i in 0..<7 {
+            let s = snap(Double(60 - i * 10), level: 90 - Double(i) * 5, charging: false, watt: 0)
+            snaps.append(BatterySnapshot(
+                timestamp: s.timestamp, level: s.level, isCharging: false,
+                wattage: 0, temperature: 0, screenOn: true,
+                batteryPower: 10, systemPowerAvailable: true, systemPowerIsEstimated: true
+            ))
+        }
+        let rate = DrainRateCalculator.drainRate(
+            level: 55, isCharging: false, wattage: 10, voltage: 11800,
+            maxCapacity: 5000, healthPercent: 90,
+            dischargeStart: nil,
+            snapshots: snaps, now: now
+        )
+        let expected = 30.0 * 0.6 + (10.0 * 100.0 / 59.0) * 0.4
+        #expect(abs(rate - expected) < 0.5)
+    }
+
+    /// 接电快照不得影响放电速率：其 wattage 是系统负载、batteryPower 是充电功率，
+    /// 都与"离电能用多久"无关，必须整体排除在滑动窗口之外。
+    @Test func drainRateIgnoresACSnapshotsEntirely() {
+        var snaps: [BatterySnapshot] = []
+        for i in 0..<7 {
+            snaps.append(snap(Double(60 - i * 10), level: 90 - Double(i) * 5, charging: false, watt: 10))
+        }
+        // 混入接电快照：携带巨大的负载/充电功率读数
+        for i in 0..<3 {
+            let ac = BatterySnapshot(
+                timestamp: now.addingTimeInterval(TimeInterval(-(300 + i) * 60)),
+                level: 95, isCharging: true,
+                wattage: 60, temperature: 0, screenOn: true,
+                batteryPower: 45, systemPowerAvailable: true, systemPowerIsEstimated: false
+            )
+            snaps.append(ac)
+        }
+        let rate = DrainRateCalculator.drainRate(
+            level: 55, isCharging: false, wattage: 10, voltage: 11800,
+            maxCapacity: 5000, healthPercent: 90,
+            dischargeStart: nil,
+            snapshots: snaps.sorted { $0.timestamp < $1.timestamp }, now: now
+        )
+        // 历史段仍取自离电样本（90→60，60 分钟 → 30%/h），AC 快照不改变结果
+        #expect(abs(rate - (30.0 * 0.6 + (10.0 * 100.0 / 59.0) * 0.4)) < 0.5)
+    }
+
     // MARK: - machineBaselineDrainRate
 
     @Test func baselineUsesBatteryEnergy() {

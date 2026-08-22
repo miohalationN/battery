@@ -1,29 +1,21 @@
 import SwiftUI
 import Charts
 
-/// 历史曲线与实时指标隔离。父页面每秒刷新数字时，只要输入快照和显示开关不变，
+/// 历史曲线与实时指标隔离。父页面刷新数字时，只要输入快照不变，
 /// EquatableView 会跳过数百个 Chart marks 的重新构造。
+/// 曲线口径：系统负载。调用方已过滤掉 systemPowerAvailable == false 的快照
+/// （v1 充电快照的 wattage 是电池充电功率，不进入负载曲线）。
 struct PowerChartPlot: View, @MainActor Equatable {
     let snapshots: [BatterySnapshot]
     let timeRange: TimeRange
-    let showCPU: Bool
-    let showGPU: Bool
-    let showDisplay: Bool
-    let showDRAM: Bool
 
     @State private var selectedTime: Date?
 
     static func == (lhs: PowerChartPlot, rhs: PowerChartPlot) -> Bool {
-        lhs.snapshots == rhs.snapshots
-            && lhs.timeRange == rhs.timeRange
-            && lhs.showCPU == rhs.showCPU
-            && lhs.showGPU == rhs.showGPU
-            && lhs.showDisplay == rhs.showDisplay
-            && lhs.showDRAM == rhs.showDRAM
+        lhs.snapshots == rhs.snapshots && lhs.timeRange == rhs.timeRange
     }
 
     var body: some View {
-        let yMaximum = powerYMaximum
         Chart {
             ForEach(snapshots, id: \.id) { snap in
                 AreaMark(x: .value("时间", snap.timestamp), y: .value("功率", snap.wattage))
@@ -39,26 +31,6 @@ struct PowerChartPlot: View, @MainActor Equatable {
                     .foregroundStyle(Color.bbAmber.gradient)
                     .interpolationMethod(.monotone)
                     .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
-            }
-            if showCPU {
-                ForEach(snapshots, id: \.id) { snap in
-                    componentLine(snap.timestamp, value: snap.cpuPower, label: "CPU", color: .bbBlue)
-                }
-            }
-            if showGPU {
-                ForEach(snapshots, id: \.id) { snap in
-                    componentLine(snap.timestamp, value: snap.gpuPower, label: "GPU", color: .bbPurple)
-                }
-            }
-            if showDRAM {
-                ForEach(snapshots, id: \.id) { snap in
-                    componentLine(snap.timestamp, value: snap.dramPower, label: "内存", color: .teal)
-                }
-            }
-            if showDisplay {
-                ForEach(snapshots, id: \.id) { snap in
-                    componentLine(snap.timestamp, value: snap.displayPower, label: "显示器", color: .orange)
-                }
             }
             if let selectedTime {
                 RuleMark(x: .value("选中", selectedTime))
@@ -102,14 +74,6 @@ struct PowerChartPlot: View, @MainActor Equatable {
         .chartSurface()
     }
 
-    @ChartContentBuilder
-    private func componentLine(_ timestamp: Date, value: Double, label: String, color: Color) -> some ChartContent {
-        LineMark(x: .value("时间", timestamp), y: .value(label, value))
-            .foregroundStyle(color)
-            .interpolationMethod(.monotone)
-            .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
-    }
-
     private func closestSnapshot(to date: Date) -> BatterySnapshot? {
         snapshots.min {
             abs($0.timestamp.timeIntervalSince(date)) < abs($1.timestamp.timeIntervalSince(date))
@@ -121,12 +85,19 @@ struct PowerChartPlot: View, @MainActor Equatable {
             Text(snapshot.timestamp, format: .dateTime.hour().minute())
                 .font(.system(size: 9, design: .rounded).monospacedDigit())
                 .foregroundStyle(.tertiary)
-            Text(String(format: "总 %.1fW", snapshot.wattage))
+            Text(String(format: "负载 %.1fW", snapshot.wattage))
                 .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
-            if showCPU { metric("CPU", snapshot.cpuPower, color: .bbBlue) }
-            if showGPU { metric("GPU", snapshot.gpuPower, color: .bbPurple) }
-            if showDRAM { metric("内存", snapshot.dramPower, color: .teal) }
-            if showDisplay { metric("显示器", snapshot.displayPower, color: .orange) }
+            if snapshot.systemPowerIsEstimated {
+                Text("电池侧估算")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+            if snapshot.cpuPower > 0 {
+                metric("CPU", snapshot.cpuPower, color: .bbBlue)
+            }
+            if snapshot.gpuPower > 0 {
+                metric("GPU", snapshot.gpuPower, color: .bbPurple)
+            }
         }
         .padding(8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -139,13 +110,8 @@ struct PowerChartPlot: View, @MainActor Equatable {
             .foregroundStyle(color)
     }
 
-    private var powerYMaximum: Double {
-        var values = snapshots.map(\.wattage)
-        if showCPU { values.append(contentsOf: snapshots.map(\.cpuPower)) }
-        if showGPU { values.append(contentsOf: snapshots.map(\.gpuPower)) }
-        if showDRAM { values.append(contentsOf: snapshots.map(\.dramPower)) }
-        if showDisplay { values.append(contentsOf: snapshots.map(\.displayPower)) }
-        let maximum = max(2, values.max() ?? 2)
+    private var yMaximum: Double {
+        let maximum = max(2, snapshots.map(\.wattage).max() ?? 2)
         return ceil(maximum * 1.18 / 2) * 2
     }
 }

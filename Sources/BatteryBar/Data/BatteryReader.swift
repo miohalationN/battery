@@ -163,15 +163,43 @@ final class BatteryReader: @unchecked Sendable {
             deviceName = batteryChipName
         }
 
-        let wattage: Double
-        if externalConnected && !isCharging {
-            // 当前已经持有 AppleSmartBattery service，直接读取嵌套功率字段，
-            // 不再为同一秒的样本额外打开一次 IORegistry service。
-            wattage = readNestedDouble(service, "BatteryData", key: "AdapterPower")
-                ?? readNestedDouble(service, "BatteryData", key: "SystemPower")
-                ?? (abs(voltage * Double(amperage)) / 1_000_000)
+        let batteryPower = abs(voltage * Double(amperage)) / 1_000_000
+
+        // Apple Silicon 的 PowerTelemetryData 提供系统负载与适配器输入功率，单位 mW。
+        // 旧实现把 batteryPower（充电时只是电池包净流入功率）标成“系统总功耗”，
+        // 在接电且满电时会显示 0.x W，而机器真实负载通常仍有数瓦到十几瓦。
+        let telemetrySystemLoad = Self.normalizedTelemetryPower(
+            readNestedDouble(service, "PowerTelemetryData", key: "SystemLoad")
+        )
+        let telemetryInputPower = Self.normalizedTelemetryPower(
+            readNestedDouble(service, "PowerTelemetryData", key: "SystemPowerIn")
+        )
+
+        let legacySystemPower = Self.normalizedTelemetryPower(
+            readNestedDouble(service, "BatteryData", key: "SystemPower")
+                ?? readNestedDouble(service, "BatteryData", key: "AdapterPower")
+        )
+        let systemPower: Double
+        let systemPowerAvailable: Bool
+        let systemPowerIsEstimated: Bool
+        if telemetrySystemLoad > 0 {
+            systemPower = telemetrySystemLoad
+            systemPowerAvailable = true
+            systemPowerIsEstimated = false
+        } else if legacySystemPower > 0 {
+            systemPower = legacySystemPower
+            systemPowerAvailable = true
+            systemPowerIsEstimated = false
+        } else if !externalConnected {
+            // 离电时，电池包输出功率可作为整机负载的近似值（含转换损耗）。
+            systemPower = batteryPower
+            systemPowerAvailable = batteryPower > 0
+            systemPowerIsEstimated = true
         } else {
-            wattage = abs(voltage * Double(amperage)) / 1_000_000
+            // 接电时不能用电池充电功率代替整机负载；宁可明确不可用，也不显示假精度。
+            systemPower = 0
+            systemPowerAvailable = false
+            systemPowerIsEstimated = false
         }
 
         let adapter = cachedAdapterInfo(isConnected: externalConnected)
@@ -187,12 +215,25 @@ final class BatteryReader: @unchecked Sendable {
             temperature: temp / 100.0,
             isCharging: isCharging,
             externalConnected: externalConnected,
-            systemPower: wattage,
+            systemPower: systemPower,
+            batteryPower: batteryPower,
+            adapterInputPower: telemetryInputPower,
+            systemPowerAvailable: systemPowerAvailable,
+            systemPowerIsEstimated: systemPowerIsEstimated,
             deviceName: deviceName,
             chemistry: "Li-ion",
             adapterWatts: adapter.watts,
             adapterProtocol: adapter.protocolName
         )
+    }
+
+    /// IORegistry 的 PowerTelemetryData 使用 mW；少数旧节点可能直接给 W。
+    /// 统一为瓦特并拒绝无效/溢出哨兵值。
+    static func normalizedTelemetryPower(_ raw: Double?) -> Double {
+        guard let raw, raw.isFinite, raw > 0 else { return 0 }
+        let watts = raw > 250 ? raw / 1000.0 : raw
+        guard watts > 0, watts < 500 else { return 0 }
+        return watts
     }
 
     // MARK: - system_profiler fallback

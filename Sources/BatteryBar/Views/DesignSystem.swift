@@ -75,7 +75,6 @@ extension View {
                         lineWidth: 1
                     )
             }
-            .shadow(color: Color.black.opacity(0.04), radius: 8, x: 0, y: 3)
     }
 
     /// 卡片内部的次级信息块。
@@ -167,6 +166,7 @@ struct SectionHeader: View {
     }
 }
 
+/// 图标徽章：纯渐变底色，无发光阴影（滚动内容保持轻量合成）。
 struct IconBadge: View {
     let systemImage: String
     let tint: Color
@@ -186,7 +186,6 @@ struct IconBadge: View {
                 ),
                 in: RoundedRectangle(cornerRadius: size * 0.29, style: .continuous)
             )
-            .shadow(color: tint.opacity(0.23), radius: 6, x: 0, y: 3)
     }
 }
 
@@ -251,7 +250,6 @@ struct LiveBadge: View {
             Circle()
                 .fill(tint)
                 .frame(width: 6, height: 6)
-                .shadow(color: tint.opacity(0.6), radius: 3)
             Text(text)
                 .font(.system(size: 10, weight: .semibold, design: .rounded).monospacedDigit())
         }

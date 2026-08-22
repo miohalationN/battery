@@ -1,7 +1,7 @@
 import Foundation
 
-/// 电池静态信息
-/// Equatable：PowerSampler 用它门控 @Published 写入（值未变不触发 objectWillChange）
+/// 电池实时与静态信息
+/// Equatable：PowerSampler 用它门控 Observation 写入（元数据未变不触发视图失效）
 struct BatteryInfo: Equatable {
     let designCapacity: Int     // mAh
     let maxCapacity: Int        // mAh（实际满充容量）
@@ -13,7 +13,11 @@ struct BatteryInfo: Equatable {
     let temperature: Double     // 摄氏度
     let isCharging: Bool
     let externalConnected: Bool
-    let systemPower: Double     // 系统总功耗（瓦特）
+    let systemPower: Double     // 当前系统负载（瓦特）
+    let batteryPower: Double    // 电池包当前充入/放出功率绝对值（瓦特）
+    let adapterInputPower: Double // 适配器输入功率（瓦特，遥测不可用时为 0）
+    let systemPowerAvailable: Bool
+    let systemPowerIsEstimated: Bool
     let deviceName: String      // IORegistry DeviceName
     let chemistry: String       // 电池化学成分（AppleSmartBattery 均为 Li-ion）
     let adapterWatts: Double    // 电源适配器额定功率 (W)，0 表示未连接或未知
@@ -25,8 +29,8 @@ struct BatteryInfo: Equatable {
         return Double(maxCapacity) / Double(designCapacity) * 100
     }
 
-    /// 实时功率（瓦特）
+    /// 电池包实时充入/放出功率（瓦特）。
     var wattage: Double {
-        abs(voltage * instantAmperage) / 1_000_000
+        batteryPower
     }
 }

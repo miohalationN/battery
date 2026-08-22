@@ -129,27 +129,13 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 for line in text.split(separator: "\n") {
                     guard let lineData = line.data(using: .utf8),
                           let dict = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                          let idStr = dict["id"] as? String,
-                          let id = UUID(uuidString: idStr),
-                          let ts = dict["ts"] as? Double
+                          let remote = BatterySnapshot.from(remoteJSON: dict)
                     else { continue }
-                    let remote = BatterySnapshot(
-                        timestamp: Date(timeIntervalSince1970: ts),
-                        level: dict["level"] as? Double ?? 0,
-                        isCharging: dict["charging"] as? Bool ?? false,
-                        wattage: dict["watt"] as? Double ?? 0,
-                        temperature: dict["temp"] as? Double ?? 0,
-                        screenOn: dict["screen"] as? Bool ?? false,
-                        cpuPower: dict["cpu"] as? Double ?? 0,
-                        gpuPower: dict["gpu"] as? Double ?? 0,
-                        displayPower: dict["disp"] as? Double ?? 0,
-                        dramPower: dict["dram"] as? Double ?? 0
-                    )
-                    if let local = byID[id] {
+                    if let local = byID[remote.id] {
                         // timestamp 胜出
-                        if remote.timestamp > local.timestamp { byID[id] = remote }
+                        if remote.timestamp > local.timestamp { byID[remote.id] = remote }
                     } else {
-                        byID[id] = remote
+                        byID[remote.id] = remote
                     }
                 }
                 merged = byID.values.sorted { $0.timestamp < $1.timestamp }
@@ -216,24 +202,8 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                 for line in text.split(separator: "\n") {
                     guard let lineData = line.data(using: .utf8),
                           let dict = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                          let idStr = dict["id"] as? String,
-                          let ts = dict["ts"] as? Double
+                          let snap = BatterySnapshot.from(remoteJSON: dict)
                     else { continue }
-
-                    var snap = BatterySnapshot(
-                        timestamp: Date(timeIntervalSince1970: ts),
-                        level: dict["level"] as? Double ?? 0,
-                        isCharging: dict["charging"] as? Bool ?? false,
-                        wattage: dict["watt"] as? Double ?? 0,
-                        temperature: dict["temp"] as? Double ?? 0,
-                        screenOn: dict["screen"] as? Bool ?? false,
-                        cpuPower: dict["cpu"] as? Double ?? 0,
-                        gpuPower: dict["gpu"] as? Double ?? 0,
-                        displayPower: dict["disp"] as? Double ?? 0,
-                        dramPower: dict["dram"] as? Double ?? 0
-                    )
-                    snap.id = UUID(uuidString: idStr) ?? snap.id
-                    snap.dirty = false
                     allSnapshots.append(snap)
                 }
             }

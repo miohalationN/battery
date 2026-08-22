@@ -1,51 +1,60 @@
 import Foundation
+import Observation
 
 /// 采样与 UI 状态中枢。
 ///
-/// 隔离模型：整个类隔离在 MainActor，@Published 状态只允许主线程变更，
-/// 消除旧实现 `@unchecked Sendable` 下定时器 / 后台队列并发写 @Published 的数据竞争。
-/// 阻塞调用（system_profiler 健康度、XPC helper、powermetrics）通过 Task.detached
-/// 移出主线程，结果回写主线程；休眠回调用 MainActor.assumeIsolated 同步执行，
-/// 避免 willSleep 到系统入睡之间 Task 排队延迟导致睡眠统计丢失。
+/// 隔离模型：整个类隔离在 MainActor，@Observable 状态只允许主线程变更，
+/// 消除旧实现 `@unchecked Sendable` 下定时器 / 后台队列并发写状态的数据竞争。
+/// SwiftUI 通过 Observation 属性级追踪订阅：视图 body 读到哪个属性，就只在
+/// 哪个属性变化时失效——页面根视图不读瓦片等高频字段，历史 Chart 因此不被
+/// 每秒采样带着重建。阻塞调用（system_profiler 健康度、XPC helper、powermetrics）
+/// 通过 Task.detached 移出主线程，结果回写主线程；休眠回调用 MainActor.assumeIsolated
+/// 同步执行，避免 willSleep 到系统入睡之间 Task 排队延迟导致睡眠统计丢失。
 @MainActor
-final class PowerSampler: ObservableObject {
+@Observable
+final class PowerSampler {
     private let reader = BatteryReader()
     private let cycleTracker: CycleTracker
     private let sleepWatcher = SleepWatcher()
     private var dispatchTimer: DispatchSourceTimer?
     private var storageTimer: Timer?
     private var refreshObserver: NSObjectProtocol?
-    private var staticInfoObserver: NSObjectProtocol?
 
-    @Published private(set) var currentLevel: Double = 0
-    @Published private(set) var currentIsCharging: Bool = false
-    @Published private(set) var currentWattage: Double = 0
-    @Published private(set) var currentTemperature: Double = 0
-    @Published private(set) var currentVoltage: Double = 0
-    @Published private(set) var currentAmperage: Double = 0
-    @Published private(set) var currentInfo: BatteryInfo?
-    @Published private(set) var systemHealthPercent: Double = 100
-    /// 最近一次采样时刻（视图不观察；曾为 @Published 每秒触发 objectWillChange 风暴）
+    private(set) var currentLevel: Double = 0
+    private(set) var currentIsCharging: Bool = false
+    /// 系统负载（瓦特）。接电且无系统遥测时为 0（currentPowerAvailable == false）
+    private(set) var currentWattage: Double = 0
+    /// 电池包充入/放出功率绝对值（瓦特）；方向由 currentIsCharging 表达
+    private(set) var currentBatteryPower: Double = 0
+    private(set) var currentPowerAvailable = false
+    private(set) var currentPowerIsEstimated = false
+    private(set) var currentTemperature: Double = 0
+    private(set) var currentVoltage: Double = 0
+    private(set) var currentAmperage: Double = 0
+    private(set) var currentInfo: BatteryInfo?
+    private(set) var systemHealthPercent: Double = 100
+    /// 最近一次采样时刻（视图不观察；每秒写它只会让状态栏刷新，不该波及任何视图）
     private(set) var lastUpdateTime: Date = Date()
 
-    @Published private(set) var cpuPower: Double = 0
-    @Published private(set) var gpuPower: Double = 0
-    @Published private(set) var displayPower: Double = 0
-    @Published private(set) var dramPower: Double = 0
+    private(set) var cpuPower: Double = 0
+    private(set) var gpuPower: Double = 0
+    private(set) var displayPower: Double = 0
+    private(set) var dramPower: Double = 0
+    /// 最近一次成功的分项功耗采样时刻。超过约 30s 未更新视为陈旧，
+    /// UI 只显示绝对瓦数、不再计算占比。
+    private(set) var lastComponentPowerAt: Date = .distantPast
 
-    @Published private(set) var helperNeedsUpdate: Bool = false
+    private(set) var helperNeedsUpdate: Bool = false
 
     // 放电/充电速率缓存：每 30 个 UI tick 重算一次，避免 View body 每 tick 全量扫描 DataStore
-    @Published private(set) var cachedDrainRate: Double = 0
-    @Published private(set) var cachedChargeRate: Double = 0
+    private(set) var cachedDrainRate: Double = 0
+    private(set) var cachedChargeRate: Double = 0
     private var lastRateCalculationAt = Date.distantPast
     private let rateCacheInterval: TimeInterval = 30
 
     /// Helper 服务开关（默认关闭，用户在 PowerTab 手动开启）
     /// 开启后才会安装 helper 并读取 CPU/GPU 分项功耗
-    var helperEnabled: Bool {
-        UserDefaults.standard.object(forKey: "BatteryBarHelperEnabled") as? Bool ?? false
-    }
+    private(set) var helperEnabled: Bool = UserDefaults.standard.object(forKey: "BatteryBarHelperEnabled") as? Bool ?? false
 
     // 使用时间统计：按离电周期统计，充电时停止
     private var currentDischargeScreenOn: Int = 0
@@ -61,6 +70,7 @@ final class PowerSampler: ObservableObject {
     private var isComponentPowerSampleInFlight = false
     private let componentPowerInterval: TimeInterval = 15
     private var isSleeping: Bool = false
+    private var areScreensSleeping: Bool = false
     private var sleepStartTime: Date?
     private var isStarted: Bool = false
     private(set) var uiInterval: TimeInterval = 1
@@ -109,6 +119,12 @@ final class PowerSampler: ObservableObject {
         sleepWatcher.onWake = { [weak self] in
             MainActor.assumeIsolated { self?.handleWake() }
         }
+        sleepWatcher.onScreensSleep = { [weak self] in
+            MainActor.assumeIsolated { self?.areScreensSleeping = true }
+        }
+        sleepWatcher.onScreensWake = { [weak self] in
+            MainActor.assumeIsolated { self?.areScreensSleeping = false }
+        }
         sleepWatcher.start()
 
         // 观察刷新间隔变更通知（object 为 Double）
@@ -137,18 +153,10 @@ final class PowerSampler: ObservableObject {
             self.systemHealthPercent = health
         }
 
-        // 后台预加载静态信息（机器型号、序列号、制造商），避免主线程每秒 spawn system_profiler
-        // 加载完成后通过 PowerSamplerDidUpdate 通知触发 UI 刷新
+        // 后台预加载静态信息（机器型号、序列号、制造商），避免主线程每秒 spawn system_profiler。
+        // 加载完成无需广播：下一次轻量采样会经 shouldPublishMetadata 比对出新字段并写入 currentInfo，
+        // Observation 只失效读取该属性的视图。
         reader.prefetchStaticInfo()
-        staticInfoObserver = NotificationCenter.default.addObserver(
-            forName: .init("BatteryReaderStaticInfoLoaded"),
-            object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.objectWillChange.send()
-                NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)
-            }
-        }
 
         // Helper 服务：仅在用户开启时检查/安装（XPC 版本检测 + osascript 均为阻塞调用）
         if helperEnabled {
@@ -161,7 +169,6 @@ final class PowerSampler: ObservableObject {
                     reader.installHelperIfNeeded()
                 }.value
                 self.helperNeedsUpdate = !installed
-                self.objectWillChange.send()
             }
         }
 
@@ -183,10 +190,6 @@ final class PowerSampler: ObservableObject {
         if let obs = refreshObserver {
             NotificationCenter.default.removeObserver(obs)
             refreshObserver = nil
-        }
-        if let obs = staticInfoObserver {
-            NotificationCenter.default.removeObserver(obs)
-            staticInfoObserver = nil
         }
         persistUsageState()
         isStarted = false
@@ -220,6 +223,7 @@ final class PowerSampler: ObservableObject {
 
     private func handleSleep() {
         isSleeping = true
+        areScreensSleeping = true
         sleepStartTime = Date()
     }
 
@@ -234,6 +238,7 @@ final class PowerSampler: ObservableObject {
             sleepStartTime = nil
         }
         isSleeping = false
+        areScreensSleeping = false
         persistUsageState()
     }
 
@@ -281,18 +286,28 @@ final class PowerSampler: ObservableObject {
         }
         wasExternalConnected = isPluggedIn
 
-        // 只在值真正变化时写 @Published：每秒无条件写会让 objectWillChange 风暴式触发，
-        // 把所有观察 sampler 的 SwiftUI 视图逐秒重算（2026-08-22 实测占空烧掉约 40% CPU）
+        // 只在值真正变化时写 @Observable 属性：Observation 虽是属性级失效，
+        // 每秒无条件写仍会让读取该属性的视图（状态栏数字、英雄卡）逐秒重算。
+        // 0.05W 阈值滤掉遥测抖动；level/isCharging/温度等低频字段按相等门控。
         let wattage = info?.systemPower ?? info?.wattage ?? 0
         if ps.level != currentLevel { currentLevel = ps.level }
         if ps.isCharging != currentIsCharging { currentIsCharging = ps.isCharging }
         if abs(wattage - currentWattage) > 0.05 { currentWattage = wattage }
+        if abs((info?.batteryPower ?? 0) - currentBatteryPower) > 0.05 {
+            currentBatteryPower = info?.batteryPower ?? 0
+        }
+        if (info?.systemPowerAvailable ?? false) != currentPowerAvailable {
+            currentPowerAvailable = info?.systemPowerAvailable ?? false
+        }
+        if (info?.systemPowerIsEstimated ?? false) != currentPowerIsEstimated {
+            currentPowerIsEstimated = info?.systemPowerIsEstimated ?? false
+        }
         if (info?.temperature ?? 0) != currentTemperature { currentTemperature = info?.temperature ?? 0 }
         if (info?.voltage ?? 0) != currentVoltage { currentVoltage = info?.voltage ?? 0 }
         if (info?.instantAmperage ?? 0) != currentAmperage { currentAmperage = info?.instantAmperage ?? 0 }
         // currentInfo 只承载界面使用的元数据。电压、电流、温度和功率已有独立
-        // @Published 字段；若把这些高频值也纳入 BatteryInfo 等值比较，会平白再
-        // 触发一次整棵观察视图树更新。
+        // 可观察字段；若把这些高频值也纳入 BatteryInfo 等值比较，会平白多触发
+        // 一次读取该属性的视图更新。
         if shouldPublishMetadata(info) { currentInfo = info }
         lastUpdateTime = Date()
 
@@ -319,6 +334,9 @@ final class PowerSampler: ObservableObject {
                     (reader.readComponentPower(), reader.estimateDisplayPower())
                 }.value
                 self.isComponentPowerSampleInFlight = false
+                if component.cpu > 0 || component.gpu > 0 || component.dram > 0 {
+                    self.lastComponentPowerAt = Date()
+                }
                 if abs(self.cpuPower - component.cpu) > 0.02 { self.cpuPower = component.cpu }
                 if abs(self.gpuPower - component.gpu) > 0.02 { self.gpuPower = component.gpu }
                 if abs(self.displayPower - display) > 0.02 { self.displayPower = display }
@@ -333,7 +351,7 @@ final class PowerSampler: ObservableObject {
             cachedDrainRate = DrainRateCalculator.drainRate(
                 level: currentLevel,
                 isCharging: currentIsCharging,
-                wattage: currentWattage,
+                wattage: currentBatteryPower,
                 voltage: currentVoltage,
                 maxCapacity: currentInfo?.maxCapacity ?? 0,
                 healthPercent: systemHealthPercent,
@@ -378,7 +396,10 @@ final class PowerSampler: ObservableObject {
             isCharging: ps.isCharging,
             wattage: info?.systemPower ?? info?.wattage ?? 0,
             temperature: info?.temperature ?? 0,
-            screenOn: !isSleeping,
+            screenOn: !isSleeping && !areScreensSleeping,
+            batteryPower: info?.batteryPower ?? 0,
+            systemPowerAvailable: info?.systemPowerAvailable ?? false,
+            systemPowerIsEstimated: info?.systemPowerIsEstimated ?? false,
             cpuPower: cpuPower,
             gpuPower: gpuPower,
             displayPower: displayPower,
@@ -389,14 +410,14 @@ final class PowerSampler: ObservableObject {
         // 只在离电时累加使用时间
         // awake 计入屏幕亮起；睡眠期间 Timer 不触发，实际睡眠时长由 onWake 补足
         if !isPluggedIn {
-            if isSleeping {
+            if isSleeping || areScreensSleeping {
                 currentDischargeSleep += 1
             } else {
                 currentDischargeScreenOn += 1
             }
         }
 
-        cycleTracker.update(isCharging: ps.isCharging, level: ps.level, wattage: info?.systemPower ?? info?.wattage ?? 0)
+        cycleTracker.update(isCharging: ps.isCharging, level: ps.level, wattage: info?.batteryPower ?? 0)
 
         // 每 5 分钟落盘一次
         saveTick += 1
@@ -418,9 +439,9 @@ final class PowerSampler: ObservableObject {
         }.value
         if installed {
             UserDefaults.standard.set(true, forKey: "BatteryBarHelperEnabled")
+            helperEnabled = true
         }
         helperNeedsUpdate = !installed
-        objectWillChange.send()
     }
 
     /// 用户手动关闭 Helper：后台卸载 root 守护进程（弹一次管理员密码框），
@@ -433,7 +454,7 @@ final class PowerSampler: ObservableObject {
             _ = reader.uninstallHelper()
         }.value
         UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
-        objectWillChange.send()
+        helperEnabled = false
         cpuPower = 0
         gpuPower = 0
         dramPower = 0
