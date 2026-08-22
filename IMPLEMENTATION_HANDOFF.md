@@ -85,7 +85,7 @@ macOS 满电保持、优化充电暂停、80% 充电上限均呈现 `externalCon
   见 `scripts/seed_profile_data.py`），对概览页与功耗页各录制
   SwiftUI（视图 body 求值）与 Animation Hitches 两份 trace：
   时间线 = 启动静止窗（~12s，验证每秒采样不重建根视图/Chart）→ 连续滚动 ~50s。
-  digest 由 `scripts/profile_digest.py` 导出（结论见 §十一，随 CI 完成补充）。
+  digest 由 `scripts/profile_digest.py` 导出（结论见 §十一）。
 
 ## 八、CI / 安装 / 运行时证据
 
@@ -112,6 +112,38 @@ macOS 满电保持、优化充电暂停、80% 充电上限均呈现 `externalCon
 - 不启用/安装/卸载 Helper、不触发管理员授权、不删除系统 Helper；
 - 不删除用户历史数据（污染点仅统计层隔离）；
 - 不扩大视觉重做范围（本轮仅状态表达、错误摘要、失效边界与休眠式采样钩子）。
+
+## 十一、Instruments / 性能证据（run 32603697964 及前序迭代）
+
+**产出**（artifact `ui-profile`，retention 14 天，trace 可用 Instruments.app 打开复核）：
+- `usage-swiftui.trace` / `usage-hitches.trace`：概览页 SwiftUI 模板（25 schema，含
+  swiftui-updates/swiftui-causes/hitches 等）与 Animation Hitches 模板（完整录制）；
+- `power-hitches.trace`：功耗页 Animation Hitches 模板（51 schema 完整录制）；
+- `power-swiftui.trace`：该次录制损坏（xctrace 偶发 rc=42，脚本已带 3 次重试 + 看门狗，
+  属 runner 虚拟机上的工具链不稳定，非代码问题）。
+- 录制时间线：启动静止观察窗 ~12s（每秒采样照常运行）→ 自动滚动 ~50s（UserDefaults
+  门控钩子驱动线性动画连续滚动）。
+
+**工具链限制（如实报告）**：
+- `xctrace export --xpath` 在 Xcode 26.6 工具链上对全部目标表（swiftui-updates、
+  hitches* 等，已尝试 5 种 xpath 变体）只返回**表 schema 定义，不返回行数据**，
+  因此视图 body 求值次数与 hitch 时长无法在 CLI 量化；行级判读需用 Instruments.app
+  打开归档 trace。
+- 导出的 hitches 表为空结构（VM 合成管线可能不产生 hitch 遥测），不能据此断言
+  "零 hitch"，只能断言"未提取到 hitch 行"。
+
+**本机统计性证据（真实硬件、已安装 release 构建，`/usr/bin/sample` 10s / 7610 采样）**：
+- 主线程 7599/7610（99.87%）阻塞在 `mach_msg_trap`（RunLoop 事件等待）；
+- 仅 11 个采样（0.14%）位于 Swift 并发任务完成例程（每秒采样 tick）；
+- **10 秒内主线程没有出现任何 SwiftUI body 求值 / 视图布局 / Chart 渲染栈**。
+  对照校准：历史上 objectWillChange 每秒风暴 + 全树重建时代同类测量为 ~40% CPU
+  （MAINTENANCE_PLAN T-29/T-30）——若每秒采样仍重建页面根或历史 Chart，
+  必然在主线程留下周期性 body/layout 栈与高 CPU；实测为零。
+- 配合 ps 实测 CPU 0.0%、代码中根视图仅读低频属性的结构边界，
+  构成"每秒采样不重建页面根/历史 Chart"的证据链。
+
+**已安装二进制与最终代码一致性**：安装产物取自 Build run 32601875482（commit fc8af96）；
+其后提交仅涉及采样脚本与文档（.py/.sh/.md），app 源码无变化。
 
 ## 十、自审发现（可操作项）
 
