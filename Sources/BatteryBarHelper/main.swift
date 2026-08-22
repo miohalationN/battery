@@ -12,6 +12,7 @@ import Security
 
 /// Privileged Helper — 以 root 权限常驻运行，通过 XPC 通信。
 ///
+/// v4.1：继承 4.0 流式采样架构，并直接拒绝未通过签名校验的 XPC 连接。
 /// v4.0 重大变更：
 /// - powermetrics 从「每次调用 spawn 子进程」改为懒启动常驻流式进程
 ///   （`-i 10000` 每 10s 输出一轮采样，逐行解析缓存最新值）。
@@ -52,9 +53,8 @@ class HelperTool: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         guard isCallerAllowed(connection) else {
-            connection.resume()
-            // 拒绝的方式：不设置 exportedObject，对端调用会拿到错误
-            return true
+            // 直接拒绝未授权连接，不为其分配已恢复但无导出对象的空连接。
+            return false
         }
         connection.exportedInterface = NSXPCInterface(with: HelperProtocol.self)
         connection.exportedObject = self
@@ -108,7 +108,7 @@ extension HelperTool: HelperProtocol {
     }
 
     func getVersion(withReply reply: @escaping (String) -> Void) {
-        reply("4.0")
+        reply("4.1")
     }
 
     // MARK: - powermetrics 流式进程管理（以下方法均在 powerQueue 上执行）
