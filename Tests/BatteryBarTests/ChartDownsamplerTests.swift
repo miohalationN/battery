@@ -4,16 +4,22 @@ import Testing
 
 @Suite struct ChartDownsamplerTests {
     private func snapshots(count: Int, spikeAt: Int? = nil) -> [BatterySnapshot] {
-        (0..<count).map { index in
-            BatterySnapshot(
-                timestamp: Date(timeIntervalSince1970: Double(index * 60)),
-                level: 100 - Double(index) / 100,
+        var result: [BatterySnapshot] = []
+        result.reserveCapacity(count)
+        for index in 0..<count {
+            let timestamp = Date(timeIntervalSince1970: Double(index * 60))
+            let level = 100 - Double(index) / 100
+            let wattage = index == spikeAt ? 80.0 : 5.0 + Double(index % 7)
+            result.append(BatterySnapshot(
+                timestamp: timestamp,
+                level: level,
                 isCharging: false,
-                wattage: index == spikeAt ? 80 : 5 + Double(index % 7),
+                wattage: wattage,
                 temperature: 30,
                 screenOn: true
-            )
+            ))
         }
+        return result
     }
 
     @Test func leavesShortSeriesUnchanged() {
