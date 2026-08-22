@@ -1,131 +1,111 @@
-# IMPLEMENTATION_HANDOFF — 2026-08-23 信息架构 / 性能边界 / 功率口径 / 追加存储重构
+# IMPLEMENTATION_HANDOFF — 电源状态语义修复（isCharging ≠ 是否接电）
 
-> 执行 Agent 移交文档。供 assurance/review agent 独立验证。
-> 基线提交：`be5f3ebfbdef0b97709081aeab04451e4b497ce9`（已安装基线 `/Users/mio/Applications/BatteryBar.app`）
-> 本文件随实现提交；CI、安装与实机验收证据在对应步骤完成后补充更新（docs-only 提交不触发构建）。
+> 执行 Agent 移交文档，供 assurance/review agent 独立验证。
+> 本轮基线：`e199e5922954204832dd82e0d4f38cfe08a524c4`（origin/main 同步且 clean）。
+> 上一轮移交见 git 历史（be5f3eb→e199e59 的重构与本文件旧版本）。
 
 ---
 
-## 一、变更范围
+## 一、问题定义（验收失败项）
 
-草案（10 文件 +238/-55，未编译）经审查后修正、重组并补齐为完整实现。取舍说明：
+macOS 满电保持、优化充电暂停、80% 充电上限均呈现 `externalConnected=true, isCharging=false`。
+上一版代码把 isCharging 当作"是否接电"，导致：
 
-| 草案内容 | 处置 | 理由 |
-|----------|------|------|
-| @Observable PowerSampler + `@Environment(PowerSampler.self)` | **保留** | 属性级失效是本次性能目标的核心机制；macOS 14 支持 |
-| BatteryReader 遥测优先级链 + normalizedTelemetryPower | **保留** | 与本机 IORegistry 实测吻合（见 §三） |
-| v1 快照 decodeIfPresent 兼容 | **保留** | 符合口径要求；但成员构造器默认值有缺陷（见下） |
-| 成员构造器 `systemPowerAvailable: Bool = true` 默认 | **修正** → `Bool? = nil` 按 `!isCharging` 推导 | 原默认会让旧调用点构造的充电快照污染系统负载统计（与解码路径规则不一致） |
-| DataStore JSONL journal + retainedSnapshots(24h/1500) | **保留** + 注入目录/测试钩子 | 满足"每分钟不全量重写"；不可注入则无法单测迁移/坏行 |
-| SleepWatcher screensDidSleep/screensDidWake | **保留** | 即规格要求 |
-| 空 staticInfoObserver（body 为注释） | **删除** | 规格明确要求删空 observer；shouldPublishMetadata 已保证 ≤1s 内属性级传播 |
-| WebDAV 只加上传字段 | **补齐下载端** | 抽出 `BatterySnapshot.from(remoteJSON:)` 双端共用并对旧格式推导 |
-| 组件新鲜度 | **新增** `lastComponentPowerAt` | 规格要求 >30s 陈旧即停显占比 |
-| 页面 IA / LazyVStack / 阴影清理 / 归一化趋势 | **全新实现** | 草案完全未涉及 |
+- 实机 `snapshots.jsonl` 中 **1190 条** level≥99、未充电、亮屏、估算 0–3W 的记录
+  （v2 格式，无电源字段）被标为"可用离电负载"；
+- 6h 负载均值被拉至 2.45W，同期遥测实测均值约 11W（本机安装实例实测：
+  available 平均 2.45W/243 点、遥测子集 10.94W/41 点）；
+- CycleTracker 会把整段接电静置记为"离电使用"；DrainRateCalculator 与
+  UsageSessionModel 存在同源错误。
 
-## 二、关键设计不变量
+## 二、schema 兼容策略
 
-1. **功率双口径**：`wattage` ≡ 系统负载；`batteryPower` ≡ 电池包充放功率绝对值。
-   接电且无遥测时系统负载不可用（`systemLoad == nil`），绝不显示充电功率冒充。
-2. **统计隔离**：系统负载统计/曲线只纳入 `systemPowerAvailable == true` 的快照；
-   v1 充电快照（available=false）只参与电池侧统计。
-3. **失效边界**：页面根视图只读低频字段（level/isCharging/externalConnected/currentInfo/
-   helperEnabled）；每秒瓦数只在英雄卡/读数行小视图内消费；历史分析模型
-   （UsageSessionModel / PowerTab rangeStats / CycleTab reload）仅由快照通知或范围切换触发；
-   Chart 一律 `.equatable()` 隔离。
-4. **追加日志**：`saveSnapshot` 无条件 append 一行；内存侧过期行立即收敛，文件侧延迟清理，
-   累计 ≥60 条（≈1 小时量）才原子 compact；mark synced / 远端 merge 即时 compact；
-   末尾半行加载时跳过；v1 `snapshots.json` 迁移后保留不删。
-   ⚠️ 首轮安装实测曾发现稳态缺陷（见 §九），已修复并有回归测试覆盖。
-5. **屏幕状态**：`screenOn = !isSleeping && !screensSleeping`；显示器关闭但醒着的分钟计入「屏幕关闭/休眠」。
+- 快照新增 `externalConnected: Bool?`。**键存在与否即可靠区分格式**（provenance）：
+  - v1：无 batteryPower/systemPowerAvailable/externalConnected；
+  - v2：有估算标记、无 externalConnected；
+  - v3：显式 externalConnected（true/false）。
+- 编码用 `encodeIfPresent`：nil 不写键 → 永不伪造电源状态；解码 `decodeIfPresent`
+  → v1/v2/v3 全部可读，已迁移进 journal 的无键点同样按 unknown 处理。
+- WebDAV JSONL 新增 `ext` 字段；`toJSON` 仅在已知时写出；`from(remoteJSON:)`
+  对远端旧格式按同一保守规则推导，双端兼容。
+- legacy 备份与用户历史数据一律不删除、不改写。
 
-## 三、本机数据佐证（实现前实测）
+## 三、污染数据的保守隔离（不伪造、只隔离）
 
-```
-ioreg -r -c AppleSmartBattery：
-PowerTelemetryData = { SystemLoad=14071, SystemPowerIn=12240,
-                       BatteryPower=18446744073709549785 (UInt64 回绕哨兵), ... }
-NSNumber(UInt64 回绕) as? Double → nil（被拒绝）；整数 mW as? Double → 正常转换
-```
-接电满电场景：SystemLoad≈14W（真实负载），而电池净功率≈0.x W —— 证实旧口径错误与本修复方向。
+`trustedSystemLoad` 规则：
+1. 实测遥测（systemPowerIsEstimated == false）独立可信——无论电源状态是否已知，
+   一律保留进系统负载统计/曲线（含 v2 实测点）；
+2. 估算负载仅在 `externalConnected == false` 时可信；
+3. 来源未知 + 估算（即全部历史污染形态）→ 排除出系统负载统计、DrainRate 历史与
+   离电时段统计。数据仍在 journal 中完整保留，只是不参与统计。
 
-## 四、本地验证记录（CLT 环境）
+状态机统一改为插拔语义（PowerSourceState 三态：charging / onPowerNotCharging / onBattery）：
 
-环境：CLT only（swiftc 6.4, macOS 27 SDK），无 Xcode → SwiftUI 宏插件缺失，
-全量 `swift build` 无法越过 @State 展开（既有已知环境限制，非代码失败）。
+| 组件 | 修改 |
+|------|------|
+| CycleTracker | `update(isPluggedIn:level:batteryPower:)`；接电→离电开始记录，离电→接电结束；暂停充电数小时零记录 |
+| PowerSampler | sampleStorage 持久化 externalConnected 并传 isPluggedIn 给 CycleTracker；cachedDrainRate 仅离电计算 |
+| DrainRateCalculator | `isOnBattery=false` 直接返回 0（不显示续航预估）；onBatterySegments/smoothedWattage 只认 externalConnected==false 的样本 |
+| UsageSessionModel | 按 externalConnected 分段并排除未知点；「上次充电摘要」需正电量变化 ≥1% 且时长 ≥5 分钟，否则显示「暂无有效充电记录」（禁止 100%→100% + 已充入 0% 却带平均功率的假摘要）；充电摘要平均功率仅取 isCharging 样本（暂停期 ≈0W 不稀释） |
+| UsageTab 英雄卡 | 四态：满电接电 / 正在充电 / 已接电未充电 / 离电；仅离电显示续航预估 |
+| PopoverView | 与主窗口共用 PowerSourceState 定义 |
 
-1. **非视图层整体 typecheck 通过**：Models+Calc+Data+Sync 全部源码 + 全部测试文件
-   合成单一模块 `swiftc -typecheck -swift-version 6`（含 `-load-plugin-library libTestingMacros.dylib`）→ 0 error。
-   该过程抓出并修复：NormalizedRecord Equatable 缺失、测试缺 try 等 6 处问题。
-2. **全部改动 Swift 文件 `xcrun swiftc -parse` 通过**（0 error）。
-3. 过滤掉宏插件缺失类错误后的全量 swift build 输出无其他诊断
-   （期间抓出 SessionChartPlot Equatable 主 actor 隔离错误并修复为 `@MainActor Equatable`）。
+## 四、性能收口
 
-## 五、测试清单（由 GitHub Actions Xcode 环境执行）
+- HealthMetricsGrid、BatteryDetailSection 拆成独立观察子视图：温度/电压/电流变化
+  只失效对应小块，页面根视图不再因此重建。
+- 根视图依赖收敛为 currentLevel / powerSourceState / session 模型等低频字段。
+- 未新增任何持续 blur、阴影、动画或高频 Date 驱动刷新。
 
-新增：
-- `TelemetryNormalizationTests`：13759mW→13.759W；12.5 保持；nil/负/NaN/∞/UInt64 哨兵/超范围→0
-- `SnapshotCompatTests`：v1 充电快照 available=false 且 systemLoad=nil；v1 离电快照=估算负载；
-  v2 Codable 往返；成员构造器按 isCharging 推导；toJSON/from(remoteJSON:) 往返与新键集合；
-  远端旧格式推导；畸形行拒绝；保留窗口（24h 裁剪/未来点拒绝/±5min 容忍/1500 硬上限/排序）
-- `DataStoreJournalTests`（注入临时目录）：legacy 数组迁移且旧文件保留；逐条追加不重写；
-  末尾半行跳过其余可载；中间坏行容忍；markSynced compact 后 dirty=false 持久化且内容一致；
-  远端合并 timestamp 胜出且不入 dirty；超窗数据加载即裁剪
-- `OffPowerRecordAnalyzerTests`：展示过滤（<5min/<1% 剔除）；不同降幅可比
-  （100→10@5h vs 50→30@2h 的 %/h 与折算满电续航）；<5% 或 <15min 不进趋势；样本不足返回空
-- `DrainRateCalculatorTests` 新增：wattage=0/batteryPower=10 反例证明使用 batteryPower；
-  AC 快照整体排除
+## 五、测试反例清单（全部落地为回归测试）
 
-回归保持：CycleTrackerTests / ChartDownsamplerTests / SyncConfigTests / WebDAVResponseParserTests /
-BatterySnapshotTests / DrainRateCalculatorTests 原有用例不改语义。
+- `legacyPluggedNotChargingPollutionRejected`：v2 形态（ext 缺失、level=100、!charging、估算 2.1W）→ trustedSystemLoad=nil、非离电；
+- `explicitExternalConnectedDrivesTrust`：ext=true 同形态排除；ext=false 估算负载可用；遥测（estimated=false）无论 ext 是否缺失都保留；
+- `pausedChargingOnPowerProducesNoRecord` / `eightyPercentLimitThenRealUnplug`：暂停数小时零离电记录；真正拔电后按插拔起点记录；
+- `drainRateReturnsZeroWhenNotOnBattery` / `pausedChargingPointsExcludedFromHistory` / `unknownSourceEstimatedPollutionExcluded`：DrainRate 三类反例；
+- `dischargeSessionSegmentsByExternalConnected` / `pausedChargingAloneYieldsNoDischargeSession` / `lastChargeRequiresPositiveGainAndDuration` / `chargeSessionAveragesOnlyPositiveBatteryPower`：时段模型四例；
+- `migratedV2LinesKeepUnknownPowerSource`：journal 中 v2 行按 unknown 处理；
+- `remoteJSONLegacyFieldsDeriveSemanticsConservatively` 等：远端旧格式保守推导；
+- 既有 journal 追加/坏行恢复/dirty 同步/24h+1500 上限/延迟 compact 测试全部保留并通过。
 
-## 六、CI 构建产物与实机验证记录
+## 六、本地验证（CLT）
 
-### 第一轮（提交 f4b8302，run 32595255556）
-- 结论：**test 失败**（7 issues）→ 定位为 3 处测试夹具错误 + 1 处真实健壮性缺陷（空 journal 不回退 legacy），修复于提交 cf2e345
-- 运行时验证（已安装 cf2e345 产物）抓出**稳态每分钟重写缺陷**：24h 窗口边界使
-  `retained.count != snapshots.count` 每分钟成立 → 每分钟一次全量重写。
-  证据：70s 观察窗内行数不变、文件被原子替换（size +13B、前缀哈希变化）。
+- 非视图层 + 全部测试合成单模块 `swiftc -typecheck -swift-version 6` → 0 error；
+- 全部改动 Swift 文件 `swiftc -parse` 通过；
+- 视图层完整类型检查受 CLT 缺 SwiftUIMacros 限制，由 CI 证明（既有环境约束）。
 
-### 第二轮（最终，全部通过）
-- 触发提交：`686cb60`（Compact snapshot journal on accumulated expiries, not every minute）
-- Run URL：https://github.com/miohalationN/battery/actions/runs/32596337196
-- 结果：build ✓ + test ✓ —— `Test run with 74 tests in 11 suites passed`
-- Artifact sha256：
-  - `Contents/MacOS/BatteryBar`: `84f47380a8a44d0d182e5112b9d8b00382b377f275720c1176a3cdadb48348b8`
-  - `Contents/Resources/BatteryBarHelper`: `d498d03c81827dc558203989f7f433cabfa90b307948b21f227b45b30623d5e1`
-- 安装：ditto 至 `/Users/mio/Applications/BatteryBar.app`；
-  `codesign --verify --deep --strict` 通过；安装后二进制 sha256 与 artifact 完全一致
-- 数据备份（第二轮安装前）：`~/Library/Application Support/BatteryBar-backup-cf2e345`
-- 第二轮运行时验证（安装后 130s 观察窗）：
-  - `snapshots.jsonl` inode 不变、行数 1438→1440 —— 稳态纯追加、零重写 ✓
-  - BatteryBar 进程 CPU 0.0%（不劣于基线 0.1%）✓
-  - 零 `powermetrics` 进程（Helper 关闭，defaults BatteryBarHelperEnabled=0）✓
+## 七、Instruments 证据方案与环境约束
 
-### 实机验证（第一轮安装期间采集，口径与行为证据仍然有效）
-- 安装前数据备份：`~/Library/Application Support/BatteryBar-backup-be5f3eb`（复制，原数据未动）
-- 旧 app 备份：`~/.Trash/BatteryBar-be5f3eb-040514.app`
-- 迁移验证：启动即生成 `snapshots.jsonl`（1437 行），legacy `snapshots.json` 原样保留
-- 功率口径：接电满电新快照 `wattage=13.6~13.8W（遥测实测）、batteryPower=0.28W、estimated=false` ——电池净功率不再冒充系统负载 ✓
-- Helper 关闭（defaults=0）：观察期内零 `powermetrics` 进程 ✓；系统旧 Helper 未删除/未改动
-- 静止 CPU：0.1%（与基线持平）✓
+- 本机仅有 CLT：无 xctrace/Instruments；`AXIsProcessTrusted()=false`，
+  无法外部注入点击/滚动事件。
+- 方案：应用内置休眠式采样钩子（`ProfileSupport`：UserDefaults
+  「BatteryBarProfileAutoScroll」「BatteryBarProfileSection」门控的线性动画滚动 +
+  初始页指定；默认关闭、零常驻开销），配合新增 `.github/workflows/ui-profile.yml`：
+  在 Xcode runner 上构建安装、注入确定性种子数据（复刻真实污染形态 + 正常形态，
+  见 `scripts/seed_profile_data.py`），对概览页与功耗页各录制
+  SwiftUI（视图 body 求值）与 Animation Hitches 两份 trace：
+  时间线 = 启动静止窗（~12s，验证每秒采样不重建根视图/Chart）→ 连续滚动 ~50s。
+  digest 由 `scripts/profile_digest.py` 导出（结论见 §十一，随 CI 完成补充）。
 
-## 七、页面视觉验收
+## 八、CI / 安装 / 运行时证据（完成后填写）
 
-按执行约定，截图与视觉分析由后续验收模型独立完成；
-本 agent 已确认主窗口可从状态栏打开，三页数据通路（快照通知 → 模型 → 图表）由单测覆盖。
+- Build run：_待填写_（build + swift test）
+- UI Profile run：_待填写_
+- Artifact sha256：_待填写_
+- 安装前备份：_待执行_
+- codesign / 哈希核对：_待执行_
+- 运行时验证（污染隔离效果、零 powermetrics、追加式写入）：_待执行_
 
-## 八、遗留限制
+## 九、安全边界确认
 
-1. 本地 CLT 无 Xcode，SwiftUI 视图层完整类型检查只能由 CI 完成（项目固有约束）。
-2. ad-hoc 签名下 Helper 调用方校验只能到 bundle id 粒度（既有限制，未在本任务范围内改变）。
-3. `normalizedTelemetryPower` 以 >250 判定 mW/W 单位，属启发式；对笔记本合理功率域（<250W）安全。
-4. journal 存在时即使解码行数为 0 也回退 legacy（retention 过滤保证不复活过期数据）；
-   极端情况下若 journal 与 legacy 同时损坏，可能丢失窗口内历史——已由 .bak/备份流程缓解。
+- 不启用 WebDAV、不发真实同步请求（同步配置未开启）；
+- 不启用/安装/卸载 Helper、不触发管理员授权、不删除系统 Helper；
+- 不删除用户历史数据（污染点仅统计层隔离）；
+- 不扩大视觉重做范围（本轮仅状态表达、错误摘要、失效边界与休眠式采样钩子）。
 
-## 九、执行 Agent 自审发现（可操作项）
+## 十、自审发现（可操作项）
 
 | severity | 发现 | 处置 |
 |----------|------|------|
-| high | 稳态下 24h 窗口边界使每分钟新样本恰好挤出一条过期记录，原「差值≠0 即重写」策略退化为每分钟全量重写（首轮安装实测证据：行数不变、文件原子替换） | 已修复：追加无条件化 + 过期行累计 ≥60 才 compact；回归测试 `steadyStateExpirationCompactsOnlyAfterThreshold` 复现并验证 |
-| medium | 空 journal（compact 到空或全部损坏）时不回退 legacy，可能静默丢历史 | 已修复：0 有效行且 legacy 存在时回退；测试 `emptyJournalFallsBackToLegacy` 覆盖 |
+| medium | 充电时段平均电池功率若不过滤暂停期样本，会被 ≈0W 稀释（测试先行暴露） | makeSummary 对充电时段仅取 isCharging 样本，配套断言 |
+| low | onBatterySegments 尾部可能产生零长时段 | drainRate 内 segmentSnaps.count>=2 校验天然过滤 |

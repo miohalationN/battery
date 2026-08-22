@@ -1,0 +1,65 @@
+name: UI Profile
+
+# Instruments 采样证据：在带 Xcode 的 runner 上安装本提交构建的 app，
+# 用 UserDefaults 门控的自动滚动驱动真实连续滚动，录制 SwiftUI 视图求值与
+# Animation Hitches。默认随 push 触发；也可 workflow_dispatch 手动运行。
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  profile:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app || true
+          xcodebuild -version
+
+      - name: Build app
+        run: bash build-app.sh
+
+      - name: Install and seed profile data
+        run: |
+          mkdir -p ~/Applications
+          rm -rf ~/Applications/BatteryBar.app
+          cp -R .build/release/BatteryBar.app ~/Applications/
+          python3 scripts/seed_profile_data.py
+          defaults delete com.batterybar.app BatteryBarProfileAutoScroll 2>/dev/null || true
+          defaults delete com.batterybar.app BatteryBarProfileSection 2>/dev/null || true
+
+      - name: Profile overview page (usage)
+        run: bash scripts/profile_page.sh usage
+
+      - name: Profile power page (power)
+        run: bash scripts/profile_page.sh power
+
+      - name: Digest traces
+        run: |
+          python3 scripts/profile_digest.py /tmp/usage-swiftui.trace /tmp/digest-usage-swiftui.txt || true
+          python3 scripts/profile_digest.py /tmp/usage-hitches.trace /tmp/digest-usage-hitches.txt || true
+          python3 scripts/profile_digest.py /tmp/power-swiftui.trace /tmp/digest-power-swiftui.txt || true
+          python3 scripts/profile_digest.py /tmp/power-hitches.trace /tmp/digest-power-hitches.txt || true
+          echo "===== usage-swiftui =====";  cat /tmp/digest-usage-swiftui.txt  || true
+          echo "===== usage-hitches =====";  cat /tmp/digest-usage-hitches.txt  || true
+          echo "===== power-swiftui =====";  cat /tmp/digest-power-swiftui.txt  || true
+          echo "===== power-hitches =====";  cat /tmp/digest-power-hitches.txt  || true
+
+      - name: Upload traces and digests
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-profile
+          path: |
+            /tmp/*-swiftui.trace
+            /tmp/*-hitches.trace
+            /tmp/digest-*.txt
+          retention-days: 14
+          if-no-files-found: warn

@@ -22,33 +22,38 @@ struct PowerTab: View {
     @State private var isInstallingHelper = false
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
-                PageHeader(
-                    title: "功耗分析",
-                    subtitle: "当前负载、组件构成与历史波动",
-                    systemImage: "waveform.path.ecg",
-                    tint: .bbAmber
-                )
-                PowerLoadHero(sampler: sampler)
-                ComponentBreakdownCard(sampler: sampler)
-                historyCard
-                PowerDiagnosticsSection(sampler: sampler)
-                dataSourceFootnote
-                AdvancedSamplingCard(sampler: sampler, isInstallingHelper: $isInstallingHelper)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
+                    PageHeader(
+                        title: "功耗分析",
+                        subtitle: "当前负载、组件构成与历史波动",
+                        systemImage: "waveform.path.ecg",
+                        tint: .bbAmber
+                    )
+                    .id(ProfileSupport.topAnchorID)
+                    PowerLoadHero(sampler: sampler)
+                    ComponentBreakdownCard(sampler: sampler)
+                    historyCard
+                    PowerDiagnosticsSection(sampler: sampler)
+                    dataSourceFootnote
+                    AdvancedSamplingCard(sampler: sampler, isInstallingHelper: $isInstallingHelper)
+                        .id(ProfileSupport.bottomAnchorID)
+                }
+                .padding(.horizontal, BBDesign.pagePadding)
+                .padding(.top, 46)
+                .padding(.bottom, BBDesign.pagePadding)
             }
-            .padding(.horizontal, BBDesign.pagePadding)
-            .padding(.top, 46)
-            .padding(.bottom, BBDesign.pagePadding)
-        }
-        .onAppear {
-            reloadSnapshots()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .batterySnapshotsDidChange)) { _ in
-            reloadSnapshots()
-        }
-        .onChange(of: timeRange) {
-            rebuildRangeData(from: snapshots)
+            .onAppear {
+                reloadSnapshots()
+                ProfileAutoScroll.run(proxy)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .batterySnapshotsDidChange)) { _ in
+                reloadSnapshots()
+            }
+            .onChange(of: timeRange) {
+                rebuildRangeData(from: snapshots)
+            }
         }
     }
 
@@ -59,13 +64,16 @@ struct PowerTab: View {
     }
 
     /// 只在快照真正变化或用户切换范围时做 O(n) 过滤/统计/降采样。
-    /// 系统负载统计与曲线只使用 systemPowerAvailable 的快照：
-    /// v1 充电快照的 wattage 是电池充电功率，混入会制造假负载谷底/峰值。
+    /// 系统负载统计与曲线只使用 `trustedSystemLoad` 非空的快照：
+    /// - 实测遥测（estimated=false）无论电源状态都保留；
+    /// - 估算负载只在明确离电（externalConnected == false）时保留；
+    /// - 来源未知（v1/v2 旧数据）的估算点——包括历史上"接电未充电被误标
+    ///   为可用离电负载"的污染点——保守排除，不再拉低平均/制造假谷底。
     private func rebuildRangeData(from source: [BatterySnapshot]) {
         let cutoff = Date().addingTimeInterval(-timeRange.hours * 3600)
         let filtered = source
             .filter { $0.timestamp >= cutoff }
-            .filter { $0.systemLoad != nil }
+            .filter { $0.trustedSystemLoad != nil }
             .sorted { $0.timestamp < $1.timestamp }
         chartSnapshots = ChartDownsampler.powerSnapshots(filtered, maxPoints: 240)
 

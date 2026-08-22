@@ -84,7 +84,7 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 10) {
             statusHeadline
             batteryBar
-            if !isChargingNow, !isPluggedIn {
+            if sampler.powerSourceState == .onBattery {
                 HStack(spacing: 0) {
                     durationItem("亮屏", minutes: sampler.screenOnTime, icon: "sun.max.fill", color: .bbAmber)
                     durationItem("休眠", minutes: sampler.sleepTime, icon: "moon.fill", color: .indigo)
@@ -97,14 +97,15 @@ struct PopoverView: View {
 
     @ViewBuilder
     private var statusHeadline: some View {
-        if isFullCharge {
+        switch sampler.powerSourceState {
+        case .onPowerNotCharging where sampler.currentLevel >= 100:
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 Text("电池已充满").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Text("正在使用电源").font(.caption).foregroundStyle(.secondary)
             }
-        } else if isChargingNow {
+        case .charging:
             HStack(spacing: 6) {
                 Image(systemName: "bolt.fill").foregroundStyle(.green)
                 Text(chargeHeadline)
@@ -113,15 +114,16 @@ struct PopoverView: View {
                 Text(wattageText)
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-        } else if isPluggedIn {
+        case .onPowerNotCharging:
+            // 满电保持 / 优化充电暂停 / 80% 上限：接电但电池未充入，不是离电
             HStack(spacing: 6) {
                 Image(systemName: "powerplug.fill").foregroundStyle(.secondary)
-                Text("已插电，未充电").font(.system(size: 13, weight: .semibold))
+                Text("已接电，未充电").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Text(wattageText)
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-        } else {
+        case .onBattery:
             HStack(spacing: 6) {
                 Image(systemName: "battery.25percent").foregroundStyle(drainColor)
                 Text(drainHeadline)
@@ -335,7 +337,8 @@ struct PopoverView: View {
 
     // MARK: - 计算属性
 
-    private var isPluggedIn: Bool { sampler.currentInfo?.externalConnected ?? false }
+    /// 与主窗口同一状态定义：三态 + 满电由 level 组合表达
+    private var isPluggedIn: Bool { sampler.currentExternalConnected }
     private var isChargingNow: Bool { sampler.currentIsCharging }
     private var isFullCharge: Bool { isPluggedIn && sampler.currentLevel >= 100 }
 
@@ -373,17 +376,20 @@ struct PopoverView: View {
     }
 
     private var statusColor: Color {
-        if sampler.currentLevel >= 100 { return .green }
-        if sampler.currentIsCharging { return .green }
-        if sampler.currentLevel <= 20 { return .red }
-        return .bbBlue
+        switch sampler.powerSourceState {
+        case .charging: return .green
+        case .onPowerNotCharging: return .bbTeal
+        case .onBattery: return sampler.currentLevel <= 20 ? .red : .bbBlue
+        }
     }
 
     private var statusText: String {
-        if sampler.currentLevel >= 100 && isPluggedIn { return "已充满" }
-        if sampler.currentIsCharging { return "充电中" }
-        if isPluggedIn { return "已插电" }
-        return "放电中"
+        switch sampler.powerSourceState {
+        case .onPowerNotCharging:
+            return isFullCharge ? "已充满" : "已接电，未充电"
+        case .charging: return "充电中"
+        case .onBattery: return "离电使用中"
+        }
     }
 
     private var batterySymbol: String {

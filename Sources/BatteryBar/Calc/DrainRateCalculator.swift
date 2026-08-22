@@ -10,10 +10,12 @@ import IOKit
 enum DrainRateCalculator {
 
     /// 放电速率（每小时耗电百分比），结合历史数据 + 当前功率 + 机型基准，做平滑处理。
+    /// 仅在明确离电时给出非零值：接电（含满电保持/优化充电暂停/80% 上限）返回 0，
+    /// 调用方据此不显示续航预估。
     /// - Parameters:
     ///   - level: 当前电量
-    ///   - isCharging: 当前是否充电
-    ///   - wattage: 当前功率
+    ///   - isOnBattery: 是否明确离电（externalConnected == false），不是 !isCharging
+    ///   - batteryPower: 电池包当前放出功率（瓦特）
     ///   - voltage: 当前电压（mV）
     ///   - maxCapacity: 电池最大容量（mAh 或 IORegistry 单位）
     ///   - healthPercent: 电池健康度（0-100）
@@ -22,8 +24,8 @@ enum DrainRateCalculator {
     ///   - now: 当前时间（测试注入用）
     static func drainRate(
         level: Double,
-        isCharging: Bool,
-        wattage: Double,
+        isOnBattery: Bool,
+        batteryPower: Double,
         voltage: Double,
         maxCapacity: Int,
         healthPercent: Double,
@@ -31,6 +33,9 @@ enum DrainRateCalculator {
         snapshots: [BatterySnapshot],
         now: Date = Date()
     ) -> Double {
+        // 接电（含充电暂停）不做放电预估
+        guard isOnBattery else { return 0 }
+
         // 判断是否在拔电初期（前2分钟功率不稳定）
         let isInitialPhase: Bool
         if let start = dischargeStart {
@@ -39,12 +44,12 @@ enum DrainRateCalculator {
             isInitialPhase = false
         }
 
-        // === 1. 历史放电段速率（滑动窗口中位数平滑）===
-        let segments = chargeSegments(from: snapshots)
+        // === 1. 历史离电段速率（滑动窗口中位数平滑）===
+        let segments = onBatterySegments(from: snapshots)
         var historyRate: Double = 0
         if let lastSegment = segments.last {
             let segmentSnaps = snapshots.filter {
-                $0.timestamp >= lastSegment.start && $0.timestamp <= lastSegment.end && !$0.isCharging
+                $0.timestamp >= lastSegment.start && $0.timestamp <= lastSegment.end && $0.isDefinitelyOnBattery
             }.sorted { $0.timestamp < $1.timestamp }
 
             if segmentSnaps.count >= 2 {
@@ -74,7 +79,7 @@ enum DrainRateCalculator {
 
         // === 2. 当前功率估算速率 ===
         var powerRate: Double = 0
-        let smoothWattage = smoothedWattage(snapshots: snapshots, seconds: 300, now: now, fallback: wattage)
+        let smoothWattage = smoothedWattage(snapshots: snapshots, seconds: 300, now: now, fallback: batteryPower)
         if smoothWattage > 0.1, maxCapacity > 0 {
             // 限制异常功率：超过 30W 视为异常
             let cappedWattage = min(smoothWattage, 30)
@@ -163,12 +168,11 @@ enum DrainRateCalculator {
     }
 
     /// 最近 N 秒内的功率滑动平均（去掉极值），用于平滑瞬时波动。
-    /// 只使用离电快照的 batteryPower（电池放出功率）：
-    /// 离电时系统负载本就以电池功率估算；接电快照被排除，
-    /// 其 systemLoad（接电负载）与电池充电功率都不该进入放电速率。
+    /// 只使用**明确离电**快照的 batteryPower：接电未充电（满电保持/优化充电暂停）
+    /// 与来源未知的旧数据整体排除，其负载/充电功率与"离电能用多久"无关。
     private static func smoothedWattage(snapshots: [BatterySnapshot], seconds: TimeInterval, now: Date, fallback: Double) -> Double {
         let cutoff = now.addingTimeInterval(-seconds)
-        let recent = snapshots.filter { $0.timestamp >= cutoff && !$0.isCharging }
+        let recent = snapshots.filter { $0.timestamp >= cutoff && $0.isDefinitelyOnBattery }
         let watts = recent.map { abs($0.batteryPower) }.filter { $0 > 0.1 }
         guard !watts.isEmpty else { return fallback }
         let sorted = watts.sorted()
@@ -177,26 +181,31 @@ enum DrainRateCalculator {
         return trimmed.isEmpty ? sorted[sorted.count / 2] : trimmed.reduce(0, +) / Double(trimmed.count)
     }
 
-    private static func chargeSegments(from snapshots: [BatterySnapshot]) -> [(start: Date, end: Date)] {
+    /// 按**插拔状态**切分离电时段。只使用 externalConnected 已知的快照：
+    /// 来源未知的旧点不参与分段，也不得用 !isCharging 推断。
+    /// external true→false 开启时段，false→true 关闭。
+    private static func onBatterySegments(from snapshots: [BatterySnapshot]) -> [(start: Date, end: Date)] {
         var segments: [(start: Date, end: Date)] = []
         var currentStart: Date?
-        var wasCharging: Bool?
-        for snap in snapshots {
-            if let prev = wasCharging {
-                if prev && !snap.isCharging {
+        var wasOnBattery: Bool?
+        for snap in snapshots where snap.externalConnected != nil {
+            let onBattery = snap.isDefinitelyOnBattery
+            if let prev = wasOnBattery {
+                if !prev && onBattery {
+                    // 接电 → 离电：时段开始
                     currentStart = snap.timestamp
-                } else if !prev && snap.isCharging {
-                    if let start = currentStart {
-                        segments.append((start: start, end: snap.timestamp))
-                    }
+                } else if prev && !onBattery, let start = currentStart {
+                    // 离电 → 接电：时段结束
+                    segments.append((start: start, end: snap.timestamp))
                     currentStart = nil
                 }
-            } else if !snap.isCharging {
+            } else if onBattery {
+                // 首个已知点即离电：作为时段起点
                 currentStart = snap.timestamp
             }
-            wasCharging = snap.isCharging
+            wasOnBattery = onBattery
         }
-        if let start = currentStart, let last = snapshots.last {
+        if let start = currentStart, let last = snapshots.last(where: { $0.externalConnected != nil }) {
             segments.append((start: start, end: last.timestamp))
         }
         return segments

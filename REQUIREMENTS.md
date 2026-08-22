@@ -109,8 +109,21 @@
 | 适配器输入 | 实时诊断字段 | 不强制写历史 |
 
 读取优先级：PowerTelemetryData.SystemLoad → BatteryData.SystemPower（可验证的旧节点）→
-离电电池放电功率（estimated）→ 接电时不可用。
+明确离电（externalConnected == false）时以电池放电功率估算 → 接电无遥测时不可用。
 异常值过滤：nil、负值、非有限值、UInt64 回绕哨兵、超出合理设备范围的值。
+
+### 电源状态语义（2026-08-23 第二轮修正）
+
+| 概念 | 字段 | 说明 |
+|------|------|------|
+| 是否接电 | `externalConnected` | 快照 v3 起持久化；nil = 旧数据未知，禁止用 `!isCharging` 推断 |
+| 是否充入 | `isCharging` | 仅表达电池包正在充入；满电保持/优化充电暂停/80% 上限都是接电未充电 |
+| 可信系统负载 | `trustedSystemLoad` | 实测遥测始终可信；估算负载仅明确离电时可信；来源未知的估算点（含历史污染）排除 |
+
+状态三态（主窗口/Popover 共用）：charging / onPowerNotCharging / onBattery。
+概览英雄卡区分：满电接电、正在充电、已接电未充电、真正离电；仅 onBattery 显示续航预估。
+离电时段检测（CycleTracker）、DrainRate 历史、UsageSessionModel 分段全部只认插拔状态；
+「上次充电摘要」必须有正电量变化（≥1%）且时长 ≥5 分钟，否则显示暂无有效记录。
 
 #### Tab 4：同步 ✅（部分待办）
 

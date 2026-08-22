@@ -3,8 +3,8 @@ import Charts
 
 /// 历史曲线与实时指标隔离。父页面刷新数字时，只要输入快照不变，
 /// EquatableView 会跳过数百个 Chart marks 的重新构造。
-/// 曲线口径：系统负载。调用方已过滤掉 systemPowerAvailable == false 的快照
-/// （v1 充电快照的 wattage 是电池充电功率，不进入负载曲线）。
+/// 曲线口径：可信系统负载。调用方已按 `trustedSystemLoad != nil` 过滤：
+/// 实测遥测保留；估算负载仅明确离电时保留；来源未知的旧估算点排除。
 struct PowerChartPlot: View, @MainActor Equatable {
     let snapshots: [BatterySnapshot]
     let timeRange: TimeRange
@@ -87,7 +87,7 @@ struct PowerChartPlot: View, @MainActor Equatable {
                 .foregroundStyle(.tertiary)
             Text(String(format: "负载 %.1fW", snapshot.wattage))
                 .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
-            if snapshot.systemPowerIsEstimated {
+            if snapshot.systemPowerIsEstimated && snapshot.isDefinitelyOnBattery {
                 Text("电池侧估算")
                     .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(.orange)

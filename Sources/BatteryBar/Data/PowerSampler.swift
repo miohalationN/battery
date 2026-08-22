@@ -22,6 +22,9 @@ final class PowerSampler {
 
     private(set) var currentLevel: Double = 0
     private(set) var currentIsCharging: Bool = false
+    /// 是否接外接电源。与 currentIsCharging 相互独立：
+    /// 满电保持/优化充电暂停/80% 上限都是接电未充电。
+    private(set) var currentExternalConnected: Bool = false
     /// 系统负载（瓦特）。接电且无系统遥测时为 0（currentPowerAvailable == false）
     private(set) var currentWattage: Double = 0
     /// 电池包充入/放出功率绝对值（瓦特）；方向由 currentIsCharging 表达
@@ -292,6 +295,7 @@ final class PowerSampler {
         let wattage = info?.systemPower ?? info?.wattage ?? 0
         if ps.level != currentLevel { currentLevel = ps.level }
         if ps.isCharging != currentIsCharging { currentIsCharging = ps.isCharging }
+        if isPluggedIn != currentExternalConnected { currentExternalConnected = isPluggedIn }
         if abs(wattage - currentWattage) > 0.05 { currentWattage = wattage }
         if abs((info?.batteryPower ?? 0) - currentBatteryPower) > 0.05 {
             currentBatteryPower = info?.batteryPower ?? 0
@@ -348,10 +352,12 @@ final class PowerSampler {
         if now.timeIntervalSince(lastRateCalculationAt) >= rateCacheInterval {
             lastRateCalculationAt = now
             let snapshots = DataStore.shared.recentSnapshots(1440)
+            // 放电速率只在明确离电时有意义：接电（含满电保持/优化充电暂停）
+            // 返回 0，UI 不显示续航预估；历史过滤同样只认 externalConnected == false。
             cachedDrainRate = DrainRateCalculator.drainRate(
                 level: currentLevel,
-                isCharging: currentIsCharging,
-                wattage: currentBatteryPower,
+                isOnBattery: !isPluggedIn,
+                batteryPower: currentBatteryPower,
                 voltage: currentVoltage,
                 maxCapacity: currentInfo?.maxCapacity ?? 0,
                 healthPercent: systemHealthPercent,
@@ -403,7 +409,8 @@ final class PowerSampler {
             cpuPower: cpuPower,
             gpuPower: gpuPower,
             displayPower: displayPower,
-            dramPower: dramPower
+            dramPower: dramPower,
+            externalConnected: isPluggedIn
         )
         DataStore.shared.saveSnapshot(snapshot)
 
@@ -417,7 +424,8 @@ final class PowerSampler {
             }
         }
 
-        cycleTracker.update(isCharging: ps.isCharging, level: ps.level, wattage: info?.batteryPower ?? 0)
+        // 离电时段检测只认插拔状态；接电未充电（满电保持/优化充电暂停）不产生记录
+        cycleTracker.update(isPluggedIn: isPluggedIn, level: ps.level, batteryPower: info?.batteryPower ?? 0)
 
         // 每 5 分钟落盘一次
         saveTick += 1
@@ -470,4 +478,9 @@ final class PowerSampler {
     var lastSleepTime: Int { lastDischargeSleep }
     /// 当前离电周期开始时间（拔电时刻），用于判断功率是否稳定
     var currentDischargeStart: Date? { dischargeStartTime }
+    /// 电源三态：charging / onPowerNotCharging / onBattery。
+    /// 满电保持、优化充电暂停、80% 上限都是 onPowerNotCharging。
+    var powerSourceState: PowerSourceState {
+        PowerSourceState(externalConnected: currentExternalConnected, isCharging: currentIsCharging)
+    }
 }

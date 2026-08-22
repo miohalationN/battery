@@ -300,7 +300,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private enum AppSection: Int, CaseIterable, Identifiable {
+enum AppSection: Int, CaseIterable, Identifiable {
     case overview
     case cycles
     case power
@@ -348,7 +348,7 @@ private enum AppSection: Int, CaseIterable, Identifiable {
 /// 主窗口采用固定侧栏 + 内容画布，稳定承载高密度图表并保留 macOS 原生窗口行为。
 struct ContentView: View {
     @EnvironmentObject var syncEngine: SyncEngine
-    @State private var selectedSection: AppSection = .overview
+    @State private var selectedSection: AppSection = ProfileSupport.initialSection ?? .overview
     @Namespace private var sidebarGlassNamespace
 
     var body: some View {

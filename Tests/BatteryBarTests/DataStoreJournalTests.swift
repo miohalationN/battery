@@ -179,6 +179,27 @@ import Foundation
     /// 稳态反例：每分钟新样本把最老记录挤出 24h 窗口时，
     /// 不得每次都全量重写——过期行累计到阈值才 compact。
     /// （首轮安装实测曾因此退化成每分钟一次原子重写。）
+    /// 已迁移/手写的 v2 格式行（无 externalConnected 键）加载后按 unknown 处理，
+    /// 不得被推断成离电或接电。
+    @Test func migratedV2LinesKeepUnknownPowerSource() throws {
+        let ctx = try makeStore()
+        defer { cleanUp(ctx.dir) }
+        let v2Line = """
+        {"id":"\(UUID().uuidString)","timestamp":1720780800.0,"level":100,"isCharging":false,
+         "wattage":2.1,"batteryPower":2.1,"systemPowerAvailable":true,"systemPowerIsEstimated":true,
+         "temperature":31.0,"screenOn":true,"dirty":false}
+        """
+        try Data(v2Line.utf8).write(to: ctx.journal)
+
+        let store = DataStore(directory: ctx.dir)
+        store.flushPendingWritesForTesting()
+        let loaded = store.allSnapshots()
+        #expect(loaded.count == 1)
+        #expect(loaded[0].externalConnected == nil)      // unknown，不伪造
+        #expect(!loaded[0].isDefinitelyOnBattery)
+        #expect(loaded[0].trustedSystemLoad == nil)      // 污染点保守排除
+    }
+
     @Test func steadyStateExpirationCompactsOnlyAfterThreshold() throws {
         let ctx = try makeStore()
         defer { cleanUp(ctx.dir) }

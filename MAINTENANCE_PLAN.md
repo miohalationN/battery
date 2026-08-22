@@ -117,6 +117,24 @@ swift test
 
 ## 五、变更日志
 
+### 2026-08-23（第三批）— 电源状态语义修复：isCharging ≠ 是否接电
+
+#### 问题
+macOS 满电保持、优化充电暂停、80% 充电上限都会长时间处于 externalConnected=true、
+isCharging=false。旧实现把 isCharging 当作是否接电，导致：接电静置被 CycleTracker
+记成"离电使用"；快照缺电源字段时用 !isCharging 推断离电；实机 snapshots.jsonl 中
+1190 条 level>=99、未充电、亮屏、估算 0–3W 的记录被标为"可用离电负载"，
+6h 负载均值被拉到 2.45W（同期遥测实测 10.94W）。
+
+#### 修复
+- BatterySnapshot v3 新增 `externalConnected: Bool?`（键缺失=来源未知，encodeIfPresent 不伪造）；`trustedSystemLoad`：实测遥测独立可信，估算负载仅明确离电可信，未知来源的污染点保守排除；WebDAV `ext` 字段双端同步并对旧格式保守推导
+- CycleTracker 状态机改插拔语义（接电→离电开始、离电→接电结束），暂停充电数小时零记录
+- DrainRateCalculator：isOnBattery=false 直接返回 0（不显示续航预估）；历史分段/功率平滑只认 externalConnected==false 的样本
+- PowerSampler.sampleStorage 持久化 externalConnected 并传 isPluggedIn 给 CycleTracker；cachedDrainRate 仅离电计算
+- UsageSessionModel 按 externalConnected 分段并排除未知点；「上次充电摘要」要求正电量变化 ≥1% 且时长 ≥5 分钟，否则显示暂无有效记录；概览英雄卡四态（满电接电/正在充电/已接电未充电/离电），Popover 同一定义
+- 性能收口：HealthMetricsGrid/BatteryDetailSection 拆独立观察子视图，温度/电压/电流不再使页面根失效
+- 新增休眠式 UI Profile 钩子（UserDefaults 门控自动滚动/初始页），配合 ui-profile CI 工作流产出 Instruments SwiftUI/Animation Hitches 证据（本机无 AX 权限与 xctrace）
+
 ### 2026-08-23（第二批）— 信息架构、SwiftUI 性能边界、功率口径与追加存储重构
 
 #### 功率数据模型（口径修正）
