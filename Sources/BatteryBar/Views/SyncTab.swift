@@ -74,7 +74,7 @@ struct SyncTab: View {
         HStack(spacing: 12) {
             Image(systemName: config.isEnabled ? "checkmark.circle.fill" : "circle.dotted")
                 .font(.system(size: 17))
-                .foregroundStyle(config.isEnabled ? .green : .tertiary)
+                .foregroundStyle(config.isEnabled ? Color.green : Color.secondary)
             Text("启用 WebDAV 同步").font(.system(size: 13, weight: .semibold))
             Spacer()
             Toggle("", isOn: $config.isEnabled).labelsHidden().onChange(of: config.isEnabled) { save() }

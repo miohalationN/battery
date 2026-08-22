@@ -288,7 +288,7 @@ struct PowerTab: View {
             HStack(spacing: 10) {
                 Image(systemName: "shield.lefthalf.filled")
                     .font(.system(size: 14))
-                    .foregroundStyle(enabled ? .green : .tertiary)
+                    .foregroundStyle(enabled ? Color.green : Color.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("CPU/GPU 分项功耗")
                         .font(.system(size: 13, weight: .semibold))
