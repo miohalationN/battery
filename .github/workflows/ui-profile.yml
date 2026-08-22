@@ -14,7 +14,7 @@ on:
 jobs:
   profile:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 70
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,11 +38,14 @@ jobs:
 
       - name: Profile overview page (usage)
         run: bash scripts/profile_page.sh usage
+        timeout-minutes: 22
 
       - name: Profile power page (power)
         run: bash scripts/profile_page.sh power
+        timeout-minutes: 22
 
       - name: Digest traces
+        timeout-minutes: 15
         run: |
           python3 scripts/profile_digest.py /tmp/usage-swiftui.trace /tmp/digest-usage-swiftui.txt || true
           python3 scripts/profile_digest.py /tmp/usage-hitches.trace /tmp/digest-usage-hitches.txt || true

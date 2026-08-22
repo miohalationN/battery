@@ -48,11 +48,16 @@ schemas = sorted(set(re.findall(r'schema="([A-Za-z0-9_.-]+)"', toc.stdout)))
 lines.append(f"-- schemas ({len(schemas)}) --")
 lines.append(", ".join(schemas))
 
+# 优先导出与目标相关的表，控制导出耗时；找不到再退回全量
+priority = [x for x in schemas if re.search(r"swiftui|hitch|animation|view|render", x, re.I)]
+others = [x for x in schemas if x not in priority]
+export_order = priority + (others if not priority else [])
+
 interesting = Counter()
 hitch_rows = []
 body_rows_total = 0
 
-for s in schemas:
+for s in export_order[:24]:
     exported = ""
     for tpl in XPATH_TEMPLATES:
         xp = tpl.format(s=s)

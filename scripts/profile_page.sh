@@ -5,6 +5,7 @@
 #   <page>-swiftui.trace  —— SwiftUI 模板（视图 body 求值证据）
 #   <page>-hitches.trace  —— Animation Hitches / Core Animation（掉帧证据）
 # 时间线：启动 → 静止采样窗(~12s，验证每秒采样不重建根/Chart) → 自动滚动(~50s)。
+# xctrace 偶发在 attach 阶段挂起：每次录制用看门狗限时并重试一次。
 set -euo pipefail
 
 PAGE="$1"
@@ -13,7 +14,6 @@ TEMPLATES=$(xcrun xctrace list templates 2>/dev/null || true)
 echo "$TEMPLATES"
 
 pick_template() {
-  # 按候选顺序挑第一个存在的模板
   for candidate in "$@"; do
     if echo "$TEMPLATES" | grep -q "$candidate"; then
       echo "$candidate"
@@ -39,12 +39,46 @@ launch_app() {
   sleep 6
 }
 
+# 带看门狗的录制：超过 limit 秒强杀（视为该次失败）
+record_once() {
+  local tpl="$1" limit="$2" out="$3"
+  xcrun xctrace record --template "$tpl" --attach BatteryBar --time-limit "${limit}s" --output "$out" &
+  local pid=$!
+  (
+    sleep $((limit + 90))
+    kill -9 $pid 2>/dev/null || true
+  ) &
+  local watchdog=$!
+  set +e
+  wait $pid
+  local rc=$?
+  set -e
+  kill $watchdog 2>/dev/null || true
+  wait $watchdog 2>/dev/null || true
+  return $rc
+}
+
+# 录制 + 一次重试；输出存在即认为成功
 record() {
   local tpl="$1" limit="$2" out="$3"
   if [ -z "$tpl" ]; then
-    echo "!! no template available, skip $out" && return 0
+    echo "!! no template available, skip $out"
+    return 0
   fi
-  xcrun xctrace record --template "$tpl" --attach BatteryBar --time-limit "${limit}s" --output "$out" 2>&1 | tail -3 || true
+  rm -f "$out"
+  for attempt in 1 2; do
+    echo "--- record attempt $attempt: $tpl -> $out ---"
+    if record_once "$tpl" "$limit" "$out"; then
+      echo "recording finished (rc=0)"
+    else
+      echo "recording exited rc=$?"
+    fi
+    [ -f "$out" ] && { echo "trace file present: $out"; return 0; }
+    pkill -9 xctrace 2>/dev/null || true
+    launch_app
+  done
+  echo "!! recording failed after retries: $out"
+  return 0   # 不让单份 trace 失败拖垮整个步骤，digest 阶段会如实报告缺失
 }
 
 # ---- 第一遍：SwiftUI body 求值（含静止窗 + 滚动窗）----
