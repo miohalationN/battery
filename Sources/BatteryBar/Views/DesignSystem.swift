@@ -44,14 +44,15 @@ struct AppBackdrop: View {
 }
 
 extension View {
-    /// 页面级卡片：系统材质、淡彩层与双层边缘共同提供清晰但安静的层级。
+    /// 页面级内容卡片：使用动态实体色而不是实时背景模糊。
+    /// Liquid Glass 属于导航/控制层；滚动数据内容使用实体表面能显著减少离屏合成。
     func glassCard(accent: Color = .clear) -> some View {
         self
             .padding(BBDesign.cardPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous)
-                    .fill(.regularMaterial)
+                    .fill(Color(nsColor: .controlBackgroundColor))
                     .overlay {
                         RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous)
                             .fill(
@@ -74,7 +75,7 @@ extension View {
                         lineWidth: 1
                     )
             }
-            .shadow(color: Color.black.opacity(0.055), radius: 16, x: 0, y: 7)
+            .shadow(color: Color.black.opacity(0.04), radius: 8, x: 0, y: 3)
     }
 
     /// 卡片内部的次级信息块。
@@ -105,6 +106,47 @@ extension View {
                 ),
                 in: RoundedRectangle(cornerRadius: 12, style: .continuous)
             )
+    }
+
+    /// macOS 26+ 采用系统 Liquid Glass 主操作样式；旧系统使用原生 prominent 样式。
+    @ViewBuilder
+    func adaptiveProminentButton(tint: Color) -> some View {
+        if #available(macOS 26.0, *) {
+            self
+                .buttonStyle(.glassProminent)
+                .tint(tint)
+        } else {
+            self
+                .buttonStyle(.borderedProminent)
+                .tint(tint)
+        }
+    }
+}
+
+/// 侧边栏选中项是导航控制层，macOS 26+ 使用真正的交互式 Liquid Glass；
+/// 旧系统保留低成本淡彩表面。由外层 GlassEffectContainer 统一渲染多个候选形状。
+struct NavigationSelectionSurface: View {
+    let isSelected: Bool
+    let tint: Color
+    let namespace: Namespace.ID
+
+    @ViewBuilder
+    var body: some View {
+        if isSelected {
+            if #available(macOS 26.0, *) {
+                Color.clear
+                    .glassEffect(
+                        .regular.tint(tint.opacity(0.18)).interactive(),
+                        in: .rect(cornerRadius: 10)
+                    )
+                    .glassEffectID("sidebar-selection", in: namespace)
+            } else {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(tint.opacity(0.105))
+            }
+        } else {
+            Color.clear
+        }
     }
 }
 

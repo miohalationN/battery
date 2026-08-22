@@ -32,6 +32,11 @@ final class BatteryReader: @unchecked Sendable {
     private let staticInfoLock = NSLock()
     private var _staticInfo: StaticInfo?
 
+    /// 适配器额定信息在插拔之间基本不变；缓存可避免每秒重复遍历三类 IORegistry 服务。
+    private let adapterCacheLock = NSLock()
+    private var adapterCache: (value: AdapterInfo, checkedAt: Date)?
+    private let adapterCacheTTL: TimeInterval = 30
+
     /// 后台预加载静态信息（machine model + serial/mfg 兜底）。
     /// 在 PowerSampler.start() 中调用，避免主线程阻塞。
     /// 加载完成后通过 `staticInfoLoaded` 通知外部触发 UI 刷新。
@@ -74,7 +79,12 @@ final class BatteryReader: @unchecked Sendable {
     }
 
     private static let helperIdentifier = "com.batterybar.helper"
+    private let helperConnectionLock = NSLock()
     private var helperConnection: NSXPCConnection?
+    private var helperConnectionGeneration: UInt = 0
+    private let helperStatusLock = NSLock()
+    private var helperReadyCache: (ready: Bool, checkedAt: Date)?
+    private let helperStatusTTL: TimeInterval = 300
 
     func readPowerSource() -> PowerSourceInfo {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
@@ -155,12 +165,16 @@ final class BatteryReader: @unchecked Sendable {
 
         let wattage: Double
         if externalConnected && !isCharging {
-            wattage = readSystemPower() ?? (abs(voltage * Double(amperage)) / 1_000_000)
+            // 当前已经持有 AppleSmartBattery service，直接读取嵌套功率字段，
+            // 不再为同一秒的样本额外打开一次 IORegistry service。
+            wattage = readNestedDouble(service, "BatteryData", key: "AdapterPower")
+                ?? readNestedDouble(service, "BatteryData", key: "SystemPower")
+                ?? (abs(voltage * Double(amperage)) / 1_000_000)
         } else {
             wattage = abs(voltage * Double(amperage)) / 1_000_000
         }
 
-        let adapter = readAdapterInfo()
+        let adapter = cachedAdapterInfo(isConnected: externalConnected)
 
         return BatteryInfo(
             designCapacity: designCap,
@@ -322,6 +336,34 @@ final class BatteryReader: @unchecked Sendable {
         )
     }
 
+    private func cachedAdapterInfo(isConnected: Bool) -> AdapterInfo {
+        guard isConnected else {
+            adapterCacheLock.lock()
+            adapterCache = nil
+            adapterCacheLock.unlock()
+            return AdapterInfo(
+                watts: 0,
+                volts: 0,
+                amps: 0,
+                protocolName: "未连接",
+                isConnected: false
+            )
+        }
+
+        adapterCacheLock.lock()
+        let cached = adapterCache
+        adapterCacheLock.unlock()
+        if let cached, Date().timeIntervalSince(cached.checkedAt) < adapterCacheTTL {
+            return cached.value
+        }
+
+        let refreshed = readAdapterInfo()
+        adapterCacheLock.lock()
+        adapterCache = (refreshed, Date())
+        adapterCacheLock.unlock()
+        return refreshed
+    }
+
     /// 从 IORegistry 节点中尝试多种字段名抽取适配器参数。
     /// 实测 IORegistry 的 AdapterDetails 字典：
     ///   - Watts: 直接是瓦特数（如 45）
@@ -388,25 +430,11 @@ final class BatteryReader: @unchecked Sendable {
         return nil
     }
 
-    private func readSystemPower() -> Double? {
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-        guard service != 0 else { return nil }
-        defer { IOObjectRelease(service) }
-
-        if let adapterPower = readNestedDouble(service, "BatteryData", key: "AdapterPower") {
-            return adapterPower
-        }
-        if let sysPower = readNestedDouble(service, "BatteryData", key: "SystemPower") {
-            return sysPower
-        }
-        return nil
-    }
-
     func readComponentPower() -> ComponentPower {
         // 优先通过 XPC helper（root 权限）读取，powermetrics 需要 root 才能输出 cpu_power/gpu_power
         // 注意：如果 helper 是旧版（无 getComponentPower 方法），@objc optional 调用会被跳过，
         // 所以必须用带超时的 semaphore.wait，否则会永久阻塞采样线程。
-        if isHelperInstalled() && !needsHelperUpdate() {
+        if helperIsReady() {
             let connection = getHelperConnection()
             let semaphore = DispatchSemaphore(value: 0)
             var gotResult = false
@@ -519,26 +547,46 @@ final class BatteryReader: @unchecked Sendable {
 
     /// 获取 helper XPC 连接
     private func getHelperConnection() -> NSXPCConnection {
+        helperConnectionLock.lock()
         if let existing = helperConnection {
+            helperConnectionLock.unlock()
             return existing
         }
 
         let connection = NSXPCConnection(machServiceName: Self.helperIdentifier, options: [])
+        helperConnectionGeneration &+= 1
+        let generation = helperConnectionGeneration
         connection.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
         connection.invalidationHandler = { [weak self] in
-            self?.helperConnection = nil
+            guard let self else { return }
+            var invalidatedCurrentConnection = false
+            self.helperConnectionLock.lock()
+            if self.helperConnectionGeneration == generation {
+                self.helperConnection = nil
+                invalidatedCurrentConnection = true
+            }
+            self.helperConnectionLock.unlock()
+            if invalidatedCurrentConnection {
+                self.cacheHelperReady(false)
+            }
         }
         connection.resume()
         helperConnection = connection
+        helperConnectionLock.unlock()
         return connection
     }
 
     /// 重置 XPC 连接（安装新 helper 后调用，确保连接到新进程）
     func resetHelperConnection() {
-        if let conn = helperConnection {
-            conn.invalidate()
-            helperConnection = nil
-        }
+        helperConnectionLock.lock()
+        let connection = helperConnection
+        helperConnection = nil
+        helperConnectionGeneration &+= 1
+        helperConnectionLock.unlock()
+        connection?.invalidate()
+        helperStatusLock.lock()
+        helperReadyCache = nil
+        helperStatusLock.unlock()
     }
 
     /// 检查 helper 是否已安装
@@ -548,13 +596,16 @@ final class BatteryReader: @unchecked Sendable {
     }
 
     /// 当前要求的 helper 版本（不匹配则需重新安装）
-    /// 4.0：powermetrics 从每次调用 spawn 改为懒启动常驻流式进程 + XPC 调用方校验
-    private static let requiredHelperVersion = "4.0"
+    /// 4.1：继承流式 powermetrics，并直接拒绝未授权 XPC 连接。
+    private static let requiredHelperVersion = "4.1"
 
     /// 检查已安装的 helper 版本是否满足要求
     /// 返回 true 表示需要更新（版本不匹配或无法通信）
     func needsHelperUpdate() -> Bool {
-        guard isHelperInstalled() else { return true }
+        guard isHelperInstalled() else {
+            cacheHelperReady(false)
+            return true
+        }
 
         // 通过 XPC 调用 getVersion，带超时保护
         let connection = getHelperConnection()
@@ -578,11 +629,31 @@ final class BatteryReader: @unchecked Sendable {
         // 要么 XPC 连接失败。两者都需要重新安装
         if let v = version {
             batteryReaderLogger.info("Helper version: \(v), required: \(Self.requiredHelperVersion)")
-            return v != Self.requiredHelperVersion
+            let ready = v == Self.requiredHelperVersion
+            cacheHelperReady(ready)
+            return !ready
         } else {
             batteryReaderLogger.info("Helper version check: cannot get version, update needed")
+            cacheHelperReady(false)
             return true
         }
+    }
+
+    /// 热路径只在缓存过期时检查文件与 helper 版本，正常情况下每次采样仅需一次取数 XPC。
+    private func helperIsReady() -> Bool {
+        helperStatusLock.lock()
+        let cached = helperReadyCache
+        helperStatusLock.unlock()
+        if let cached, Date().timeIntervalSince(cached.checkedAt) < helperStatusTTL {
+            return cached.ready
+        }
+        return !needsHelperUpdate()
+    }
+
+    private func cacheHelperReady(_ ready: Bool) {
+        helperStatusLock.lock()
+        helperReadyCache = (ready, Date())
+        helperStatusLock.unlock()
     }
 
     /// 安装 helper（首次需要管理员密码，app 内自动触发）

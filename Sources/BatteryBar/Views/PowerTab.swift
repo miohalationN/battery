@@ -1,11 +1,18 @@
 import SwiftUI
 import Charts
 
+private struct PowerRangeStats {
+    var average: Double = 0
+    var peak: Double = 0
+    var low: Double = 0
+}
+
 struct PowerTab: View {
-    @ObservedObject var sampler: PowerSampler
+    @EnvironmentObject var sampler: PowerSampler
     @State private var snapshots: [BatterySnapshot] = []
-    @State private var lastSnapshotUpdate: Date = .distantPast
-    @State private var selectedTime: Date?
+    @State private var rangeSnapshots: [BatterySnapshot] = []
+    @State private var chartSnapshots: [BatterySnapshot] = []
+    @State private var rangeStats = PowerRangeStats()
     @State private var timeRange: TimeRange = .day6
     // 图表曲线显示开关
     @State private var showCPU = false
@@ -43,16 +50,46 @@ struct PowerTab: View {
             .padding(.bottom, BBDesign.pagePadding)
         }
         .onAppear {
-            snapshots = DataStore.shared.allSnapshots()
-            lastSnapshotUpdate = Date()
+            reloadSnapshots()
         }
-        .onReceive(sampler.$tick) { _ in
-            let now = Date()
-            if now.timeIntervalSince(lastSnapshotUpdate) > 60 {
-                snapshots = DataStore.shared.allSnapshots()
-                lastSnapshotUpdate = now
-            }
+        .onReceive(NotificationCenter.default.publisher(for: .batterySnapshotsDidChange)) { _ in
+            reloadSnapshots()
         }
+        .onChange(of: timeRange) {
+            rebuildRangeData(from: snapshots)
+        }
+    }
+
+    private func reloadSnapshots() {
+        let loaded = DataStore.shared.allSnapshots()
+        snapshots = loaded
+        rebuildRangeData(from: loaded)
+    }
+
+    /// 只在快照真正变化或用户切换范围时做 O(n) 过滤/统计/降采样，
+    /// 实时功率每秒变化不再重复扫描整天历史数据。
+    private func rebuildRangeData(from source: [BatterySnapshot]) {
+        let cutoff = Date().addingTimeInterval(-timeRange.hours * 3600)
+        let filtered = source.filter { $0.timestamp >= cutoff }.sorted { $0.timestamp < $1.timestamp }
+        rangeSnapshots = filtered
+        chartSnapshots = ChartDownsampler.powerSnapshots(filtered, maxPoints: 240)
+
+        let watts = filtered.lazy.filter { $0.wattage > 0.05 }.map(\.wattage)
+        var count = 0
+        var sum = 0.0
+        var peak = 0.0
+        var low = Double.greatestFiniteMagnitude
+        for wattage in watts {
+            count += 1
+            sum += wattage
+            peak = max(peak, wattage)
+            low = min(low, wattage)
+        }
+        rangeStats = PowerRangeStats(
+            average: count > 0 ? sum / Double(count) : 0,
+            peak: peak,
+            low: count > 0 ? low : 0
+        )
     }
 
     private var wattageTrend: (arrow: String, color: Color) {
@@ -203,24 +240,17 @@ struct PowerTab: View {
     // MARK: - 统计三格
 
     private var powerStatsRow: some View {
-        let cutoff = Date().addingTimeInterval(-timeRange.hours * 3600)
-        let watts = snapshots.filter { $0.timestamp >= cutoff && $0.wattage > 0.05 }.map { $0.wattage }
-        let avg = watts.isEmpty ? 0 : watts.reduce(0, +) / Double(watts.count)
-        let peak = watts.max() ?? 0
-        let low = watts.min() ?? 0
         return HStack(spacing: BBDesign.itemSpacing) {
-            StatTile(icon: "chart.bar.fill", tint: .bbBlue, value: String(format: "%.1f", avg), unit: "W", label: "平均功耗")
-            StatTile(icon: "arrow.up.circle.fill", tint: .red, value: String(format: "%.1f", peak), unit: "W", label: "峰值功耗")
-            StatTile(icon: "arrow.down.circle.fill", tint: .green, value: String(format: "%.1f", low), unit: "W", label: "最低功耗")
+            StatTile(icon: "chart.bar.fill", tint: .bbBlue, value: String(format: "%.1f", rangeStats.average), unit: "W", label: "平均功耗")
+            StatTile(icon: "arrow.up.circle.fill", tint: .red, value: String(format: "%.1f", rangeStats.peak), unit: "W", label: "峰值功耗")
+            StatTile(icon: "arrow.down.circle.fill", tint: .green, value: String(format: "%.1f", rangeStats.low), unit: "W", label: "最低功耗")
         }
     }
 
     // MARK: - 功耗趋势图
 
     private var powerHistoryChart: some View {
-        let cutoff = Date().addingTimeInterval(-timeRange.hours * 3600)
-        let recent = snapshots.filter { $0.timestamp >= cutoff }.sorted { $0.timestamp < $1.timestamp }
-        let hasComponentData = recent.contains { $0.cpuPower > 0 || $0.gpuPower > 0 || $0.dramPower > 0 }
+        let hasComponentData = rangeSnapshots.contains { $0.cpuPower > 0 || $0.gpuPower > 0 || $0.dramPower > 0 }
 
         return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             HStack {
@@ -237,7 +267,7 @@ struct PowerTab: View {
                 ChartLegendItem(
                     label: "系统总功耗",
                     color: .bbAmber,
-                    value: recent.last.map { String(format: "%.1fW", $0.wattage) }
+                    value: rangeSnapshots.last.map { String(format: "%.1fW", $0.wattage) }
                 )
                 Spacer()
                 Text("拖动曲线查看采样点")
@@ -250,24 +280,32 @@ struct PowerTab: View {
                 HStack(spacing: 8) {
                     toggleChip("CPU", isOn: $showCPU, color: .bbBlue)
                     toggleChip("GPU", isOn: $showGPU, color: .bbPurple)
-                    if recent.contains(where: { $0.dramPower > 0 }) {
+                    if rangeSnapshots.contains(where: { $0.dramPower > 0 }) {
                         toggleChip("内存", isOn: $showDRAM, color: .teal)
                     }
-                    if recent.contains(where: { $0.displayPower > 0 }) {
+                    if rangeSnapshots.contains(where: { $0.displayPower > 0 }) {
                         toggleChip("显示器", isOn: $showDisplay, color: .orange)
                     }
                     Spacer()
                 }
             }
 
-            if recent.isEmpty {
+            if chartSnapshots.isEmpty {
                 EmptyChartState(
                     title: "正在建立功耗趋势",
                     detail: "采样数据将在这里持续更新",
                     systemImage: "bolt.slash"
                 )
             } else {
-                powerChartContent(recent: recent)
+                PowerChartPlot(
+                    snapshots: chartSnapshots,
+                    timeRange: timeRange,
+                    showCPU: showCPU,
+                    showGPU: showGPU,
+                    showDisplay: showDisplay,
+                    showDRAM: showDRAM
+                )
+                .equatable()
             }
         }
         .glassCard(accent: .bbAmber)
@@ -356,123 +394,4 @@ struct PowerTab: View {
         .glassCard(accent: enabled ? .bbMint : .clear)
     }
 
-    // MARK: - 图表内容
-
-    @ViewBuilder
-    private func powerChartContent(recent: [BatterySnapshot]) -> some View {
-        let yMaximum = powerYMaximum(recent)
-        Chart {
-            // 系统总功耗（始终显示，粗主线 + 面积）
-            ForEach(recent, id: \.id) { snap in
-                AreaMark(x: .value("时间", snap.timestamp), y: .value("功率", snap.wattage))
-                    .foregroundStyle(
-                        LinearGradient(colors: [Color.bbAmber.opacity(0.18), Color.bbAmber.opacity(0)], startPoint: .top, endPoint: .bottom)
-                    )
-                    .interpolationMethod(.monotone)
-                LineMark(x: .value("时间", snap.timestamp), y: .value("功率", snap.wattage))
-                    .foregroundStyle(Color.bbAmber.gradient)
-                    .interpolationMethod(.monotone)
-                    .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
-            }
-            // CPU
-            if showCPU {
-                ForEach(recent, id: \.id) { snap in
-                    LineMark(x: .value("时间", snap.timestamp), y: .value("CPU", snap.cpuPower))
-                        .foregroundStyle(Color.bbBlue)
-                        .interpolationMethod(.monotone)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                }
-            }
-            // GPU
-            if showGPU {
-                ForEach(recent, id: \.id) { snap in
-                    LineMark(x: .value("时间", snap.timestamp), y: .value("GPU", snap.gpuPower))
-                        .foregroundStyle(Color.bbPurple)
-                        .interpolationMethod(.monotone)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                }
-            }
-            // 内存
-            if showDRAM {
-                ForEach(recent, id: \.id) { snap in
-                    LineMark(x: .value("时间", snap.timestamp), y: .value("内存", snap.dramPower))
-                        .foregroundStyle(.teal)
-                        .interpolationMethod(.monotone)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                }
-            }
-            // 显示器
-            if showDisplay {
-                ForEach(recent, id: \.id) { snap in
-                    LineMark(x: .value("时间", snap.timestamp), y: .value("显示器", snap.displayPower))
-                        .foregroundStyle(.orange)
-                        .interpolationMethod(.monotone)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                }
-            }
-            if let selected = selectedTime {
-                RuleMark(x: .value("选中", selected))
-                    .foregroundStyle(.quaternary)
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
-                if let closest = recent.min(by: { abs($0.timestamp.timeIntervalSince(selected)) < abs($1.timestamp.timeIntervalSince(selected)) }) {
-                    PointMark(x: .value("时间", closest.timestamp), y: .value("功率", closest.wattage))
-                        .foregroundStyle(Color.bbAmber)
-                        .symbolSize(60)
-                        .annotation(position: .top, alignment: .center) {
-                            VStack(spacing: 2) {
-                                Text(closest.timestamp, format: .dateTime.hour().minute())
-                                    .font(.system(size: 9, design: .rounded).monospacedDigit())
-                                    .foregroundStyle(.tertiary)
-                                Text(String(format: "总 %.1fW", closest.wattage))
-                                    .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
-                                if showCPU { Text(String(format: "CPU %.1fW", closest.cpuPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(Color.bbBlue) }
-                                if showGPU { Text(String(format: "GPU %.1fW", closest.gpuPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(Color.bbPurple) }
-                                if showDRAM { Text(String(format: "内存 %.1fW", closest.dramPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(.teal) }
-                                if showDisplay { Text(String(format: "显示器 %.1fW", closest.displayPower)).font(.system(size: 9, design: .rounded).monospacedDigit()).foregroundStyle(.orange) }
-                            }
-                            .padding(8)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.06)))
-                        }
-                }
-            }
-        }
-        .chartXSelection(value: $selectedTime)
-        .chartXAxis {
-            AxisMarks(values: .stride(by: timeRange.axisStride.component, count: timeRange.axisStride.count)) {
-                AxisValueLabel(format: .dateTime.hour().minute())
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3]))
-                    .foregroundStyle(.quaternary)
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
-                AxisValueLabel {
-                    if let watts = value.as(Double.self) {
-                        Text(String(format: "%.0fW", watts))
-                            .font(.system(size: 9, design: .rounded).monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                    .foregroundStyle(.quinary)
-            }
-        }
-        .chartYScale(domain: 0...yMaximum)
-        .frame(height: 176)
-        .chartSurface()
-    }
-
-    /// 纵轴留出约 18% 顶部空间，并向上取到易读的 2W 刻度。
-    private func powerYMaximum(_ recent: [BatterySnapshot]) -> Double {
-        var values = recent.map(\.wattage)
-        if showCPU { values.append(contentsOf: recent.map(\.cpuPower)) }
-        if showGPU { values.append(contentsOf: recent.map(\.gpuPower)) }
-        if showDRAM { values.append(contentsOf: recent.map(\.dramPower)) }
-        if showDisplay { values.append(contentsOf: recent.map(\.displayPower)) }
-        let maximum = max(2, values.max() ?? 2)
-        return ceil(maximum * 1.18 / 2) * 2
-    }
 }

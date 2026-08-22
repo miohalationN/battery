@@ -347,9 +347,9 @@ private enum AppSection: Int, CaseIterable, Identifiable {
 
 /// 主窗口采用固定侧栏 + 内容画布，稳定承载高密度图表并保留 macOS 原生窗口行为。
 struct ContentView: View {
-    @EnvironmentObject var sampler: PowerSampler
     @EnvironmentObject var syncEngine: SyncEngine
     @State private var selectedSection: AppSection = .overview
+    @Namespace private var sidebarGlassNamespace
 
     var body: some View {
         ZStack {
@@ -359,11 +359,11 @@ struct ContentView: View {
                 Group {
                     switch selectedSection {
                     case .overview:
-                        UsageTab(sampler: sampler)
+                        UsageTab()
                     case .cycles:
                         CycleTab()
                     case .power:
-                        PowerTab(sampler: sampler)
+                        PowerTab()
                     case .sync:
                         SyncTab(syncEngine: syncEngine)
                     }
@@ -395,15 +395,11 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 24)
 
-            VStack(spacing: 5) {
-                ForEach(AppSection.allCases) { section in
-                    sidebarButton(section)
-                }
-            }
+            sidebarNavigation
             .padding(.horizontal, 10)
 
             Spacer(minLength: 16)
-            sidebarBatteryStatus
+            SidebarBatteryStatus()
                 .padding(12)
         }
         .padding(.top, 48)
@@ -413,6 +409,25 @@ struct ContentView: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
                 .frame(width: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var sidebarNavigation: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: 5) {
+                sidebarButtons
+            }
+        } else {
+            sidebarButtons
+        }
+    }
+
+    private var sidebarButtons: some View {
+        VStack(spacing: 5) {
+            ForEach(AppSection.allCases) { section in
+                sidebarButton(section)
+            }
         }
     }
 
@@ -442,8 +457,11 @@ struct ContentView: View {
             .padding(.horizontal, 11)
             .padding(.vertical, 9)
             .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? section.tint.opacity(0.105) : Color.clear)
+                NavigationSelectionSurface(
+                    isSelected: isSelected,
+                    tint: section.tint,
+                    namespace: sidebarGlassNamespace
+                )
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -454,7 +472,13 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    private var sidebarBatteryStatus: some View {
+}
+
+/// 把每秒变化的实时状态隔离在小视图内，避免 ContentView 的导航与页面路由一起失效。
+private struct SidebarBatteryStatus: View {
+    @EnvironmentObject var sampler: PowerSampler
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Text("当前电量")

@@ -3,7 +3,6 @@ import Charts
 
 struct CycleTab: View {
     @State private var cycles: [ChargeCycle] = []
-    @State private var lastCycleUpdate: Date = .distantPast
     @State private var selectedCycleDate: Date?
 
     var body: some View {
@@ -26,14 +25,9 @@ struct CycleTab: View {
         }
         .onAppear {
             cycles = DataStore.shared.allCycles()
-            lastCycleUpdate = Date()
         }
-        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
-            let now = Date()
-            if now.timeIntervalSince(lastCycleUpdate) > 50 {
-                cycles = DataStore.shared.allCycles()
-                lastCycleUpdate = now
-            }
+        .onReceive(NotificationCenter.default.publisher(for: .batteryCyclesDidChange)) { _ in
+            cycles = DataStore.shared.allCycles()
         }
     }
 

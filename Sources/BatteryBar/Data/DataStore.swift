@@ -3,6 +3,13 @@ import os
 
 private let dataStoreLogger = Logger(subsystem: "com.batterybar", category: "DataStore")
 
+extension Notification.Name {
+    /// 快照数组真正完成内存更新与落盘后发送，图表无需再用每秒 tick 轮询。
+    static let batterySnapshotsDidChange = Notification.Name("BatteryBarSnapshotsDidChange")
+    /// 充放电周期新增或云端合并完成后发送。
+    static let batteryCyclesDidChange = Notification.Name("BatteryBarCyclesDidChange")
+}
+
 /// JSON 文件持久化，替代 SwiftData
 final class DataStore: @unchecked Sendable {
     static let shared = DataStore()
@@ -59,6 +66,7 @@ final class DataStore: @unchecked Sendable {
                 snapshots = Array(snapshots.suffix(1440))
             }
             saveJSON(snapshots, to: snapshotsFile)
+            postOnMain(.batterySnapshotsDidChange)
         }
     }
 
@@ -103,6 +111,7 @@ final class DataStore: @unchecked Sendable {
             }
             snapshots = byID.values.sorted { $0.timestamp < $1.timestamp }
             saveJSON(snapshots, to: snapshotsFile)
+            postOnMain(.batterySnapshotsDidChange)
         }
     }
 
@@ -112,6 +121,7 @@ final class DataStore: @unchecked Sendable {
         queue.async { [self] in
             cycles.append(cycle)
             saveJSON(cycles, to: cyclesFile)
+            postOnMain(.batteryCyclesDidChange)
         }
     }
 
@@ -151,6 +161,7 @@ final class DataStore: @unchecked Sendable {
             }
             cycles = byID.values.sorted { $0.startDate < $1.startDate }
             saveJSON(cycles, to: cyclesFile)
+            postOnMain(.batteryCyclesDidChange)
         }
     }
 
@@ -228,6 +239,12 @@ final class DataStore: @unchecked Sendable {
             try data.write(to: url, options: .atomic)
         } catch {
             dataStoreLogger.error("Write \(url.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func postOnMain(_ name: Notification.Name) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: name, object: nil)
         }
     }
 

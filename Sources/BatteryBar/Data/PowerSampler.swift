@@ -25,8 +25,6 @@ final class PowerSampler: ObservableObject {
     @Published private(set) var currentAmperage: Double = 0
     @Published private(set) var currentInfo: BatteryInfo?
     @Published private(set) var systemHealthPercent: Double = 100
-    /// 每秒翻转一次，供 UsageTab/PowerTab 节流刷新快照数组（onReceive($tick)）
-    @Published private(set) var tick: Bool = false
     /// 最近一次采样时刻（视图不观察；曾为 @Published 每秒触发 objectWillChange 风暴）
     private(set) var lastUpdateTime: Date = Date()
 
@@ -40,8 +38,8 @@ final class PowerSampler: ObservableObject {
     // 放电/充电速率缓存：每 30 个 UI tick 重算一次，避免 View body 每 tick 全量扫描 DataStore
     @Published private(set) var cachedDrainRate: Double = 0
     @Published private(set) var cachedChargeRate: Double = 0
-    private var rateCacheTick: Int = 0
-    private let rateCacheInterval: Int = 30
+    private var lastRateCalculationAt = Date.distantPast
+    private let rateCacheInterval: TimeInterval = 30
 
     /// Helper 服务开关（默认关闭，用户在 PowerTab 手动开启）
     /// 开启后才会安装 helper 并读取 CPU/GPU 分项功耗
@@ -59,7 +57,9 @@ final class PowerSampler: ObservableObject {
     private var lastPlugInTime: Date?       // 上次插电时刻，用于判断是否为短暂插电
     private let shortPlugThreshold: TimeInterval = 30  // 30秒内重插拔视为短暂接触，继续累计统计
     private var saveTick: Int = 0
-    private var componentPowerTick: Int = 0  // 独立计数器，避免依赖 Unix 时间戳取模导致采样周期不可控
+    private var lastComponentPowerSampleAt = Date.distantPast
+    private var isComponentPowerSampleInFlight = false
+    private let componentPowerInterval: TimeInterval = 15
     private var isSleeping: Bool = false
     private var sleepStartTime: Date?
     private var isStarted: Bool = false
@@ -200,7 +200,13 @@ final class PowerSampler: ObservableObject {
     private func restartTimer() {
         dispatchTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: uiInterval)
+        // 给系统少量合并唤醒空间，减少菜单栏常驻应用的定时器能耗。
+        let leewayMilliseconds = Int(max(100, min(500, uiInterval * 100)))
+        timer.schedule(
+            deadline: .now(),
+            repeating: uiInterval,
+            leeway: .milliseconds(leewayMilliseconds)
+        )
         timer.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
                 self?.sampleUI()
@@ -284,9 +290,11 @@ final class PowerSampler: ObservableObject {
         if (info?.temperature ?? 0) != currentTemperature { currentTemperature = info?.temperature ?? 0 }
         if (info?.voltage ?? 0) != currentVoltage { currentVoltage = info?.voltage ?? 0 }
         if (info?.instantAmperage ?? 0) != currentAmperage { currentAmperage = info?.instantAmperage ?? 0 }
-        if info != currentInfo { currentInfo = info }
+        // currentInfo 只承载界面使用的元数据。电压、电流、温度和功率已有独立
+        // @Published 字段；若把这些高频值也纳入 BatteryInfo 等值比较，会平白再
+        // 触发一次整棵观察视图树更新。
+        if shouldPublishMetadata(info) { currentInfo = info }
         lastUpdateTime = Date()
-        tick.toggle()
 
         // 通知状态栏 AppDelegate 刷新 button.title（title 不自动响应 @Published）
         NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)
@@ -297,27 +305,30 @@ final class PowerSampler: ObservableObject {
             NotificationManager.shared.checkFullCharge(level: currentLevel, wasCharging: true)
         }
 
-        // 每 10 个 UI tick 读取一次分项功耗（仅在 Helper 开启时）
-        // 用计数器而非时间戳取模，避免 uiInterval 非 1s 时采样周期不可控
-        // readComponentPower 内部是 XPC + semaphore（最多 3s），必须离开主线程
-        componentPowerTick += 1
-        if helperEnabled && componentPowerTick % 10 == 0 {
+        // 分项功耗按墙上时间采样，不依赖用户设置的 UI 间隔；同时禁止慢 XPC
+        // 请求重叠，避免 helper 异常时后台堆积 detached task。
+        let now = Date()
+        if helperEnabled,
+           !isComponentPowerSampleInFlight,
+           now.timeIntervalSince(lastComponentPowerSampleAt) >= componentPowerInterval {
+            lastComponentPowerSampleAt = now
+            isComponentPowerSampleInFlight = true
             let reader = reader
             Task { @MainActor in
                 let (component, display) = await Task.detached(priority: .userInitiated) { () -> (ComponentPower, Double) in
                     (reader.readComponentPower(), reader.estimateDisplayPower())
                 }.value
-                self.cpuPower = component.cpu
-                self.gpuPower = component.gpu
-                self.displayPower = display
-                self.dramPower = component.dram
+                self.isComponentPowerSampleInFlight = false
+                if abs(self.cpuPower - component.cpu) > 0.02 { self.cpuPower = component.cpu }
+                if abs(self.gpuPower - component.gpu) > 0.02 { self.gpuPower = component.gpu }
+                if abs(self.displayPower - display) > 0.02 { self.displayPower = display }
+                if abs(self.dramPower - component.dram) > 0.02 { self.dramPower = component.dram }
             }
         }
 
-        // 每 rateCacheInterval 个 tick 重算一次放电/充电速率（DrainRateCalculator 内部会扫描快照）
-        // 节流避免每 tick 全量扫描，View 直接读取 cachedDrainRate / cachedChargeRate
-        rateCacheTick += 1
-        if rateCacheTick % rateCacheInterval == 0 {
+        // 速率缓存也按墙上时间更新，避免 UI 间隔调大后把计算周期成倍拉长。
+        if now.timeIntervalSince(lastRateCalculationAt) >= rateCacheInterval {
+            lastRateCalculationAt = now
             let snapshots = DataStore.shared.recentSnapshots(1440)
             cachedDrainRate = DrainRateCalculator.drainRate(
                 level: currentLevel,
@@ -331,6 +342,22 @@ final class PowerSampler: ObservableObject {
             )
             cachedChargeRate = Self.smoothRate(old: cachedChargeRate, measured: DrainRateCalculator.chargeRate(snapshots: snapshots))
         }
+    }
+
+    private func shouldPublishMetadata(_ info: BatteryInfo?) -> Bool {
+        guard let info else { return currentInfo != nil }
+        guard let currentInfo else { return true }
+        return info.designCapacity != currentInfo.designCapacity
+            || info.maxCapacity != currentInfo.maxCapacity
+            || info.cycleCount != currentInfo.cycleCount
+            || info.serialNumber != currentInfo.serialNumber
+            || info.manufacturer != currentInfo.manufacturer
+            || info.isCharging != currentInfo.isCharging
+            || info.externalConnected != currentInfo.externalConnected
+            || info.deviceName != currentInfo.deviceName
+            || info.chemistry != currentInfo.chemistry
+            || info.adapterWatts != currentInfo.adapterWatts
+            || info.adapterProtocol != currentInfo.adapterProtocol
     }
 
     /// 速率 EMA 平滑：旧值 0.6 + 新测量 0.4；测量为 0（样本不足）时保持旧值，避免预估时间瞬间变「计算中」或跳变

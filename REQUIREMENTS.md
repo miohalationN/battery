@@ -111,12 +111,12 @@
 | 层 | 选型 | 与原设计差异 |
 |----|------|-------------|
 | 语言 | Swift 6.2（严格并发） | — |
-| UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSStatusBarButton；主窗口用 WindowGroup + 自定义侧栏，AppKit 负责状态栏与系统菜单 |
+| UI | SwiftUI + AppKit | 状态栏用 NSStatusItem + NSStatusBarButton；主窗口用 WindowGroup + 自定义侧栏。macOS 26+ 仅导航/主要操作采用原生 Liquid Glass，数据内容层使用动态实体表面以降低合成开销 |
 | 并发模型 | PowerSampler / AppDelegate 隔离在 @MainActor | 2026-08-22 重构：阻塞调用（system_profiler / XPC helper）经 Task.detached 出主线程，结果回主线程 |
-| 图表 | Swift Charts | — |
+| 图表 | Swift Charts | 24h 功耗序列按时间桶保留局部极值，最多 240 点；Chart 隔离为 Equatable 子树，实时数字更新不重建历史 marks |
 | 持久化 | JSON 文件（DataStore，串行队列保护） | 原设计 SwiftData，实现期替换 |
 | 电池数据 | IOKit（IOPS + AppleSmartBattery registry） | **已适配 macOS 27**：容量字段改读 `BatteryData` 嵌套字典 |
-| 分项功耗 | XPC Helper + `powermetrics`（root，可选） | 原设计 IOReport（私有框架不稳定）。4.0 起 powermetrics 为懒启动常驻流式进程（首个请求启动，60s 空闲自停），XPC 校验调用方（签名有效 + bundle id 匹配）；关闭开关时真正卸载守护进程 |
+| 分项功耗 | XPC Helper + `powermetrics`（root，可选） | 原设计 IOReport（私有框架不稳定）。4.1 延续懒启动流式进程（首个请求启动，60s 空闲自停），直接拒绝未授权 XPC；App 端缓存版本校验并禁止采样任务重叠 |
 | 健康度 | `system_profiler`（60s 缓存） | — |
 | 温度 | IORegistry `Temperature` 键 | Apple Silicon 部分系统不暴露，UI 显示「—」 |
 | 电源事件 | NSWorkspace 通知（SleepWatcher） | — |

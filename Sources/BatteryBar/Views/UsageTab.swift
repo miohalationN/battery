@@ -2,9 +2,8 @@ import SwiftUI
 import Charts
 
 struct UsageTab: View {
-    @ObservedObject var sampler: PowerSampler
+    @EnvironmentObject var sampler: PowerSampler
     @State private var snapshots: [BatterySnapshot] = []
-    @State private var lastSnapshotUpdate: Date = .distantPast
     @State private var selectedPoint: (relMin: Double, level: Double, time: Date)?
 
     var body: some View {
@@ -48,14 +47,9 @@ struct UsageTab: View {
         }
         .onAppear {
             snapshots = DataStore.shared.allSnapshots()
-            lastSnapshotUpdate = Date()
         }
-        .onReceive(sampler.$tick) { _ in
-            let now = Date()
-            if now.timeIntervalSince(lastSnapshotUpdate) > 60 {
-                snapshots = DataStore.shared.allSnapshots()
-                lastSnapshotUpdate = now
-            }
+        .onReceive(NotificationCenter.default.publisher(for: .batterySnapshotsDidChange)) { _ in
+            snapshots = DataStore.shared.allSnapshots()
         }
     }
 
@@ -668,34 +662,9 @@ struct UsageTab: View {
     /// 使用滑动平均充电速率 + 精细分段效率曲线 + 温控因素。
     private func estimatedChargeTime() -> TimeInterval {
         let level = sampler.currentLevel
-        let snaps = DataStore.shared.recentSnapshots(1440)
-        let chargingSnaps = snaps.filter { $0.isCharging }.sorted { $0.timestamp < $1.timestamp }
-        guard chargingSnaps.count >= 2 else { return 0 }
-
-        // === 1. 滑动窗口计算多点速率，取中位数平滑 ===
-        // 用10分钟窗口，避免刚开始充电时速率不稳
-        var windowRates: [Double] = []
-        let windowSize = min(10, max(2, chargingSnaps.count / 3))
-        for i in 0..<(chargingSnaps.count - windowSize) {
-            let start = chargingSnaps[i]
-            let end = chargingSnaps[i + windowSize]
-            let hours = end.timestamp.timeIntervalSince(start.timestamp) / 3600
-            if hours > 0 {
-                let r = abs(end.level - start.level) / hours
-                if r > 0 { windowRates.append(r) }
-            }
-        }
-
-        let rate: Double
-        if !windowRates.isEmpty {
-            windowRates.sort()
-            rate = windowRates[windowRates.count / 2] // 中位数
-        } else {
-            // 数据太少，用整体速率
-            let hours = chargingSnaps.last!.timestamp.timeIntervalSince(chargingSnaps.first!.timestamp) / 3600
-            guard hours > 0 else { return 0 }
-            rate = abs(chargingSnaps.last!.level - chargingSnaps.first!.level) / hours
-        }
+        // PowerSampler 已按 30 秒缓存和平滑历史充电速率。直接消费缓存，
+        // 避免每次实时功率变化导致 View body 重算时都扫描、排序 1,440 条快照。
+        let rate = sampler.cachedChargeRate
         guard rate > 0 else { return 0 }
 
         // === 2. 分段估算，每段5% ===

@@ -253,15 +253,10 @@ struct PopoverView: View {
             } label: {
                 Label("查看详情", systemImage: "chart.bar.xaxis")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
-                    .background(
-                        LinearGradient(colors: [Color.bbBlue, Color.bbTeal], startPoint: .leading, endPoint: .trailing),
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    )
             }
-            .buttonStyle(.plain)
+            .controlSize(.large)
+            .adaptiveProminentButton(tint: .bbBlue)
 
             HStack {
                 Button {

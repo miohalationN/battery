@@ -61,6 +61,9 @@
 | T-28 | SyncConfigTests 默认值断言过期（serverURL 应为坚果云默认而非空），CI `|| echo warning` 放水下长期未发现 | SyncConfigTests.swift / build.yml | ✅ 已修复（2026-08-22 修正断言 + 恢复 CI 测试门禁） |
 | T-29 | Swift 6 debug 构建运行时空转：debug 产物（含云端 CI 一直分发的 .build/debug）空闲烧约 38% CPU，release 同代码为 0；`sample` 不可见（不显示为线程栈），task 级 utime 可测 | 构建脚本 / build.yml | ✅ 已修复（2026-08-22 全链路改 `-c release`） |
 | T-30 | NSTextField 嵌入 NSStatusBarButton 触发 AppKit 布局引擎持续重排：状态栏百分比方案（2026-07-16 为精确控宽引入）在 macOS 27 上空转约 37% CPU，release 构建下依然存在；20 行最小应用可复现 | BatteryBarApp.swift | ✅ 已修复（2026-08-22 改 `button.attributedTitle` + `NSAttributedString.size()` 测宽 + 固定 length，红色低电量用 attributedTitle 前景色） |
+| T-31 | 内容卡片大面积 `.regularMaterial` + 大阴影，滚动时产生多层离屏合成 | DesignSystem.swift | ✅ 已修复（2026-08-23 内容层改动态实体表面；Liquid Glass 只用于 macOS 26+ 导航与主要操作） |
+| T-32 | 快照每 60s 才变化，但图表页订阅每秒 tick；24h 多曲线最多构造 7000+ Chart marks | PowerSampler.swift / PowerTab.swift | ✅ 已修复（数据变更通知、240 点保极值降采样、Equatable Chart 子树、范围统计缓存） |
+| T-33 | `readBatteryInfo` 每秒重复遍历适配器 IORegistry；组件功耗每轮重复 helper 文件/版本检查 | BatteryReader.swift | ✅ 已修复（适配器 30s 缓存、同 service 读取系统功率、helper 状态 5min 缓存、15s 防重叠采样） |
 
 ---
 

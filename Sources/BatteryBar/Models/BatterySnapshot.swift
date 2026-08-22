@@ -1,7 +1,7 @@
 import Foundation
 
 /// 电池采样快照（每 60s 一条）
-struct BatterySnapshot: Codable, Identifiable {
+struct BatterySnapshot: Codable, Identifiable, Equatable {
     var id: UUID
     var timestamp: Date
     var level: Double          // 0~100

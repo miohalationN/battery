@@ -123,7 +123,7 @@ AppDelegate 为 @MainActor，持有唯一的 PowerSampler 和 SyncEngine 实例�
 start()
  ├─ sampleUI()          // 立即一次
  ├─ sampleStorage()     // 立即一次
- ├─ DispatchSourceTimer 每 uiInterval(=1s, 可持久化配置) → Task { @MainActor } → sampleUI()
+ ├─ DispatchSourceTimer 每 uiInterval(=1s, 可持久化配置，带 100-500ms leeway) → sampleUI()
  ├─ Timer(target: fireStorage) 每 60s → sampleStorage()
  ├─ SleepWatcher.start()（回调经 MainActor.assumeIsolated 同步直达，
  │   避免 willSleep → 入睡间 Task 排队延迟丢失睡眠统计）
@@ -138,12 +138,13 @@ sampleUI():
  ├─ NotificationCenter.post("PowerSamplerDidUpdate") → AppDelegate 刷新状态栏文字
  ├─ NotificationManager.checkLowBattery(level, isCharging:)（充电时不触发低电量）
  ├─ 插拔检测（拔电立即重置统计，30 秒内重插拔平滑过渡）
- ├─ 每 10 个 tick readComponentPower（仅 helperEnabled 时；XPC 阻塞调用经 Task.detached 出主线程）
- └─ 每 30 个 tick 重算 cachedDrainRate / cachedChargeRate
+ ├─ 每 15s readComponentPower（仅 helperEnabled；按墙上时间、防任务重叠、Task.detached 出主线程）
+ └─ 每 30s 重算 cachedDrainRate / cachedChargeRate
      （DrainRateCalculator 纯函数，快照数组由调用方传入，避免 View 每 tick 全量扫描 DataStore）
 
 sampleStorage():
  ├─ 构造 BatterySnapshot → DataStore.saveSnapshot
+ │   └─ 真正落盘完成后发 batterySnapshotsDidChange，图表不再每秒轮询
  ├─ screenOnMinutes / sleepMinutes += 1
  ├─ CycleTracker.update(isCharging, level, wattage)（时钟与落盘 init 注入，可测试）
  └─ 每 5 分钟持久化 UsageState
@@ -166,7 +167,7 @@ sampleStorage():
   （注意：不能用 hw.model 的 "m1"/"m2" 子串判断芯片代次——Apple Silicon 的 hw.model 是
   "Mac14,2" 平台键或 "MacBookAir10,1"，子串永远匹配不到，2026-08-22 修复）
 - 拔电初期（前 120s）优先历史数据，无历史用机型基准
-- PowerSampler 每 30 个 tick 取 recentSnapshots(1440) 调用一次，缓存到 `@Published cachedDrainRate / cachedChargeRate`
+- PowerSampler 每 30 秒取 recentSnapshots(1440) 调用一次，缓存到 `@Published cachedDrainRate / cachedChargeRate`
 
 ### 4.4 持久化（`DataStore`）
 
@@ -179,7 +180,7 @@ sampleStorage():
 - 对外访问全部通过 `queue.sync` 包装的访问器：`allSnapshots()` / `recentSnapshots(_:)` / `allCycles()` / `currentConfig()` / `updateConfig(_:)`
 - **解码失败兜底**：load() 中 snapshots/cycles/config 解码失败时先把原文件移为 `*.bak`（覆盖旧备份）再从空数据重建，os.Logger 记录；写盘失败同样记日志，不再静默吞错
 
-### 4.5 Privileged Helper（可选，默认关闭，当前版本 4.0）
+### 4.5 Privileged Helper（可选，默认关闭，当前版本 4.1）
 
 ```
 App 端                                  Helper（root LaunchDaemon，队列收敛在 powerQueue）
@@ -193,11 +194,12 @@ shouldAcceptNewConnection → pid → SecCode 校验（签名有效 + bundle id 
 
 - **默认关闭**：用户在 PowerTab 手动开启 Toggle 后才安装
 - 安装：`osascript ... with administrator privileges` 拷贝 + bootstrap；关闭开关时调用 `uninstallHelper()`（bootout + 删除二进制与 plist，弹一次管理员密码框）真正卸载
-- 版本升级：`requiredHelperVersion` 不匹配时自动重装（会弹密码框）。4.0 = 流式 powermetrics + 调用方校验
+- 版本升级：`requiredHelperVersion` 不匹配时自动重装（会弹密码框）。4.1 = 流式 powermetrics + 未授权连接直接拒绝
 - **流式模式**：v3 的「每次调用 spawn powermetrics + 5s 超时保护 + replyOnce」已移除，XPC 调用直接回缓存，无阻塞无超时问题；mW/uW/W 三单位解析保留
 - **采样器版本兼容**：macOS 27 起移除 `dram` 采样器（`--samplers` 带无效名会整体失败，分项功耗全 0——这是 v3 在 macOS 27 上的隐性回归，4.0 修复）；helper 按 `ProcessInfo.operatingSystemVersion` 门控，<27 才附带 dram，DRAM 功耗在 27 上为 0（UI 已按 0 隐藏）
 - **启动失败退避**：powermetrics 存活 <10s 视为启动失败，连续 3 次进入 60s 冷却，防止重启风暴
-- **调用方校验**：`processIdentifier` → `SecCodeCopyGuestWithAttributes` → `SecCodeCheckValidity`（代码未被篡改）+ bundle id 匹配。局限：ad-hoc 签名无 TeamID，无法做同开发者强校验；Developer ID 后应改为硬编码 designated requirement
+- **调用方校验**：`processIdentifier` → `SecCodeCopyGuestWithAttributes` → `SecCodeCheckValidity`（代码未被篡改）+ bundle id 匹配；4.1 起校验失败直接从 listener 返回 false。局限：ad-hoc 签名无 TeamID，无法做同开发者强校验；Developer ID 后应改为硬编码 designated requirement
+- **App 热路径缓存**：helper 安装/版本状态缓存 5 分钟；组件功耗按墙上时间 15s 采样且禁止并发重叠，正常采样只做一次取数 XPC
 - **Helper 并发模型**：`@unchecked Sendable` + 队列收敛（所有可变状态只在 powerQueue 串行队列访问）；`getComponentPower` 的 reply 闭包在协议中标注 `@Sendable`
 - **主程序端超时**：`readComponentPower` 3s semaphore，`needsHelperUpdate` 2s semaphore（保留，兼容异常场景）
 - **HelperProtocol 双定义**：主程序端 `@objc optional`（兼容旧 helper），Helper 端必选。未抽取 shared target 是有意设计
