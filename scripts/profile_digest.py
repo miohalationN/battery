@@ -57,39 +57,35 @@ interesting = Counter()
 hitch_rows = []
 body_rows_total = 0
 
-for s in export_order[:24]:
-    exported = ""
-    for tpl in XPATH_TEMPLATES:
-        xp = tpl.format(s=s)
+for s in export_order[:16]:
+    results = []
+    variants = [tpl.format(s=s) for tpl in XPATH_TEMPLATES]
+    variants.append(f'/trace-toc/run[@number="1"]/data/table[@schema="{s}"]/row')
+    variants.append(f'//table[@schema="{s}"]/row')
+    best = ""
+    best_xp = ""
+    for xp in variants:
         r = run(["xcrun", "xctrace", "export", "--input", trace, "--xpath", xp])
-        if r.returncode == 0 and len(r.stdout) > 200:
-            exported = r.stdout
-            break
-    if not exported:
+        if r.returncode == 0 and len(r.stdout) > len(best):
+            best = r.stdout
+            best_xp = xp
+    if not best:
         continue
-
-    tag = f"table:{s}"
-    n = len(exported)
-    lines.append(f"[{tag}] exported {n} bytes")
-    # 关键表直接完整转储（表都很小），便于离线判读行结构与计数
+    lines.append(f"[{s}] best xpath={best_xp} bytes={len(best)}")
     if re.search(r"swiftui|hitch|tick|runloop", s, re.I):
-        lines.append(f"[{tag}] FULL-BEGIN")
-        lines.append(exported[:20000])
-        lines.append(f"[{tag}] FULL-END")
-
-    low = exported.lower()
-    if "hitch" in s.lower() or "hitch" in low:
-        # 抽取含 hitch 的行，带时间/时长属性
-        for m in re.finditer(r"<row[^>]*>.*?</row>|<row[^>]*/>", exported, re.S):
+        lines.append(f"[{s}] FULL-BEGIN")
+        lines.append(best[:24000])
+        lines.append(f"[{s}] FULL-END")
+    low = best.lower()
+    if "hitch" in s.lower():
+        for m in re.finditer(r"<row[^>]*>.*?</row>|<row[^>]*/>", best, re.S):
             row = m.group(0)
-            if "hitch" in row.lower():
-                hitch_rows.append(row[:500])
+            hitch_rows.append(row[:500])
     for view in VIEW_NAMES:
-        c = exported.count(view)
+        c = best.count(view)
         if c:
             interesting[f"{view}@{s}"] = c
-    if any(k in s.lower() for k in ("swiftui", "view", "body")):
-        body_rows_total += exported.count("<row")
+    body_rows_total += best.count("<row")
 
 lines.append("-- view name occurrences (view@schema -> count) --")
 for k, v in sorted(interesting.items()):
