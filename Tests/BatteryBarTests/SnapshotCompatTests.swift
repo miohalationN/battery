@@ -12,12 +12,12 @@ import Foundation
 
     private let base = Date(timeIntervalSince1970: 1_720_780_800)
 
-    // MARK: - v1 JSON 解码（无新字段）
+    // MARK: - v1 JSON 解码（无新字段；v1 snapshots.json 使用属性名键）
 
     @Test func v1ChargingSnapshotExcludedFromSystemLoad() throws {
         let json = """
-        {"id":"\(UUID().uuidString)","ts":1720780800.0,"level":80,"charging":true,
-         "watt":28.5,"temp":31.0,"screen":true,"cpu":0,"gpu":0}
+        {"id":"\(UUID().uuidString)","timestamp":1720780800.0,"level":80,"isCharging":true,
+         "wattage":28.5,"temperature":31.0,"screenOn":true,"cpuPower":0,"gpuPower":0}
         """.data(using: .utf8)!
         let snap = try JSONDecoder().decode(BatterySnapshot.self, from: json)
         #expect(snap.isCharging)
@@ -28,8 +28,8 @@ import Foundation
 
     @Test func v1DischargingSnapshotUsableAsEstimatedLoad() throws {
         let json = """
-        {"id":"\(UUID().uuidString)","ts":1720780800.0,"level":60,"charging":false,
-         "watt":8.4,"temp":30.0,"screen":true}
+        {"id":"\(UUID().uuidString)","timestamp":1720780800.0,"level":60,"isCharging":false,
+         "wattage":8.4,"temperature":30.0,"screenOn":true}
         """.data(using: .utf8)!
         let snap = try JSONDecoder().decode(BatterySnapshot.self, from: json)
         #expect(snap.systemPowerAvailable == true)
@@ -163,8 +163,9 @@ import Foundation
         }
         let retained = DataStore.retainedSnapshots(snaps, now: now, hours: 24, maxCount: 1500)
         #expect(retained.count == 1500)
-        // 裁掉的是最旧的
-        #expect(retained.first!.timestamp > snaps.first!.timestamp)
+        // 裁掉的是最旧的（snaps.last），最新的（snaps[0]）保留
+        #expect(!retained.contains { $0.id == snaps.last!.id })
+        #expect(retained.contains { $0.id == snaps[0].id })
     }
 
     @Test func outputSortedByTimestamp() {

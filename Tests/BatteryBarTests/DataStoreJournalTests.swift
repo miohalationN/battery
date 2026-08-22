@@ -6,12 +6,11 @@ import Foundation
 /// 全部使用注入的临时目录，不触碰用户真实数据。
 @Suite struct DataStoreJournalTests {
 
-    private func makeStore() throws -> (store: DataStore, dir: URL, journal: URL, legacy: URL) {
+    private func makeStore() throws -> (dir: URL, journal: URL, legacy: URL) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("BatteryBarJournalTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let store = DataStore(directory: dir)
-        return (store, dir,
+        return (dir,
                 dir.appendingPathComponent("snapshots.jsonl"),
                 dir.appendingPathComponent("snapshots.json"))
     }
@@ -158,5 +157,22 @@ import Foundation
         store.flushPendingWritesForTesting()
         #expect(store.allSnapshots().count == 1)
         #expect(store.allSnapshots().first?.id == fresh.id)
+    }
+
+    /// 空日志（如 compact 到空或全部行损坏）+ legacy 存在：回退 legacy，
+    /// 不静默丢失历史；retention 过滤保证不会复活已裁剪数据。
+    @Test func emptyJournalFallsBackToLegacy() throws {
+        let ctx = try makeStore()
+        defer { cleanUp(ctx.dir) }
+        let snaps = [snap(30), snap(20)]
+        try JSONEncoder().encode(snaps).write(to: ctx.legacy)
+        try Data("".utf8).write(to: ctx.journal)
+
+        let store = DataStore(directory: ctx.dir)
+        store.flushPendingWritesForTesting()
+        #expect(store.allSnapshots().count == 2)
+        // 回退后 journal 被重写为有效内容
+        let lines = try String(contentsOf: ctx.journal, encoding: .utf8).split(separator: "\n")
+        #expect(lines.count == 2)
     }
 }

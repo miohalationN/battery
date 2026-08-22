@@ -261,6 +261,12 @@ final class DataStore: @unchecked Sendable {
                 dataStoreLogger.error("Skip corrupt snapshot journal line: \(error.localizedDescription, privacy: .public)")
             }
         }
+        // 空日志（含全部行损坏）时回退 legacy：retainedSnapshots 会把过期记录滤掉，
+        // 因此不会复活已被裁剪的数据；journal 有有效行时以其为准。
+        if decoded.isEmpty, FileManager.default.fileExists(atPath: snapshotsFile.path) {
+            dataStoreLogger.notice("Snapshot journal empty, falling back to legacy snapshots.json")
+            return nil
+        }
         return decoded
     }
 
