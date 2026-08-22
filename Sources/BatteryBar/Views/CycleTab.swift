@@ -70,7 +70,7 @@ struct CycleTab: View {
         let maximumHours = max(1, chartCycles.map { $0.duration / 3600 }.max() ?? 1)
         let yMaximum = ceil(maximumHours * 1.18 * 2) / 2
         let timeSpan = (chartCycles.last?.startDate.timeIntervalSince(chartCycles.first?.startDate ?? Date())) ?? 0
-        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+        return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             HStack {
                 SectionHeader(title: "续航能力趋势", systemImage: "chart.line.uptrend.xyaxis", tint: .bbBlue)
                 ChartLegendItem(label: "周期时长", color: .bbBlue, value: "平均 \(fmt(avgDuration))")
