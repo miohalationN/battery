@@ -95,6 +95,10 @@ import Foundation
         // 中间插入一行垃圾（模拟局部损坏）
         let raw = try String(contentsOf: ctx.journal, encoding: .utf8)
         let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count >= 3 else {
+            Issue.record("journal unexpectedly short: \(lines.count)")
+            return
+        }
         let corrupted = [lines[0], "{broken", lines[1], lines[2]].joined(separator: "\n") + "\n"
         try corrupted.write(to: ctx.journal, atomically: true, encoding: .utf8)
 
@@ -184,8 +188,10 @@ import Foundation
     @Test func migratedV2LinesKeepUnknownPowerSource() throws {
         let ctx = try makeStore()
         defer { cleanUp(ctx.dir) }
+        // 近期时间戳：保留窗口按 timestamp 裁剪，固定旧时间戳会被裁掉
+        let recentTS = Date().addingTimeInterval(-600).timeIntervalSinceReferenceDate
         let v2Line = """
-        {"id":"\(UUID().uuidString)","timestamp":1720780800.0,"level":100,"isCharging":false,
+        {"id":"\(UUID().uuidString)","timestamp":\(recentTS),"level":100,"isCharging":false,
          "wattage":2.1,"batteryPower":2.1,"systemPowerAvailable":true,"systemPowerIsEstimated":true,
          "temperature":31.0,"screenOn":true,"dirty":false}
         """

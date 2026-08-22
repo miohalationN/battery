@@ -36,7 +36,7 @@ import Foundation
         #expect(!model.points.isEmpty)
         #expect(model.points.allSatisfy { $0.level >= 69 })          // 接电段与未知点不进曲线
         #expect(model.points.first!.level == 100)
-        #expect(abs(model.summary.deltaPercent - 30) < 0.01)         // 只计真实放电
+        #expect(abs(model.summary.deltaPercent - 29.5) < 0.01)        // 只计真实放电（100→70.5）
         #expect(model.summary.avgBatteryWatts > 7 && model.summary.avgBatteryWatts < 9)
     }
 

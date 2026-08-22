@@ -175,11 +175,12 @@ import Foundation
             "screen": true,
         ]
         let parsed = try #require(BatterySnapshot.from(remoteJSON: dict))
-        #expect(!parsed.isCharging)
-        #expect(parsed.systemPowerAvailable == false)
+        #expect(!parsed.isCharging)                      // 未充电的旧离电点
+        #expect(parsed.systemPowerAvailable == true)     // v1 规则：!isCharging → 标可用
+        #expect(parsed.systemPowerIsEstimated == true)   // 且标估算
         #expect(parsed.batteryPower == 25.0)
-        #expect(parsed.externalConnected == nil)
-        #expect(parsed.trustedSystemLoad == nil)
+        #expect(parsed.externalConnected == nil)         // 来源未知
+        #expect(parsed.trustedSystemLoad == nil)         // → 估算负载保守排除
         #expect(parsed.dirty == false)
 
         // 远端带估算标记但无 ext：同样保守排除

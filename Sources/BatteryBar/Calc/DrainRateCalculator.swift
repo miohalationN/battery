@@ -44,11 +44,14 @@ enum DrainRateCalculator {
             isInitialPhase = false
         }
 
+        // 统一为时间升序：分段逻辑依赖顺序，不依赖调用方传入次序
+        let ordered = snapshots.sorted { $0.timestamp < $1.timestamp }
+
         // === 1. 历史离电段速率（滑动窗口中位数平滑）===
-        let segments = onBatterySegments(from: snapshots)
+        let segments = onBatterySegments(from: ordered)
         var historyRate: Double = 0
         if let lastSegment = segments.last {
-            let segmentSnaps = snapshots.filter {
+            let segmentSnaps = ordered.filter {
                 $0.timestamp >= lastSegment.start && $0.timestamp <= lastSegment.end && $0.isDefinitelyOnBattery
             }.sorted { $0.timestamp < $1.timestamp }
 
