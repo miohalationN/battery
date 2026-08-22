@@ -33,8 +33,10 @@
    helperEnabled）；每秒瓦数只在英雄卡/读数行小视图内消费；历史分析模型
    （UsageSessionModel / PowerTab rangeStats / CycleTab reload）仅由快照通知或范围切换触发；
    Chart 一律 `.equatable()` 隔离。
-4. **追加日志**：`saveSnapshot` 正常路径只 append 一行；compact 仅在 mark synced /
-   远端 merge / 超窗裁剪时执行；末尾半行加载时跳过；v1 `snapshots.json` 迁移后保留不删。
+4. **追加日志**：`saveSnapshot` 无条件 append 一行；内存侧过期行立即收敛，文件侧延迟清理，
+   累计 ≥60 条（≈1 小时量）才原子 compact；mark synced / 远端 merge 即时 compact；
+   末尾半行加载时跳过；v1 `snapshots.json` 迁移后保留不删。
+   ⚠️ 首轮安装实测曾发现稳态缺陷（见 §九），已修复并有回归测试覆盖。
 5. **屏幕状态**：`screenOn = !isSleeping && !screensSleeping`；显示器关闭但醒着的分钟计入「屏幕关闭/休眠」。
 
 ## 三、本机数据佐证（实现前实测）
@@ -77,25 +79,43 @@ NSNumber(UInt64 回绕) as? Double → nil（被拒绝）；整数 mW as? Double
 回归保持：CycleTrackerTests / ChartDownsamplerTests / SyncConfigTests / WebDAVResponseParserTests /
 BatterySnapshotTests / DrainRateCalculatorTests 原有用例不改语义。
 
-## 六、CI 构建产物
+## 六、CI 构建产物与实机验证记录
 
-- 触发提交：（见 git log，本文件所在提交）
-- Workflow：`.github/workflows/build.yml`（release 构建 + swift test + artifact 上传）
-- Run URL：_待 CI 完成后填写_
+### 第一轮（提交 f4b8302，run 32595255556）
+- 结论：**test 失败**（7 issues）→ 定位为 3 处测试夹具错误 + 1 处真实健壮性缺陷（空 journal 不回退 legacy），修复于提交 cf2e345
+- 运行时验证（已安装 cf2e345 产物）抓出**稳态每分钟重写缺陷**：24h 窗口边界使
+  `retained.count != snapshots.count` 每分钟成立 → 每分钟一次全量重写。
+  证据：70s 观察窗内行数不变、文件被原子替换（size +13B、前缀哈希变化）。
+
+### 第二轮（最终）
+- 触发提交：_待填写_
+- Run URL：_待填写_（build + test 全绿）
 - Artifact sha256：_待下载后填写_
 
-## 七、安装与实机验收
+### 实机验证（第一轮安装期间采集，口径与行为证据仍然有效）
+- 安装前数据备份：`~/Library/Application Support/BatteryBar-backup-be5f3eb`（复制，原数据未动）
+- 旧 app 备份：`~/.Trash/BatteryBar-be5f3eb-040514.app`
+- 迁移验证：启动即生成 `snapshots.jsonl`（1437 行），legacy `snapshots.json` 原样保留
+- 功率口径：接电满电新快照 `wattage=13.6~13.8W（遥测实测）、batteryPower=0.28W、estimated=false` ——电池净功率不再冒充系统负载 ✓
+- Helper 关闭（defaults=0）：观察期内零 `powermetrics` 进程 ✓；系统旧 Helper 未删除/未改动
+- 静止 CPU：0.1%（与基线持平）✓
 
-- 安装路径：`/Users/mio/Applications/BatteryBar.app`
-- 迁移前数据备份：_待安装时执行并填写路径_
-- codesign 校验：_待执行_
-- 三页实机验收截图与结论：_待执行_
-- Helper 状态：保持关闭；验收期间不得出现 powermetrics 进程
+## 七、页面视觉验收
+
+按执行约定，截图与视觉分析由后续验收模型独立完成；
+本 agent 已确认主窗口可从状态栏打开，三页数据通路（快照通知 → 模型 → 图表）由单测覆盖。
 
 ## 八、遗留限制
 
 1. 本地 CLT 无 Xcode，SwiftUI 视图层完整类型检查只能由 CI 完成（项目固有约束）。
 2. ad-hoc 签名下 Helper 调用方校验只能到 bundle id 粒度（既有限制，未在本任务范围内改变）。
 3. `normalizedTelemetryPower` 以 >250 判定 mW/W 单位，属启发式；对笔记本合理功率域（<250W）安全。
-4. journal 存在时即使解码行数为 0 也以其为准（不再回读 legacy），防止 compact 后旧数据复活；
-   极端情况下若 journal 全部损坏且 legacy 已过期，可能丢失窗口内历史——已由 .bak/备份流程缓解。
+4. journal 存在时即使解码行数为 0 也回退 legacy（retention 过滤保证不复活过期数据）；
+   极端情况下若 journal 与 legacy 同时损坏，可能丢失窗口内历史——已由 .bak/备份流程缓解。
+
+## 九、执行 Agent 自审发现（可操作项）
+
+| severity | 发现 | 处置 |
+|----------|------|------|
+| high | 稳态下 24h 窗口边界使每分钟新样本恰好挤出一条过期记录，原「差值≠0 即重写」策略退化为每分钟全量重写（首轮安装实测证据：行数不变、文件原子替换） | 已修复：追加无条件化 + 过期行累计 ≥60 才 compact；回归测试 `steadyStateExpirationCompactsOnlyAfterThreshold` 复现并验证 |
+| medium | 空 journal（compact 到空或全部损坏）时不回退 legacy，可能静默丢历史 | 已修复：0 有效行且 legacy 存在时回退；测试 `emptyJournalFallsBackToLegacy` 覆盖 |

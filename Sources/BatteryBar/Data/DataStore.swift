@@ -24,6 +24,15 @@ final class DataStore: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.batterybar.store", qos: .utility)
 
     private var snapshots: [BatterySnapshot] = []
+    /// 自上次 compact 以来因保留窗口从内存裁掉、但仍在 journal 文件里的过期行数。
+    /// 稳态下每分钟一条样本恰好挤出一条过期记录，若按差值立即重写会退化成
+    /// 每分钟全量重写；因此过期行只累计，达到阈值才低频原子 compact。
+    private var pendingExpiredLines = 0
+    /// 过期行累计到该数量才重写 journal（≈1 小时的采样量）
+    private static let compactExpiredThreshold = 60
+    /// 内存数组超过硬上限该余量才重写 journal（正常追加走文件 append，不触发）
+    private static let hardCap = 1_500
+
     private var cycles: [ChargeCycle] = []
     private var syncConfig: SyncConfig = .default
     private var usageState: UsageState = UsageState()
@@ -60,6 +69,9 @@ final class DataStore: @unchecked Sendable {
             // 第一次启动迁移旧数组文件；之后每条采样只追加一行。
             // 同时清掉超出保留窗口的旧记录与可能存在的末尾半行。
             if journalSnapshots == nil || snapshots.count != loaded.count {
+                pendingExpiredLines = 0
+                // 第一次启动迁移旧数组文件；之后每条采样只追加一行。
+                // 同时清掉超出保留窗口的旧记录与可能存在的末尾半行。
                 rewriteSnapshotJournal()
             }
             cycles = loadJSON(from: cyclesFile, backupOnFailure: true) ?? []
@@ -72,11 +84,20 @@ final class DataStore: @unchecked Sendable {
     func saveSnapshot(_ snap: BatterySnapshot) {
         queue.async { [self] in
             snapshots.append(snap)
-            let retained = Self.retainedSnapshots(snapshots, now: snap.timestamp)
-            if retained.count == snapshots.count {
-                appendSnapshotToJournal(snap)
-            } else {
+            // 追加是常态路径：一行落盘，绝不重写整份历史。
+            appendSnapshotToJournal(snap)
+
+            // 内存侧立即按保留窗口收敛；文件侧的过期行延迟清理，
+            // 累计到 compactExpiredThreshold 才做一次原子 compact。
+            let retained = Self.retainedSnapshots(snapshots, now: snap.timestamp, hours: 24, maxCount: Self.hardCap)
+            let dropped = snapshots.count - retained.count
+            if dropped > 0 {
                 snapshots = retained
+                pendingExpiredLines += dropped
+            }
+            if pendingExpiredLines >= Self.compactExpiredThreshold
+                || snapshots.count >= Self.hardCap + Self.compactExpiredThreshold {
+                pendingExpiredLines = 0
                 rewriteSnapshotJournal()
             }
             postOnMain(.batterySnapshotsDidChange)
@@ -102,6 +123,7 @@ final class DataStore: @unchecked Sendable {
             for i in snapshots.indices where ids.contains(snapshots[i].id) {
                 snapshots[i].dirty = false
             }
+            pendingExpiredLines = 0
             rewriteSnapshotJournal()
         }
     }
@@ -126,6 +148,7 @@ final class DataStore: @unchecked Sendable {
                 byID.values.sorted { $0.timestamp < $1.timestamp },
                 now: Date()
             )
+            pendingExpiredLines = 0
             rewriteSnapshotJournal()
             postOnMain(.batterySnapshotsDidChange)
         }

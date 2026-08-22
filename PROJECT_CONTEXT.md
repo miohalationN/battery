@@ -312,7 +312,7 @@ SyncEngine.sync(config:)
 20. **状态栏刷新门控保留**：refreshTitle 文字/低电量态未变时跳过 title/length 赋值；宽度用 `button.attributedTitle` + `NSAttributedString.size()` 测宽 + 固定 length（禁止 NSTextField 子视图，见 T-30）
 21. **功率双口径（2026-08-23 定义）**：`wattage`/`currentWattage` 一律指**系统负载**；电池包充入/放出功率单独用 `batteryPower`/`currentBatteryPower` 表达，方向由 charging/source 决定。读取优先级：PowerTelemetryData.SystemLoad（实测 mW）→ BatteryData.SystemPower → 离电电池放电功率（标估算）→ 接电无遥测时**不可用**（禁止用充电功率冒充）。异常值（nil/负/非有限/UInt64 回绕哨兵/超合理范围）归零过滤。旧 v1 快照：离电可作估算负载，充电仅作电池功率，**不进入系统负载统计与曲线**
 22. **屏幕状态统计**：`screenOn` 表示屏幕亮着（`!isSleeping && !areScreensSleeping`），监听 NSWorkspace screensDidSleep/screensDidWake；显示器关闭但机器醒着的分钟计入「屏幕关闭/休眠」，不得计入亮屏。UI 文案无法严格区分显示器关闭与系统睡眠时统一写「屏幕关闭/休眠」
-23. **快照存储为追加日志**：每分钟只追加一行 `snapshots.jsonl`，禁止恢复每分钟全量重写；compact 仅允许在 mark synced、远端合并、超窗裁剪时执行；迁移必须保留旧 `snapshots.json` 作回退；dirty 同步语义不得为写优化让步
+23. **快照存储为追加日志**：每分钟只追加一行 `snapshots.jsonl`，禁止恢复每分钟全量重写；过期行（被 24h 窗口挤出）在内存立即收敛、文件侧延迟清理，累计 ≥60 条（约 1 小时量，稳态实测每分钟一条会恰好触发边界）才做一次原子 compact；mark synced / 远端合并即时 compact；迁移必须保留旧 `snapshots.json` 作回退；dirty 同步语义不得为写优化让步
 24. **离电记录 ≠ Apple 循环次数**：记录页展示的是本 app 检测的离电使用时段（内部类型 ChargeCycle）；趋势只用归一化指标（折算满电续航/每小时耗电百分比），且仅纳入下降 ≥5% 且持续 ≥15 分钟的记录，样本不足显示「数据不足」；Apple 的 CycleCount 一律叫「循环次数」
 
 ---

@@ -175,4 +175,54 @@ import Foundation
         let lines = try String(contentsOf: ctx.journal, encoding: .utf8).split(separator: "\n")
         #expect(lines.count == 2)
     }
+
+    /// 稳态反例：每分钟新样本把最老记录挤出 24h 窗口时，
+    /// 不得每次都全量重写——过期行累计到阈值才 compact。
+    /// （首轮安装实测曾因此退化成每分钟一次原子重写。）
+    @Test func steadyStateExpirationCompactsOnlyAfterThreshold() throws {
+        let ctx = try makeStore()
+        defer { cleanUp(ctx.dir) }
+        let store = DataStore(directory: ctx.dir)
+        let base = Date()
+
+        // 60 条历史样本（间隔 60s，跨度 1 小时）
+        for i in 0..<60 {
+            store.saveSnapshot(BatterySnapshot(
+                timestamp: base.addingTimeInterval(TimeInterval(i * 60)),
+                level: 50, isCharging: false, wattage: 5, temperature: 0, screenOn: true))
+        }
+        store.flushPendingWritesForTesting()
+        #expect(try String(contentsOf: ctx.journal, encoding: .utf8).split(separator: "\n").count == 60)
+
+        // 随后 10 条跨过 24h 边界的样本（间隔 60s）：每条使 cutoff 恰好越过一条历史样本
+        for k in 1...10 {
+            store.saveSnapshot(BatterySnapshot(
+                timestamp: base.addingTimeInterval(24 * 3600 + TimeInterval(k * 60)),
+                level: 50, isCharging: false, wattage: 5, temperature: 0, screenOn: true))
+            store.flushPendingWritesForTesting()
+        }
+
+        // 内存已裁掉 10 条过期记录……
+        #expect(store.allSnapshots().count == 60)
+        // ……但 journal 仍是追加式：70 行原样保留，未发生重写（阈值 60 未到）
+        let midLines = try String(contentsOf: ctx.journal, encoding: .utf8).split(separator: "\n")
+        #expect(midLines.count == 70)
+
+        // 继续推进至累计过期 ≥60 条 → 触发一次低频 compact
+        for k in 11...62 {
+            store.saveSnapshot(BatterySnapshot(
+                timestamp: base.addingTimeInterval(24 * 3600 + TimeInterval(k * 60)),
+                level: 50, isCharging: false, wattage: 5, temperature: 0, screenOn: true))
+        }
+        store.flushPendingWritesForTesting()
+
+        let endLines = try String(contentsOf: ctx.journal, encoding: .utf8).split(separator: "\n")
+        #expect(endLines.count == store.allSnapshots().count)
+        // compact 后 journal 内不再有过期行
+        let lastNow = base.addingTimeInterval(24 * 3600 + TimeInterval(62 * 60))
+        for line in endLines {
+            let s = try JSONDecoder().decode(BatterySnapshot.self, from: Data(line.utf8))
+            #expect(s.timestamp >= lastNow.addingTimeInterval(-24 * 3600))
+        }
+    }
 }

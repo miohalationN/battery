@@ -166,8 +166,7 @@ BatteryInfo       静态信息（designCapacity/maxCapacity/cycleCount/serial/ma
 ```
 
 持久化位置：`~/Library/Application Support/BatteryBar/`
-- `snapshots.jsonl`：追加式快照日志（每分钟一行，不重写）；mark synced / 远端合并 /
-  超窗裁剪时低频原子 compact；末尾损坏行跳过不致命（2026-08-23 起）
+- `snapshots.jsonl`：追加式快照日志（每分钟一行，不重写）；过期行累计 ≥60 条（约 1 小时量）或 mark synced / 远端合并时才低频原子 compact；末尾损坏行跳过不致命（2026-08-23 起）
 - `snapshots.json`：v1 全量数组，仅作迁移源与回退副本保留，不再写入
 - `cycles.json` / `sync-config.json` / `usage-state.json` / `refresh-interval.json`
 - 首次启动从 snapshots.json 无损迁移；保留窗口按 timestamp 裁剪 24h + 硬上限 1500 条
