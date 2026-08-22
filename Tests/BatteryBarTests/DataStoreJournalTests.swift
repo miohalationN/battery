@@ -188,13 +188,10 @@ import Foundation
     @Test func migratedV2LinesKeepUnknownPowerSource() throws {
         let ctx = try makeStore()
         defer { cleanUp(ctx.dir) }
-        // 近期时间戳：保留窗口按 timestamp 裁剪，固定旧时间戳会被裁掉
+        // 近期时间戳：保留窗口按 timestamp 裁剪，固定旧时间戳会被裁掉。
+        // 注意 journal 是 JSONL：必须单行（多行 JSON 会按行拆分后解码失败）。
         let recentTS = Date().addingTimeInterval(-600).timeIntervalSinceReferenceDate
-        let v2Line = """
-        {"id":"\(UUID().uuidString)","timestamp":\(recentTS),"level":100,"isCharging":false,
-         "wattage":2.1,"batteryPower":2.1,"systemPowerAvailable":true,"systemPowerIsEstimated":true,
-         "temperature":31.0,"screenOn":true,"dirty":false}
-        """
+        let v2Line = "{\"id\":\"\(UUID().uuidString)\",\"timestamp\":\(recentTS),\"level\":100,\"isCharging\":false,\"wattage\":2.1,\"batteryPower\":2.1,\"systemPowerAvailable\":true,\"systemPowerIsEstimated\":true,\"temperature\":31.0,\"screenOn\":true,\"dirty\":false}"
         try Data(v2Line.utf8).write(to: ctx.journal)
 
         let store = DataStore(directory: ctx.dir)
