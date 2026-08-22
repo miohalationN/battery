@@ -2,8 +2,7 @@ import SwiftUI
 
 struct PopoverView: View {
     @ObservedObject var sampler: PowerSampler
-    /// 打开主窗口（由 AppDelegate 注入：NSWindow 创建/激活逻辑收敛在 AppDelegate）
-    var onOpenDetails: () -> Void
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -213,7 +212,7 @@ struct PopoverView: View {
     private var footer: some View {
         VStack(spacing: 8) {
             Button {
-                onOpenDetails()
+                openMainWindow()
                 dismiss()
             } label: {
                 Label("查看详情", systemImage: "chart.bar.xaxis")
@@ -334,6 +333,50 @@ struct PopoverView: View {
         case 26...50: return "battery.50percent"
         case 51...75: return "battery.75percent"
         default: return "battery.100percent"
+        }
+    }
+
+    // MARK: - 主窗口控制
+
+    private func openMainWindow() {
+        // 单例窗口控制：若已有主窗口则激活它，否则新建
+        if let existing = findExistingMainWindow() {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            if existing.isMiniaturized { existing.deminiaturize(nil) }
+        } else {
+            openWindow(id: "main")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                NSApp.activate(ignoringOtherApps: true)
+                if let window = findExistingMainWindow() {
+                    window.makeKeyAndOrderFront(nil)
+                }
+            }
+        }
+    }
+
+    /// 查找已存在的主窗口（SwiftUI WindowGroup 创建的 ContentView 所在窗口）。
+    /// 判断依据：
+    ///   1. 排除 MenuBarExtra 的 popover（className 含 "MenuExtra" 或 "_NSMenuExtra"）
+    ///   2. 排除已最小化或不可见的窗口
+    ///   3. 主窗口默认 760x580，popover 宽度只有 340，用 frame.width > 500 区分
+    ///   4. contentView 不为 nil 且能成为 key window
+    private func findExistingMainWindow() -> NSWindow? {
+        return NSApp.windows.first { window in
+            // 排除 MenuBarExtra popover（私有类名特征）
+            let className = String(describing: type(of: window))
+            if className.contains("MenuExtra") || className.contains("_NSMenuExtra") {
+                return false
+            }
+            // 必须可见、有 contentView、能成为 key
+            guard window.contentView != nil,
+                  window.canBecomeKey,
+                  !window.isMiniaturized,
+                  window.isVisible else {
+                return false
+            }
+            // 主窗口默认 760 宽，popover 340 宽，用 500 作为分界
+            return window.frame.width > 500
         }
     }
 }

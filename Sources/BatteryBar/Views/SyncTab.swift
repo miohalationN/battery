@@ -1,30 +1,14 @@
 import SwiftUI
-import Observation
-
-/// SyncTab 的视图状态模型（@Observable 说明见 CycleTabModel）。
-/// 由 AppDelegate 持有：config 在 app 启动时从 DataStore 载入一次，
-/// 窗口关闭重开不重置表单。
-@Observable
-final class SyncTabModel {
-    var config = DataStore.shared.currentConfig()
-    var testing = false
-    var testResult: String?
-    var password = ""
-    var refreshInterval: Int = 1
-    // 密码防抖：用户停止输入 0.6s 后才写入 Keychain，避免每次按键都触发 SecItem 操作
-    var passwordDebounceTask: Task<Void, Never>?
-}
 
 struct SyncTab: View {
     @ObservedObject var syncEngine: SyncEngine
-    @Bindable var model: SyncTabModel
-
-    // 读侧透传：body 内沿用原属性名，改动面最小
-    private var config: SyncConfig { model.config }
-    private var testing: Bool { model.testing }
-    private var testResult: String? { model.testResult }
-    private var password: String { model.password }
-    private var refreshInterval: Int { model.refreshInterval }
+    @State private var config = DataStore.shared.currentConfig()
+    @State private var testing = false
+    @State private var testResult: String?
+    @State private var password = ""
+    @State private var refreshInterval: Int = 1
+    // 密码防抖：用户停止输入 0.6s 后才写入 Keychain，避免每次按键都触发 SecItem 操作
+    @State private var passwordDebounceTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -36,7 +20,7 @@ struct SyncTab: View {
                         .foregroundStyle(config.isEnabled ? .green : .secondary)
                     Text("启用 WebDAV 同步").font(.headline)
                     Spacer()
-                    Toggle("", isOn: $model.config.isEnabled).labelsHidden().onChange(of: config.isEnabled) { save() }
+                    Toggle("", isOn: $config.isEnabled).labelsHidden().onChange(of: config.isEnabled) { save() }
                 }
                 .padding(20)
                 .background { RoundedRectangle(cornerRadius: 20).fill(.regularMaterial) }
@@ -53,9 +37,9 @@ struct SyncTab: View {
         }
         .onAppear {
             // 从 DataStore 恢复用户上次设置的刷新间隔
-            model.refreshInterval = Int(DataStore.shared.currentRefreshInterval())
+            refreshInterval = Int(DataStore.shared.currentRefreshInterval())
             // 预填密码（用于测试连接 / 同步），从 Keychain 读取
-            if let pw = KeychainHelper.getPassword(for: config.username) { model.password = pw }
+            if let pw = KeychainHelper.getPassword(for: config.username) { password = pw }
         }
     }
 
@@ -68,7 +52,7 @@ struct SyncTab: View {
                 Text("数据刷新").font(.headline)
                 Spacer()
                 HStack(spacing: 0) {
-                    Button { if model.refreshInterval > 1 { model.refreshInterval -= 1; applyRefreshInterval() } } label: {
+                    Button { if refreshInterval > 1 { refreshInterval -= 1; applyRefreshInterval() } } label: {
                         Image(systemName: "minus")
                             .font(.system(size: 13, weight: .medium))
                             .frame(width: 28, height: 28)
@@ -80,7 +64,7 @@ struct SyncTab: View {
                         .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
                         .frame(width: 36)
 
-                    Button { if model.refreshInterval < 30 { model.refreshInterval += 1; applyRefreshInterval() } } label: {
+                    Button { if refreshInterval < 30 { refreshInterval += 1; applyRefreshInterval() } } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 13, weight: .medium))
                             .frame(width: 28, height: 28)
@@ -96,8 +80,8 @@ struct SyncTab: View {
     }
 
     private func applyRefreshInterval() {
-        DataStore.shared.updateRefreshInterval(Double(model.refreshInterval))
-        NotificationCenter.default.post(name: .init("RefreshIntervalChanged"), object: Double(model.refreshInterval))
+        DataStore.shared.updateRefreshInterval(Double(refreshInterval))
+        NotificationCenter.default.post(name: .init("RefreshIntervalChanged"), object: Double(refreshInterval))
     }
 
     // MARK: - Server
@@ -105,7 +89,7 @@ struct SyncTab: View {
     /// 启用同步但服务器地址/用户名/密码未填全时的警告（password 含 Keychain 预填）
     @ViewBuilder
     private var configWarning: some View {
-        if config.serverURL.isEmpty || config.username.isEmpty || model.password.isEmpty {
+        if config.serverURL.isEmpty || config.username.isEmpty || password.isEmpty {
             Label("配置不完整：请填写服务器地址、用户名与密码，否则同步不会执行", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.orange)
@@ -118,18 +102,18 @@ struct SyncTab: View {
     private var serverSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("服务器配置", systemImage: "server.rack").font(.headline)
-            glassField("服务器地址", text: $model.config.serverURL, placeholder: "https://dav.jianguoyun.com/dav/")
-            glassField("用户名", text: $model.config.username, placeholder: "username")
-            glassField("远程路径", text: $model.config.remotePath, placeholder: "/BatteryBar")
+            glassField("服务器地址", text: $config.serverURL, placeholder: "https://dav.jianguoyun.com/dav/")
+            glassField("用户名", text: $config.username, placeholder: "username")
+            glassField("远程路径", text: $config.remotePath, placeholder: "/BatteryBar")
             HStack(spacing: 8) {
                 Image(systemName: "lock").font(.system(size: 12)).foregroundStyle(.secondary)
-                SecureField("密码", text: $model.password).textFieldStyle(.plain).font(.system(size: 13))
-                    .onChange(of: model.password) { schedulePasswordSave() }
+                SecureField("密码", text: $password).textFieldStyle(.plain).font(.system(size: 13))
+                    .onChange(of: password) { schedulePasswordSave() }
             }
             .padding(10).background { RoundedRectangle(cornerRadius: 10).fill(.quaternary) }
 
             HStack {
-                Button { model.testing = true; model.testResult = nil; Task { await testConnection(); model.testing = false } } label: {
+                Button { testing = true; testResult = nil; Task { await testConnection(); testing = false } } label: {
                     HStack(spacing: 6) { if testing { ProgressView().controlSize(.mini) } else { Image(systemName: "network") }; Text("测试连接") }
                 }
                 .disabled(testing || config.serverURL.isEmpty).buttonStyle(.bordered)
@@ -143,11 +127,11 @@ struct SyncTab: View {
     /// 密码防抖：停止输入 0.6s 后才写入 Keychain。
     /// 避免每次按键都触发 SecItem 操作（涉及 Keychain daemon IPC，开销大）。
     private func schedulePasswordSave() {
-        model.passwordDebounceTask?.cancel()
-        let pw = model.password
-        let user = model.config.username
+        passwordDebounceTask?.cancel()
+        let pw = password
+        let user = config.username
         guard !pw.isEmpty else { return }
-        model.passwordDebounceTask = Task {
+        passwordDebounceTask = Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
             if Task.isCancelled { return }
             try? KeychainHelper.setPassword(pw, for: user)
@@ -159,12 +143,12 @@ struct SyncTab: View {
             Label("同步设置", systemImage: "gearshape").font(.headline)
             VStack(alignment: .leading, spacing: 8) {
                 Text("同步间隔").font(.subheadline).foregroundStyle(.secondary)
-                Picker("", selection: $model.config.syncInterval) { ForEach(SyncInterval.allCases, id: \.self) { Text($0.label).tag($0) } }
+                Picker("", selection: $config.syncInterval) { ForEach(SyncInterval.allCases, id: \.self) { Text($0.label).tag($0) } }
                     .pickerStyle(.segmented).onChange(of: config.syncInterval) { save() }
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("同步方向").font(.subheadline).foregroundStyle(.secondary)
-                Picker("", selection: $model.config.syncDirection) { ForEach(SyncDirection.allCases, id: \.self) { Text($0.label).tag($0) } }
+                Picker("", selection: $config.syncDirection) { ForEach(SyncDirection.allCases, id: \.self) { Text($0.label).tag($0) } }
                     .pickerStyle(.segmented).onChange(of: config.syncDirection) { save() }
             }
         }
@@ -217,7 +201,7 @@ struct SyncTab: View {
     private var actionButtons: some View {
         HStack {
             Button {
-                Task { await syncEngine.sync(config: model.config); model.config.lastSyncAt = Date(); save() }
+                Task { await syncEngine.sync(config: config); config.lastSyncAt = Date(); save() }
             } label: {
                 HStack(spacing: 6) {
                     if case .syncing = syncEngine.state {
@@ -243,14 +227,14 @@ struct SyncTab: View {
         }
     }
 
-    private func save() { DataStore.shared.updateConfig(model.config) }
+    private func save() { DataStore.shared.updateConfig(config) }
 
     private func testConnection() async {
-        guard let url = URL(string: model.config.serverURL) else { model.testResult = "❌ 无效的 URL"; return }
-        let pw = KeychainHelper.getPassword(for: model.config.username) ?? model.password
-        guard !pw.isEmpty else { model.testResult = "❌ 请先输入密码"; return }
-        let client = WebDAVClient(baseURL: url, username: model.config.username, password: pw)
-        do { _ = try await client.listFiles(at: model.config.remotePath); model.testResult = "✅ 连接成功" }
-        catch { model.testResult = "❌ \(error.localizedDescription)" }
+        guard let url = URL(string: config.serverURL) else { testResult = "❌ 无效的 URL"; return }
+        let pw = KeychainHelper.getPassword(for: config.username) ?? password
+        guard !pw.isEmpty else { testResult = "❌ 请先输入密码"; return }
+        let client = WebDAVClient(baseURL: url, username: config.username, password: pw)
+        do { _ = try await client.listFiles(at: config.remotePath); testResult = "✅ 连接成功" }
+        catch { testResult = "❌ \(error.localizedDescription)" }
     }
 }

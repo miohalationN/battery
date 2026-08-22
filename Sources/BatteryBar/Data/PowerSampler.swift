@@ -25,6 +25,8 @@ final class PowerSampler: ObservableObject {
     @Published private(set) var currentAmperage: Double = 0
     @Published private(set) var currentInfo: BatteryInfo?
     @Published private(set) var systemHealthPercent: Double = 100
+    /// 每秒翻转一次，供 UsageTab/PowerTab 节流刷新快照数组（onReceive($tick)）
+    @Published private(set) var tick: Bool = false
     /// 最近一次采样时刻（视图不观察；曾为 @Published 每秒触发 objectWillChange 风暴）
     private(set) var lastUpdateTime: Date = Date()
 
@@ -284,6 +286,7 @@ final class PowerSampler: ObservableObject {
         if (info?.instantAmperage ?? 0) != currentAmperage { currentAmperage = info?.instantAmperage ?? 0 }
         if info != currentInfo { currentInfo = info }
         lastUpdateTime = Date()
+        tick.toggle()
 
         // 通知状态栏 AppDelegate 刷新 button.title（title 不自动响应 @Published）
         NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)

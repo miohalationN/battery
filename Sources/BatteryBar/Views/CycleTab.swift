@@ -1,22 +1,10 @@
 import SwiftUI
 import Charts
-import Observation
-
-/// CycleTab 的视图状态模型。
-/// 用 @Observable 而非 @State：@State 在新版 SDK 中是宏（插件仅随 Xcode 分发），
-/// CLT 无法编译；模型由 AppDelegate 持有并注入，跨窗口关闭/重开保留状态。
-@Observable
-final class CycleTabModel {
-    var cycles: [ChargeCycle] = []
-    var lastCycleUpdate: Date = .distantPast
-    var selectedCycleDate: Date?
-}
 
 struct CycleTab: View {
-    @Bindable var model: CycleTabModel
-
-    // 读侧透传：body 内沿用原属性名，改动面最小
-    private var cycles: [ChargeCycle] { model.cycles }
+    @State private var cycles: [ChargeCycle] = []
+    @State private var lastCycleUpdate: Date = .distantPast
+    @State private var selectedCycleDate: Date?
 
     var body: some View {
         ScrollView {
@@ -28,14 +16,14 @@ struct CycleTab: View {
             .padding(20)
         }
         .onAppear {
-            model.cycles = DataStore.shared.allCycles()
-            model.lastCycleUpdate = Date()
+            cycles = DataStore.shared.allCycles()
+            lastCycleUpdate = Date()
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             let now = Date()
-            if now.timeIntervalSince(model.lastCycleUpdate) > 50 {
-                model.cycles = DataStore.shared.allCycles()
-                model.lastCycleUpdate = now
+            if now.timeIntervalSince(lastCycleUpdate) > 50 {
+                cycles = DataStore.shared.allCycles()
+                lastCycleUpdate = now
             }
         }
     }
@@ -85,7 +73,7 @@ struct CycleTab: View {
                         .foregroundStyle(Color.accentColor)
                         .symbolSize(30)
                 }
-                if let selected = model.selectedCycleDate {
+                if let selected = selectedCycleDate {
                     RuleMark(x: .value("选中", selected))
                         .foregroundStyle(.tertiary)
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [3]))
@@ -108,7 +96,7 @@ struct CycleTab: View {
                     }
                 }
             }
-            .chartXSelection(value: $model.selectedCycleDate)
+            .chartXSelection(value: $selectedCycleDate)
             .chartXAxis {
                 AxisMarks(values: .stride(by: .day)) {
                     AxisValueLabel(format: .dateTime.month().day())

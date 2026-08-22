@@ -2,20 +2,37 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 
-/// 纯 AppKit 入口：菜单栏工具不需要 SwiftUI App/Scene 生命周期。
-/// 实测（2026-08-22，macOS 27）：SwiftUI App 脚手架（无论 WindowGroup 还是
-/// Settings 场景）在本机会持续产生约 40% CPU 的短命线程风暴，sample 不可见
-/// 但 task 级 utime 可测；改用 NSApplication 直启后归零。
-/// SwiftUI 仅用于 Popover 与主窗口内容（NSHostingController 包裹）。
 @main
-enum BatteryBarApp {
-    static func main() {
-        let app = NSApplication.shared
-        let delegate = AppDelegate()
-        app.delegate = delegate
+struct BatteryBarApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+    var body: some Scene {
+        // 主窗口 — WindowGroup 配合单例控制，避免反复 openWindow 创建多窗口
+        // sampler / syncEngine 由 AppDelegate 持有，状态栏/主窗口/popover 共用同一实例。
+        // SwiftUI 窗口生命周期提供液态玻璃材质所需的窗口 chrome（2026-08-22 曾试改
+        // 裸 NSWindow + NSHostingController，材质渲染退化，已回滚）。
+        WindowGroup(id: "main") {
+            ContentView()
+                .environmentObject(appDelegate.sampler)
+                .environmentObject(appDelegate.syncEngine)
+                .background(OpenWindowRelay())
+                .onAppear {
+                    appDelegate.sampler.start()
+                    // 打开主窗口时显示 Dock 图标
+                    NSApp.setActivationPolicy(.regular)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .onDisappear {
+                    // 关闭主窗口时隐藏 Dock 图标，回到纯菜单栏模式
+                    NSApp.setActivationPolicy(.accessory)
+                }
+        }
+        .defaultSize(width: 760, height: 580)
+    }
+
+    init() {
         // 设置 App 图标（运行时绘制，无需外部资源）
-        app.applicationIconImage = drawAppIcon()
-        app.run()
+        NSApplication.shared.applicationIconImage = Self.drawAppIcon()
     }
 
     /// 用 CoreGraphics 绘制 1024×1024 电池图标作为 App 图标
@@ -86,25 +103,18 @@ enum BatteryBarApp {
     }
 }
 
-/// AppDelegate — 状态栏（左键 Popover / 右键菜单）、主窗口（NSWindow）、开机自启。
-/// 整体隔离在 MainActor：持有 @MainActor 的 PowerSampler/SyncEngine，
-/// 且所有入口（生命周期回调、target-action、窗口代理）都在主线程。
+/// AppDelegate — 状态栏（左键 Popover / 右键菜单）、开机自启；主窗口归 WindowGroup
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
-    private var mainWindow: NSWindow?
-    let sampler = PowerSampler()
-    let syncEngine = SyncEngine()
-    // 各 Tab 视图状态模型（@Observable）：AppDelegate 持有，跨窗口关闭/重开保留
-    let usageModel = UsageTabModel()
-    let cycleModel = CycleTabModel()
-    let powerModel = PowerTabModel()
-    let syncModel = SyncTabModel()
     private var observer: NSObjectProtocol?
     // refreshTitle 门控：文字与低电量态都没变时跳过（title/length 赋值会触发菜单栏重排）
     private var lastTitleText: String?
     private var lastTitleLowBattery = false
+
+    let sampler = PowerSampler()
+    let syncEngine = SyncEngine()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         sampler.start()
@@ -144,9 +154,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         popover.contentSize = NSSize(width: 340, height: 480)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
-            rootView: PopoverMenuBarView(sampler: sampler, onOpenDetails: { [weak self] in
-                self?.showMainWindow()
-            })
+            rootView: PopoverMenuBarView(sampler: sampler)
         )
         self.popover = popover
 
@@ -178,6 +186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func buildStatusMenu() -> NSMenu {
         let menu = NSMenu()
 
+        // 主窗口归 WindowGroup 管理：发通知由 ContentView 内的 openWindow 打开
         let openItem = menu.addItem(withTitle: "打开主窗口", action: #selector(openMainWindowFromMenu(_:)), keyEquivalent: "")
         openItem.target = self
 
@@ -201,7 +210,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openMainWindowFromMenu(_ sender: Any?) {
-        showMainWindow()
+        NotificationCenter.default.post(name: .init("OpenMainWindowRequested"), object: nil)
     }
 
     @objc private func openBatterySettingsFromMenu(_ sender: Any?) {
@@ -232,56 +241,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    // MARK: - 主窗口（NSWindow + NSHostingController）
-
-    /// 显示主窗口：已存在则激活，否则创建。打开时显示 Dock 图标。
-    func showMainWindow() {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-
-        if let window = mainWindow {
-            if window.isMiniaturized { window.deminiaturize(nil) }
-            window.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 580),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "BatteryBar"
-        window.contentMinSize = NSSize(width: 560, height: 420)
-        // 记住上次窗口位置与大小；首次打开居中
-        if !window.setFrameAutosaveName("BatteryBarMainWindow") {
-            window.center()
-        }
-        // 保留窗口实例：关闭后「打开主窗口」可再次显示
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.contentViewController = NSHostingController(
-            rootView: ContentView(
-                usageModel: usageModel,
-                cycleModel: cycleModel,
-                powerModel: powerModel,
-                syncModel: syncModel
-            )
-            .environmentObject(sampler)
-            .environmentObject(syncEngine)
-        )
-        window.makeKeyAndOrderFront(nil)
-        mainWindow = window
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        guard notification.object as? NSWindow === mainWindow else { return }
-        // 主窗口关闭后回到纯菜单栏模式（隐藏 Dock 图标）
-        DispatchQueue.main.async {
-            NSApp.setActivationPolicy(.accessory)
-        }
-    }
-
     // MARK: - Popover
 
     @objc func togglePopover(_ sender: Any?) {
@@ -297,7 +256,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 更新状态栏文字（跟随系统逻辑：纯百分比，不显示预估时间）
     /// 低电量（≤20% 且未充电）时文字变红。
     ///
-    /// 宽度控制：button.title + 固定 statusItem.length（NSAttributedString 精确测宽 + ceil + 2pt）。
+    /// 宽度控制：button.attributedTitle + 固定 statusItem.length（NSAttributedString 精确测宽 + ceil + 2pt）。
     /// 不再用 NSTextField 子视图方案——macOS 27 上 NSTextField 嵌入 NSStatusBarButton
     /// 会触发 AppKit 布局引擎持续重排，实测空转约 37% CPU（2026-08-22，见 T-30）。
     private func refreshTitle() {
@@ -333,24 +292,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 struct ContentView: View {
     @EnvironmentObject var sampler: PowerSampler
     @EnvironmentObject var syncEngine: SyncEngine
-    let usageModel: UsageTabModel
-    let cycleModel: CycleTabModel
-    let powerModel: PowerTabModel
-    let syncModel: SyncTabModel
+    @State private var selectedTab = 0
 
     var body: some View {
-        TabView {
-            UsageTab(sampler: sampler, model: usageModel)
+        TabView(selection: $selectedTab) {
+            UsageTab(sampler: sampler)
                 .tabItem { Label("首页", systemImage: "house.fill") }
+                .tag(0)
 
-            CycleTab(model: cycleModel)
+            CycleTab()
                 .tabItem { Label("循环统计", systemImage: "arrow.triangle.2.circlepath") }
+                .tag(1)
 
-            PowerTab(sampler: sampler, model: powerModel)
+            PowerTab(sampler: sampler)
                 .tabItem { Label("组件功耗", systemImage: "bolt.fill") }
+                .tag(2)
 
-            SyncTab(syncEngine: syncEngine, model: syncModel)
+            SyncTab(syncEngine: syncEngine)
                 .tabItem { Label("同步", systemImage: "arrow.triangle.branch") }
+                .tag(3)
         }
         .background(.thickMaterial)
     }
@@ -359,10 +319,23 @@ struct ContentView: View {
 /// 状态栏弹窗
 struct PopoverMenuBarView: View {
     @ObservedObject var sampler: PowerSampler
-    var onOpenDetails: () -> Void
 
     var body: some View {
-        PopoverView(sampler: sampler, onOpenDetails: onOpenDetails)
+        PopoverView(sampler: sampler)
             .frame(width: 340)
+    }
+}
+
+/// 右键菜单「打开主窗口」的中继：主窗口归 WindowGroup 管理，
+/// openWindow 环境只在视图内可用，通过通知把请求转进来
+private struct OpenWindowRelay: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onReceive(NotificationCenter.default.publisher(for: .init("OpenMainWindowRequested"))) { _ in
+                openWindow(id: "main")
+            }
     }
 }
