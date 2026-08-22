@@ -317,7 +317,6 @@ struct ContentView: View {
         }
         .padding(.top, 2)
         .background(.thickMaterial)
-        .ignoresSafeArea(.container, edges: .top)
     }
 }
 
