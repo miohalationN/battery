@@ -36,7 +36,12 @@ launch_app() {
   fi
   defaults write com.batterybar.app BatteryBarProfileAutoScroll -bool true
   open ~/Applications/BatteryBar.app
-  sleep 6
+  # 等待进程真正可 attach，最多 15s
+  for _ in $(seq 1 15); do
+    pgrep -x BatteryBar >/dev/null && break
+    sleep 1
+  done
+  sleep 8
 }
 
 # 带看门狗的录制：超过 limit 秒强杀（视为该次失败）
@@ -45,7 +50,7 @@ record_once() {
   xcrun xctrace record --template "$tpl" --attach BatteryBar --time-limit "${limit}s" --output "$out" &
   local pid=$!
   (
-    sleep $((limit + 90))
+    sleep $((limit + 180))
     kill -9 $pid 2>/dev/null || true
   ) &
   local watchdog=$!
@@ -66,7 +71,7 @@ record() {
     return 0
   fi
   rm -f "$out"
-  for attempt in 1 2; do
+  for attempt in 1 2 3; do
     echo "--- record attempt $attempt: $tpl -> $out ---"
     if record_once "$tpl" "$limit" "$out"; then
       echo "recording finished (rc=0)"

@@ -71,6 +71,11 @@ for s in export_order[:24]:
     tag = f"table:{s}"
     n = len(exported)
     lines.append(f"[{tag}] exported {n} bytes")
+    # 关键表直接完整转储（表都很小），便于离线判读行结构与计数
+    if re.search(r"swiftui|hitch|tick|runloop", s, re.I):
+        lines.append(f"[{tag}] FULL-BEGIN")
+        lines.append(exported[:20000])
+        lines.append(f"[{tag}] FULL-END")
 
     low = exported.lower()
     if "hitch" in s.lower() or "hitch" in low:
