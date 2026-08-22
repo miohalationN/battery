@@ -204,7 +204,7 @@ private struct StatusHero: View {
         HStack(spacing: 16) {
             ZStack {
                 Circle().fill(Color.bbTeal.opacity(0.12)).frame(width: 54, height: 54)
-                Image(systemName: "powerplug.fill").font(.system(size: 22)).foregroundStyle(.bbTeal)
+                Image(systemName: "powerplug.fill").font(.system(size: 22)).foregroundStyle(Color.bbTeal)
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text("已接电，未充电").font(.system(size: 20, weight: .bold))
