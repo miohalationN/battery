@@ -24,6 +24,9 @@ enum ProfileSupport {
 enum ProfileAutoScroll {
     /// 延迟 idleDelay 秒（留出纯采样观察窗）后开始连续滚动，
     /// 共 cycles 个单程、每程 duration 秒；结束后静止。
+    /// 必须在主线程调用（视图 onAppear）；用 MainActor Task 而非
+    /// DispatchQueue.asyncAfter，避免跨隔离传递非 Sendable 的 ScrollViewProxy。
+    @MainActor
     static func run(
         _ proxy: ScrollViewProxy,
         topID: String = ProfileSupport.topAnchorID,
@@ -34,17 +37,16 @@ enum ProfileAutoScroll {
         cycles: Int = 8
     ) {
         guard enabled else { return }
-        func cycle(_ remaining: Int, scrollDown: Bool) {
-            guard remaining > 0 else { return }
-            withAnimation(.linear(duration: duration)) {
-                proxy.scrollTo(scrollDown ? bottomID : topID)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(idleDelay))
+            var scrollDown = true
+            for _ in 0..<max(0, cycles) {
+                withAnimation(.linear(duration: duration)) {
+                    proxy.scrollTo(scrollDown ? bottomID : topID)
+                }
+                try? await Task.sleep(for: .seconds(duration + 0.5))
+                scrollDown.toggle()
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.5) {
-                cycle(remaining - 1, scrollDown: !scrollDown)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleDelay) {
-            cycle(cycles, scrollDown: true)
         }
     }
 }
