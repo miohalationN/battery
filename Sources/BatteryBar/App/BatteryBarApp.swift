@@ -290,74 +290,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 /// 主窗口内容
-/// 顶部为沉浸式栏：隐藏系统标题栏（.hiddenTitleBar），红绿灯浮于内容之上，
-/// Tab 胶囊选择器与红绿灯同层，替代系统 TabView 的独立标签行
+/// 沉浸式顶栏：.hiddenTitleBar 隐藏系统标题栏，系统 TabView 的居中液态玻璃
+/// Tab 模块上移至红绿灯同一层；内容与顶栏之间无分割线
 struct ContentView: View {
     @EnvironmentObject var sampler: PowerSampler
     @EnvironmentObject var syncEngine: SyncEngine
     @State private var selectedTab = 0
 
     var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            Group {
-                switch selectedTab {
-                case 0: UsageTab(sampler: sampler)
-                case 1: CycleTab()
-                case 2: PowerTab(sampler: sampler)
-                default: SyncTab(syncEngine: syncEngine)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        TabView(selection: $selectedTab) {
+            UsageTab(sampler: sampler)
+                .tabItem { Label("首页", systemImage: "house.fill") }
+                .tag(0)
+
+            CycleTab()
+                .tabItem { Label("循环统计", systemImage: "arrow.triangle.2.circlepath") }
+                .tag(1)
+
+            PowerTab(sampler: sampler)
+                .tabItem { Label("组件功耗", systemImage: "bolt.fill") }
+                .tag(2)
+
+            SyncTab(syncEngine: syncEngine)
+                .tabItem { Label("同步", systemImage: "arrow.triangle.branch") }
+                .tag(3)
         }
+        .padding(.top, 2)
         .background(.thickMaterial)
         .ignoresSafeArea(.container, edges: .top)
-    }
-
-    // MARK: - 沉浸式顶栏（红绿灯区域留白 + Tab 胶囊选择器）
-
-    private var topBar: some View {
-        HStack(spacing: 6) {
-            // 红绿灯占位（三个灯 ≈ 68pt 宽，位于隐藏标题栏带内）
-            Color.clear.frame(width: 68, height: 1)
-            tabButton(0, "首页", "house.fill")
-            tabButton(1, "循环统计", "arrow.triangle.2.circlepath")
-            tabButton(2, "组件功耗", "bolt.fill")
-            tabButton(3, "同步", "arrow.triangle.branch")
-            Spacer()
-        }
-        .padding(.top, 7)
-        .padding(.bottom, 9)
-        .padding(.horizontal, 12)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.06))
-                .frame(height: 1)
-        }
-    }
-
-    private func tabButton(_ index: Int, _ title: String, _ icon: String) -> some View {
-        let selected = selectedTab == index
-        return Button {
-            selectedTab = index
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 10, weight: .medium))
-                Text(title)
-                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
-            }
-            .foregroundStyle(selected ? Color.primary : Color.secondary)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 5)
-            .background {
-                if selected {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.08))
-                }
-            }
-        }
-        .buttonStyle(.plain)
     }
 }
 
