@@ -56,4 +56,4 @@ launch_app
 record "$HITCH_TPL" 65 "$OUT/$PAGE-hitches.trace"
 
 killall BatteryBar 2>/dev/null || true
-ls -la "$OUT"/$Page-*.trace 2>/dev/null || ls -la "$OUT" | grep trace || true
+ls -la "$OUT"/"$PAGE"-*.trace 2>/dev/null || ls -la "$OUT" | grep trace || true
