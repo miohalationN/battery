@@ -87,14 +87,24 @@ macOS 满电保持、优化充电暂停、80% 充电上限均呈现 `externalCon
   时间线 = 启动静止窗（~12s，验证每秒采样不重建根视图/Chart）→ 连续滚动 ~50s。
   digest 由 `scripts/profile_digest.py` 导出（结论见 §十一，随 CI 完成补充）。
 
-## 八、CI / 安装 / 运行时证据（完成后填写）
+## 八、CI / 安装 / 运行时证据
 
-- Build run：_待填写_（build + swift test）
-- UI Profile run：_待填写_
-- Artifact sha256：_待填写_
-- 安装前备份：_待执行_
-- codesign / 哈希核对：_待执行_
-- 运行时验证（污染隔离效果、零 powermetrics、追加式写入）：_待执行_
+- Build run（最终代码）：全绿 —— `Test run with 86 tests in 12 suites passed`
+- UI Profile run：见 §十一（Instruments 取证，含迭代记录）
+- Artifact sha256（Build run 32601875482，commit fc8af96）：
+  - `Contents/MacOS/BatteryBar`: `1947634f783f456322e14680420384594b30ef58bea81d98afb0ab962240f68c`
+  - `Contents/Resources/BatteryBarHelper`: `208a2eb48e8501df2d898995c88b3325973760b3d2ba93ebbc85349be11f356c`
+- 安装前备份：
+  - 数据：`~/Library/Application Support/BatteryBar-backup-e199e59`（复制，原数据未动）
+  - 上一版 app：`~/.Trash/BatteryBar-d6ea815-*.app`
+- 安装：ditto 至 `/Users/mio/Applications/BatteryBar.app`；
+  `codesign --verify --deep --strict` 通过；安装后二进制哈希与 artifact 完全一致
+- 运行时验证（安装后）：
+  - 新快照携带 `externalConnected:true`（本机恰处满电接电未充电状态），遥测实测负载如实记录 ✓
+  - 污染隔离生效：最近 6h 负载均值旧规则 4.22W(n=212) → 新规则(trustedSystemLoad) 5.95W(n=135)，
+    77 个未知来源估算点被排除；数据本身未删改 ✓
+  - 零 `powermetrics` 进程；BatteryBar 进程 CPU 0.0% ✓
+  - journal 追加式写入保持：70s 观察窗 inode 不变、行数 +1 ✓
 
 ## 九、安全边界确认
 
