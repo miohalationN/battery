@@ -3,7 +3,7 @@ import Charts
 
 /// 历史曲线与实时指标隔离。父页面每秒刷新数字时，只要输入快照和显示开关不变，
 /// EquatableView 会跳过数百个 Chart marks 的重新构造。
-struct PowerChartPlot: View, Equatable {
+struct PowerChartPlot: View, @MainActor Equatable {
     let snapshots: [BatterySnapshot]
     let timeRange: TimeRange
     let showCPU: Bool
