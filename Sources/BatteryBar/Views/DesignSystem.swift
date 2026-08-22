@@ -123,33 +123,6 @@ extension View {
     }
 }
 
-/// 侧边栏选中项是导航控制层，macOS 26+ 使用真正的交互式 Liquid Glass；
-/// 旧系统保留低成本淡彩表面。由外层 GlassEffectContainer 统一渲染多个候选形状。
-struct NavigationSelectionSurface: View {
-    let isSelected: Bool
-    let tint: Color
-    let namespace: Namespace.ID
-
-    @ViewBuilder
-    var body: some View {
-        if isSelected {
-            if #available(macOS 26.0, *) {
-                Color.clear
-                    .glassEffect(
-                        .regular.tint(tint.opacity(0.18)).interactive(),
-                        in: .rect(cornerRadius: 10)
-                    )
-                    .glassEffectID("sidebar-selection", in: namespace)
-            } else {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(tint.opacity(0.105))
-            }
-        } else {
-            Color.clear
-        }
-    }
-}
-
 /// 页面首屏标题。把当前页面意图固定下来，替代旧 TabView 只显示一个小标签的弱层级。
 struct PageHeader: View {
     let title: String

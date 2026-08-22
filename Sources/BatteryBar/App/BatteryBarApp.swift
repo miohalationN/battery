@@ -431,9 +431,23 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
     private func sidebarButton(_ section: AppSection) -> some View {
         let isSelected = selectedSection == section
-        return Button {
+        if #available(macOS 26.0, *), isSelected {
+            sidebarButtonBase(section, isSelected: true)
+                .glassEffect(
+                    .regular.tint(section.tint.opacity(0.18)).interactive(),
+                    in: .rect(cornerRadius: 10)
+                )
+                .glassEffectID("sidebar-selection", in: sidebarGlassNamespace)
+        } else {
+            sidebarButtonBase(section, isSelected: isSelected)
+        }
+    }
+
+    private func sidebarButtonBase(_ section: AppSection, isSelected: Bool) -> some View {
+        Button {
             withAnimation(.easeOut(duration: 0.16)) {
                 selectedSection = section
             }
@@ -457,11 +471,12 @@ struct ContentView: View {
             .padding(.horizontal, 11)
             .padding(.vertical, 9)
             .background {
-                NavigationSelectionSurface(
-                    isSelected: isSelected,
-                    tint: section.tint,
-                    namespace: sidebarGlassNamespace
-                )
+                if #available(macOS 26.0, *) {
+                    Color.clear
+                } else {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(isSelected ? section.tint.opacity(0.105) : Color.clear)
+                }
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
