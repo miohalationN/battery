@@ -195,3 +195,54 @@ gate 为真实校验（红色必然代表必需取证不可读）。Build workfl
 |----------|------|------|
 | medium | 充电时段平均电池功率若不过滤暂停期样本，会被 ≈0W 稀释（测试先行暴露） | makeSummary 对充电时段仅取 isCharging 样本，配套断言 |
 | low | onBatterySegments 尾部可能产生零长时段 | drainRate 内 segmentSnaps.count>=2 校验天然过滤 |
+
+## 十一、1.1.0 品牌、同步与图表体验增量（2026-08-23）
+
+### 11.1 品牌与兼容边界
+
+- 基线 `5735451`，功能实现提交 `8456772`。用户可见名称统一为「电池监测」，副标题为
+  「电池与功耗记录」，版本升至 1.1.0（build 2）。菜单栏、侧栏、弹窗、Helper 授权文案
+  与应用元数据均使用新名称。
+- 为确保无感升级，内部 executable/target、bundle id `com.batterybar.app`、数据目录、
+  UserDefaults、Keychain、Helper/XPC 标识、WebDAV 远端路径及 GitHub artifact 名仍保留
+  `BatteryBar`。本次不迁移、不复制用户数据，也不要求重新授权。
+
+### 11.2 同步正确性与安全边界
+
+- `SyncEngine.applySchedule(config:)` 成为定时器唯一 owner：每次配置变化先撤销旧定时器；
+  禁用或手动模式不留后台 timer，启动与设置页修改立即应用。`lastSyncAt` 仅在真实同步成功
+  后更新，配置错误、禁用、并发跳过和网络失败均不会显示伪成功。
+- WebDAV 边界统一校验：只允许 HTTPS；HTTP 仅允许 localhost/127.0.0.1/::1。
+  Basic Auth 重定向只允许同 scheme、host、有效端口，拒绝降级和跨源凭据泄漏。
+- 回归覆盖 HTTPS/本机 HTTP/局域网明文/无 scheme、同源/跨源/降级重定向、调度状态转换
+  与禁用同步时间戳。未启用用户 WebDAV，未发起真实同步请求。
+
+### 11.3 图表与页面信息架构
+
+- 功耗曲线使用所选时段的固定墙钟域，不再让少量样本横向铺满 6/24 小时；默认 1 小时，
+  同时显示有效样本数和实际覆盖时长，避免用户把数据缺口误判为连续趋势。
+- 同步页新增「本机数据」摘要（历史点、可用离电记录、24 小时保留）；「采样间隔」明确为
+  「界面刷新间隔」，并说明历史仍每分钟写入。空态高度、卡片描边和弱文字对比度收紧，
+  9pt 辅助文字提升至 10pt；未新增常驻模糊、阴影或动画。
+- 本机对总览、功耗与同步三页做了运行态视觉检查：品牌层级、1 小时曲线口径、覆盖信息和
+  本机数据卡均正确；稳定状态 CPU 0.0%，无 `powermetrics` 进程。
+
+### 11.4 Gate、安装与限制
+
+- GitHub Build run [32621672266](https://github.com/miohalationN/battery/actions/runs/32621672266)
+  success：90 tests / 12 suites passed；package 与 artifact 上传均成功。本地 Swift parse、
+  非视图层 Swift 6 typecheck、测试 typecheck、shell `bash -n`、`git diff --check` 通过。
+  本机 CLT 缺 SwiftUIMacros，完整 SwiftUI 编译由 GitHub Xcode runner 证明。
+- 同提交 UI Profile run [32621672275](https://github.com/miohalationN/battery/actions/runs/32621672275)
+  success：总览/功耗均使用 `Animation Hitches` 模板，required trace 各 51 schema；两份
+  SwiftUI trace 各 25 schema，截图、digest 与四份 trace 已上传 artifact `9488955963`
+  （14 天保留）。该 gate 证明产物可读且模板正确；是否存在 hitch 仍以归档 GUI/descriptor
+  判读为准，不用 schema 数冒充帧率结论。
+- 已从 Build run `32621672266` 的 artifact 安装 `/Users/mio/Applications/BatteryBar.app`；显示名「电池监测」，
+  版本 1.1.0 (2)，`codesign --verify --deep --strict` 通过。安装主二进制 SHA-256
+  `cfd749b8ad159882dfb06038e1da6cf57cdc8030fe5cf849de3cdb03829e0760`，Helper
+  `69a6ccc23de033668df2b4be948e0d3f9e7562353935662845e3370469b7029d`；旧 app 已可恢复地
+  移至 `/Users/mio/.Trash/BatteryBar-pre-8456772-20260823-140010.app`，用户数据未触碰。
+- 未安装、启用或卸载 Helper，未触发管理员授权，未触碰其他生产/外部系统。限制：内部
+  `BatteryBar` 标识为兼容性设计，并非遗漏；尚未做公开发行所需 Developer ID/公证；
+  性能取证只能证明指定 runner/滚动窗口，不承诺所有硬件始终满帧。
