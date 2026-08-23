@@ -117,6 +117,20 @@ ENTITLEMENTS
 # 复制已签名 helper 可执行文件到 app bundle 的 Resources
 cp "$HELPER_STAGING/Contents/MacOS/$HELPER_NAME" "$APP_BUNDLE/Contents/Resources/"
 
+# 从 bundle 抽出的 Mach-O 不能沿用依赖 Info.plist 的旧签名；按其最终部署形态
+# 重新签名为独立 helper，否则严格校验与运行时 SecStaticCode 校验都会失败。
+codesign --force --sign - --identifier "$HELPER_BUNDLE_ID" --entitlements /dev/stdin \
+    "$APP_BUNDLE/Contents/Resources/$HELPER_NAME" << 'ENTITLEMENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>
+ENTITLEMENTS
+
 # 签名主应用
 codesign --force --sign - --entitlements /dev/stdin "$APP_BUNDLE" << 'ENTITLEMENTS'
 <?xml version="1.0" encoding="UTF-8"?>
