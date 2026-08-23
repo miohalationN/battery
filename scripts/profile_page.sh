@@ -145,8 +145,11 @@ main() {
   echo "$templates"
   local swiftui_tpl hitches_tpl
   swiftui_tpl="$(pick_template "$templates" "SwiftUI" "Time Profiler")"
-  hitches_tpl="$(pick_template "$templates" "Animation Hitches" "Hitches" "Core Animation FPS" "Time Profiler")"
-  echo "swiftui template: $swiftui_tpl ; hitches template: $hitches_tpl"
+  # 必需的 Hitches 取证不得回退到通用采样模板（如 Time Profiler）：
+  # 那样产物不含 hitch/FPS 表，却能在“存在任意 schema”校验下绿色通过。
+  # 候选仅限真正的 hitch 模板；不可用则 record 对必需语义返回非零。
+  hitches_tpl="$(pick_template "$templates" "Animation Hitches" "Hitches" "Core Animation FPS")"
+  echo "swiftui template: $swiftui_tpl ; hitches template: ${hitches_tpl:-<none>}"
 
   # 尽力取证：SwiftUI body 求值
   record "$swiftui_tpl" 75 "swiftui" best-effort

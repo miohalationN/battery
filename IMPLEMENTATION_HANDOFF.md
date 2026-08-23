@@ -128,6 +128,11 @@ macOS 满电保持、优化充电暂停、80% 充电上限均呈现 `externalCon
 3. workflow 曾用 `|| true` 吞掉 digest 错误、绿色≠有效 gate → 新增显式
    "Gate required traces" 步骤（存在性 + toc + schema 计数），digest 去除
    `|| true`（缺失→SKIP 退出 0；存在但损坏→非零），artifact 上传改 `if: always()`。
+4. （P2，复审发现）Hitches 模板候选末位曾回退 Time Profiler——通用采样 trace
+   不含 hitch/FPS 表却能通过"任意 schema"校验，冒充必需取证 → 已从 Hitches 候选
+   移除该回退（仅 Animation Hitches/Hitches/Core Animation FPS）；反例覆盖：
+   仅提供 Time Profiler 时 Hitches 模板必须为空、必需录制必须非零退出，
+   SwiftUI 尽力语义保留其回退（harness 扩至 10/10）。
 
 **更正**：早先报告把「power-hitches 51 schema」归到 run 32603697964 是错误的——
 该轮两个 power trace 均损坏（schemas=0）；51 schema 的 power-hitches 来自更早的
