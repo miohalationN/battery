@@ -113,37 +113,66 @@ macOS 满电保持、优化充电暂停、80% 充电上限均呈现 `externalCon
 - 不删除用户历史数据（污染点仅统计层隔离）；
 - 不扩大视觉重做范围（本轮仅状态表达、错误摘要、失效边界与休眠式采样钩子）。
 
-## 十一、Instruments / 性能证据（run 32603697964 及前序迭代）
+## 十一、Instruments / 性能证据（最终 run 32614419174）
 
-**产出**（artifact `ui-profile`，retention 14 天，trace 可用 Instruments.app 打开复核）：
-- `usage-swiftui.trace` / `usage-hitches.trace`：概览页 SwiftUI 模板（25 schema，含
-  swiftui-updates/swiftui-causes/hitches 等）与 Animation Hitches 模板（完整录制）；
-- `power-hitches.trace`：功耗页 Animation Hitches 模板（51 schema 完整录制）；
-- `power-swiftui.trace`：该次录制损坏（xctrace 偶发 rc=42，脚本已带 3 次重试 + 看门狗，
-  属 runner 虚拟机上的工具链不稳定，非代码问题）。
-- 录制时间线：启动静止观察窗 ~12s（每秒采样照常运行）→ 自动滚动 ~50s（UserDefaults
-  门控钩子驱动线性动画连续滚动）。
+### 11.1 取证闭环修正（review 发现项）
 
-**工具链限制（如实报告）**：
-- `xctrace export --xpath` 在 Xcode 26.6 工具链上对全部目标表（swiftui-updates、
-  hitches* 等，已尝试 5 种 xpath 变体）只返回**表 schema 定义，不返回行数据**，
-  因此视图 body 求值次数与 hitch 时长无法在 CLI 量化；行级判读需用 Instruments.app
-  打开归档 trace。
-- 导出的 hitches 表为空结构（VM 合成管线可能不产生 hitch 遥测），不能据此断言
-  "零 hitch"，只能断言"未提取到 hitch 行"。
+前序 run 32603697964 存在三处取证流程缺陷，均已修复并有本地反例覆盖：
+1. `.trace` 是目录包，旧脚本用 `-f` 判断导致成功产物被误判失败 → 改为 `-e`
+   + 实际执行 `xctrace export --toc` 且输出含 ≥1 个 schema 才接受；
+2. 三次失败后固定 `return 0` → 必需取证（两页 hitches）三次重试后非零退出；
+   swiftui trace 保持尽力语义并显式告警；`rm` 目标限定 /tmp 白名单精确文件名，
+   白名单外路径拒绝清理（exit 2）；main 置于 BASH_SOURCE guard 下可被测试
+   harness source——stub xcrun 反例 7/7 通过（坏目录拒绝/好目录接受/白名单
+   拒绝/三次失败非零且产物清理/成功接受/尽力容忍）。
+3. workflow 曾用 `|| true` 吞掉 digest 错误、绿色≠有效 gate → 新增显式
+   "Gate required traces" 步骤（存在性 + toc + schema 计数），digest 去除
+   `|| true`（缺失→SKIP 退出 0；存在但损坏→非零），artifact 上传改 `if: always()`。
 
-**本机统计性证据（真实硬件、已安装 release 构建，`/usr/bin/sample` 10s / 7610 采样）**：
-- 主线程 7599/7610（99.87%）阻塞在 `mach_msg_trap`（RunLoop 事件等待）；
-- 仅 11 个采样（0.14%）位于 Swift 并发任务完成例程（每秒采样 tick）；
-- **10 秒内主线程没有出现任何 SwiftUI body 求值 / 视图布局 / Chart 渲染栈**。
-  对照校准：历史上 objectWillChange 每秒风暴 + 全树重建时代同类测量为 ~40% CPU
-  （MAINTENANCE_PLAN T-29/T-30）——若每秒采样仍重建页面根或历史 Chart，
-  必然在主线程留下周期性 body/layout 栈与高 CPU；实测为零。
-- 配合 ps 实测 CPU 0.0%、代码中根视图仅读低频属性的结构边界，
+**更正**：早先报告把「power-hitches 51 schema」归到 run 32603697964 是错误的——
+该轮两个 power trace 均损坏（schemas=0）；51 schema 的 power-hitches 来自更早的
+run 32601875487。下表以最终 run 为准。
+
+### 11.2 最终 run 32614419174 结果（四份 trace 全部有效，首次齐备）
+
+| trace | 模板 | schema 数 | gate | 体积 |
+|-------|------|-----------|------|------|
+| usage-hitches | Animation Hitches | 51 | 必需 ✓ | 186MB |
+| power-hitches | Animation Hitches | 51 | 必需 ✓ | 131MB |
+| usage-swiftui | SwiftUI | 25 | 尽力 ✓ | 117MB |
+| power-swiftui | SwiftUI | 25 | 尽力 ✓ | 116MB |
+
+录制时间线：启动静止观察窗 ~12s（每秒采样照常运行）→ 自动滚动 ~50s
+（UserDefaults 门控钩子驱动线性动画连续滚动）。workflow 结论 success 且
+gate 为真实校验（红色必然代表必需取证不可读）。Build workflow 对同提交全绿。
+
+### 11.3 工具链限制与需用户明确接受的项
+
+- **行级指标需人工判读**：`xctrace export --xpath` 在 Xcode 26.6 工具链上对全部
+  目标表（swiftui-updates、hitches* 等，已试 5 种 xpath 变体）只返回表 schema
+  定义、不返回行数据。因此可见 hitch 数量/最长 hitch 时长无法在 CLI 量化，
+  **本执行方也无可用的 Instruments.app**（本机仅有 CLT，无 Xcode/Instruments），
+  无法完成人工打开 trace 的第 6 项要求——请用户在装有 Xcode 的机器上打开
+  artifact 中归档的四份 trace 判读 hitch 数值，此项作为需用户明确接受的限制保留。
+- 因此**不得宣称"零 hitch"或"跑满帧率"**；CLI 仅证明 trace 可读且结构完整
+  （schema 齐备），hitch 行提取数为 0 属导出能力限制而非测量结论。
+
+### 11.4 本机统计性证据（真实硬件、已安装 release 构建）
+
+- `/usr/bin/sample` 10s / 7610 采样：主线程 7599/7610（99.87%）阻塞在
+  `mach_msg_trap`（RunLoop 事件等待），仅 11 个采样（0.14%）位于 Swift 并发
+  任务完成例程（每秒采样 tick）；10 秒内主线程无任何 SwiftUI body 求值 /
+  视图布局 / Chart 渲染栈。
+- 对照校准：历史上 objectWillChange 每秒风暴 + 全树重建时代同类测量约 40% CPU
+  （MAINTENANCE_PLAN T-29/T-30）——若每秒采样仍重建页面根或历史 Chart，必然
+  留下周期性 body/layout 栈与高 CPU；实测为零。
+- 配合 ps 实测 CPU 0.0% 与根视图仅读低频属性的代码结构，
   构成"每秒采样不重建页面根/历史 Chart"的证据链。
 
-**已安装二进制与最终代码一致性**：安装产物取自 Build run 32601875482（commit fc8af96）；
-其后提交仅涉及采样脚本与文档（.py/.sh/.md），app 源码无变化。
+### 11.5 已安装二进制一致性
+
+安装产物取自 Build run 32601875482（commit fc8af96）；其后提交仅涉及采样脚本、
+工作流与文档（.py/.sh/.yml/.md），app 源码无变化，无需重装。
 
 ## 十、自审发现（可操作项）
 
