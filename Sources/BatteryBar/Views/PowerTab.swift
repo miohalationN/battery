@@ -158,7 +158,7 @@ struct PowerTab: View {
     private var dataSourceFootnote: some View {
         HStack(spacing: 4) {
             Image(systemName: "info.circle").font(.system(size: 10))
-            Text("系统负载优先来自 IORegistry 系统遥测，离电时以电池放出功率估算，接电无遥测时不显示。CPU/GPU 为 powermetrics 实测；显示器按亮度估算。")
+            Text("系统负载优先来自 IORegistry 系统遥测，离电时以电池放出功率估算，接电无遥测时不显示。CPU/GPU 为 powermetrics 模型估算；显示器按亮度估算。")
                 .font(.system(size: 10))
         }
         .foregroundStyle(.secondary)
@@ -237,7 +237,7 @@ private struct PowerLoadHero: View {
 private struct ComponentBreakdownCard: View {
     let sampler: PowerSampler
 
-    /// 组件样本新鲜度阈值：powermetrics 每 ~15s 一轮，超过 30s 视为陈旧
+    /// powermetrics 每 10s 产出、App 每 15s 取缓存，超过 30s 视为陈旧。
     private static let freshnessLimit: TimeInterval = 30
 
     var body: some View {
@@ -256,7 +256,7 @@ private struct ComponentBreakdownCard: View {
                 stalenessNote
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle").font(.system(size: 9))
-                    Text("\"其他\"含主板、SSD、外接设备等无法单独计量的部分").font(.system(size: 9))
+                    Text("分项为模型估算，不能相加当作整机精密功率计").font(.system(size: 10))
                 }
                 .foregroundStyle(.tertiary)
             } else {
@@ -264,7 +264,7 @@ private struct ComponentBreakdownCard: View {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 13))
                         .foregroundStyle(.tertiary)
-                    Text("开启下方「高级采样」后显示 CPU/GPU 实测分项")
+                    Text("开启下方「分项功耗采样」后显示 CPU/GPU 模型估算")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -281,7 +281,7 @@ private struct ComponentBreakdownCard: View {
         if Date().timeIntervalSince(sampler.lastComponentPowerAt) > Self.freshnessLimit {
             HStack(spacing: 4) {
                 Image(systemName: "clock.badge.exclamationmark").font(.system(size: 9))
-                Text("分项样本已过期，正在等待下一轮采样").font(.system(size: 9))
+                Text("分项样本尚未就绪或已过期，正在等待下一轮").font(.system(size: 10))
             }
             .foregroundStyle(.secondary)
         }
@@ -289,7 +289,7 @@ private struct ComponentBreakdownCard: View {
 
     private func componentBar(label: String, value: Double, icon: String, color: Color, measured: Bool) -> some View {
         let total = sampler.currentWattage
-        let percentVisible = measured && sampler.currentPowerAvailable
+        let percentVisible = measured && sampler.currentPowerAvailable && !sampler.currentPowerIsEstimated
             && Date().timeIntervalSince(sampler.lastComponentPowerAt) <= Self.freshnessLimit
         let percentage = percentVisible && total > 0 ? min(100, value / total * 100) : 0
         return HStack(spacing: 10) {
@@ -329,7 +329,7 @@ private struct PowerDiagnosticsSection: View {
             DisclosureGroup(isExpanded: $expanded) {
                 VStack(spacing: 8) {
                     diagRow("电池电压", sampler.currentVoltage > 0 ? String(format: "%.0f mV", sampler.currentVoltage) : "—")
-                    diagRow("电池电流", sampler.currentAmperage != 0 ? String(format: "%.0f mA", sampler.currentAmperage) : "—")
+                    diagRow("瞬时电流", sampler.currentAmperage != 0 ? String(format: "%.0f mA", sampler.currentAmperage) : "—")
                     diagRow("电池温度", sampler.currentTemperature > 0.5 ? String(format: "%.1f °C", sampler.currentTemperature) : "—")
                     diagRow("适配器输入功率", adapterInputText)
                     diagRow("适配器额定功率", adapterWattsText)
@@ -349,7 +349,8 @@ private struct PowerDiagnosticsSection: View {
     }
 
     private var adapterInputText: String {
-        guard let watts = sampler.currentInfo?.adapterInputPower, watts > 0 else { return "—" }
+        let watts = sampler.currentAdapterInputPower
+        guard watts > 0 else { return "—" }
         return String(format: "%.1f W", watts)
     }
 
@@ -377,9 +378,9 @@ private struct AdvancedSamplingCard: View {
                     .font(.system(size: 14))
                     .foregroundStyle(enabled ? Color.green : Color.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("高级采样（Helper 服务）")
+                    Text("分项功耗采样（Helper）")
                         .font(.system(size: 13, weight: .semibold))
-                    Text(enabled ? "已启用 — 正在以 powermetrics 读取 CPU/GPU 分项" : "默认关闭 — 不运行任何特权服务")
+                    Text(enabled ? "已启用 — 每 10 秒读取 CPU/GPU 模型估算" : "默认关闭 — 不运行 powermetrics")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -409,16 +410,16 @@ private struct AdvancedSamplingCard: View {
                     .controlSize(.small)
                 }
             }
-            if enabled && sampler.helperNeedsUpdate {
+            if sampler.helperNeedsUpdate {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
-                    Text("Helper 需要更新，请关闭后重新开启").font(.system(size: 10))
+                    Text("Helper 需要更新；再次主动开启时会请求管理员授权").font(.system(size: 10))
                 }
                 .foregroundStyle(.orange)
             }
             HStack(spacing: 4) {
                 Image(systemName: "info.circle").font(.system(size: 9))
-                Text("开启需要一次管理员密码授权，用于安装读取 powermetrics 的后台服务；关闭后零 powermetrics 调用").font(.system(size: 9))
+                Text("开启需一次管理员授权；结果适合观察本机趋势，不适合跨机型比较。关闭后零 powermetrics 调用").font(.system(size: 10))
             }
             .foregroundStyle(.tertiary)
         }

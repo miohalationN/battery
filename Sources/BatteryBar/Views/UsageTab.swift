@@ -326,7 +326,9 @@ private struct HealthMetricsGrid: View {
 
     var body: some View {
         HStack(spacing: BBDesign.itemSpacing) {
-            StatTile(icon: "heart.fill", tint: .bbMint, value: String(format: "%.0f", sampler.systemHealthPercent), unit: "%", label: "健康度")
+            StatTile(icon: "heart.fill", tint: .bbMint,
+                     value: sampler.systemHealthPercent > 0 ? String(format: "%.0f", sampler.systemHealthPercent) : "—",
+                     unit: sampler.systemHealthPercent > 0 ? "%" : "", label: "健康度")
             StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环次数")
             StatTile(icon: "thermometer", tint: .orange,
                      value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
@@ -357,7 +359,7 @@ private struct BatteryDetailSection: View {
                     infoTile("序列号", value: info?.serialNumber ?? "—", icon: "number")
                     infoTile("设计容量", value: designCapacityString, icon: "doc.text")
                     infoTile("电压", value: sampler.currentVoltage > 0 ? String(format: "%.0f mV", sampler.currentVoltage) : "—", icon: "bolt")
-                    infoTile("电流", value: sampler.currentAmperage != 0 ? String(format: "%.0f mA", sampler.currentAmperage) : "—", icon: "arrow.left.arrow.right")
+                    infoTile("瞬时电流", value: sampler.currentAmperage != 0 ? String(format: "%.0f mA", sampler.currentAmperage) : "—", icon: "arrow.left.arrow.right")
                     infoTile("充电协议", value: info?.adapterProtocol ?? "—", icon: "powerplug")
                     infoTile("适配器额定", value: adapterWattsString, icon: "power")
                 }

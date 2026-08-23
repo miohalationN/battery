@@ -232,10 +232,12 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle("电池健康")
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(String(format: "%.0f", sampler.systemHealthPercent))
+                Text(sampler.systemHealthPercent > 0 ? String(format: "%.0f", sampler.systemHealthPercent) : "—")
                     .font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(healthColor)
-                Text("%").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                if sampler.systemHealthPercent > 0 {
+                    Text("%").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Text(healthLabel)
                     .font(.system(size: 11, weight: .medium))
@@ -260,12 +262,14 @@ struct PopoverView: View {
     }
 
     private var healthLabel: String {
+        if sampler.systemHealthPercent <= 0 { return "暂不可用" }
         if sampler.systemHealthPercent >= 90 { return "良好" }
         if sampler.systemHealthPercent >= 80 { return "一般" }
         return "建议检修"
     }
 
     private var healthColor: Color {
+        if sampler.systemHealthPercent <= 0 { return .secondary }
         if sampler.systemHealthPercent >= 90 { return .green }
         if sampler.systemHealthPercent >= 80 { return .orange }
         return .red

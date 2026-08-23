@@ -93,7 +93,7 @@
 
 - 主值为「系统负载」，标注数据来源（系统遥测 / 电池侧估算 / 当前不可用）；
   电池充入/放出功率作为独立次级指标，不再混叫总功耗
-- 负载构成：CPU/GPU 为 powermetrics 实测；显示器明确标「估算」；
+- 负载构成：CPU/GPU 为 powermetrics 模型估算；显示器明确标「估算」；
   占比只在系统负载有效且分项样本新鲜（<30s）时显示，否则仅显示绝对瓦数
 - 历史趋势：系统负载曲线（240 保峰点）；统计只使用系统负载可用的快照
 - 电压/电流/温度/适配器输入功率等诊断收进默认折叠的「电源诊断」
@@ -155,9 +155,9 @@
 | 图表 | Swift Charts | 24h 功耗序列按时间桶保留局部极值，最多 240 点；Chart 隔离为 Equatable 子树，实时数字更新不重建历史 marks |
 | 持久化 | JSON 文件（DataStore，串行队列保护） | 原设计 SwiftData，实现期替换 |
 | 电池数据 | IOKit（IOPS + AppleSmartBattery registry） | **已适配 macOS 27**：容量字段改读 `BatteryData` 嵌套字典 |
-| 分项功耗 | XPC Helper + `powermetrics`（root，可选） | 原设计 IOReport（私有框架不稳定）。4.1 延续懒启动流式进程（首个请求启动，60s 空闲自停），直接拒绝未授权 XPC；App 端缓存版本校验并禁止采样任务重叠 |
+| 分项功耗 | XPC Helper + `powermetrics`（root，可选） | 原设计 IOReport（私有框架不稳定）。4.2 延续懒启动流式进程（首个请求启动，60s 空闲自停），直接拒绝未授权 XPC；显式返回样本时间/可用性，0W 不再误判失败；App 端缓存版本校验并禁止采样任务重叠 |
 | 健康度 | `system_profiler`（60s 缓存） | — |
-| 温度 | IORegistry `Temperature` 键 | Apple Silicon 部分系统不暴露，UI 显示「—」 |
+| 温度 | IORegistry `AppleSmartBattery` + `AppleSmartBatteryPack/BatteryData.Temperature` | 新系统 pack 传感器移到子服务；百分之一摄氏度归一化并做合理范围过滤，所有候选均缺失时显示「—」 |
 | 电源事件 | NSWorkspace 通知（SleepWatcher） | — |
 | 通知 | UserNotifications | — |
 | WebDAV | 自建 URLSession + XMLParser | 无第三方依赖 |

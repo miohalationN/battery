@@ -34,8 +34,9 @@ final class PowerSampler {
     private(set) var currentTemperature: Double = 0
     private(set) var currentVoltage: Double = 0
     private(set) var currentAmperage: Double = 0
+    private(set) var currentAdapterInputPower: Double = 0
     private(set) var currentInfo: BatteryInfo?
-    private(set) var systemHealthPercent: Double = 100
+    private(set) var systemHealthPercent: Double = 0
     /// 最近一次采样时刻（视图不观察；每秒写它只会让状态栏刷新，不该波及任何视图）
     private(set) var lastUpdateTime: Date = Date()
 
@@ -99,7 +100,7 @@ final class PowerSampler {
         // 启动时读取当前电源状态
         let ps = reader.readPowerSource()
         let info = reader.readBatteryInfo()
-        let currentlyPluggedIn = info?.externalConnected ?? ps.isPluggedIn
+        let currentlyPluggedIn = info?.externalConnected ?? ps?.isPluggedIn ?? usage.wasExternalConnected
 
         if currentlyPluggedIn {
             // 启动时在充电：保留上次统计，当前统计清零
@@ -153,7 +154,7 @@ final class PowerSampler {
             let health = await Task.detached(priority: .userInitiated) {
                 reader.readSystemHealthPercent()
             }.value
-            self.systemHealthPercent = health
+            if health != self.systemHealthPercent { self.systemHealthPercent = health }
         }
 
         // 后台预加载静态信息（机器型号、序列号、制造商），避免主线程每秒 spawn system_profiler。
@@ -161,17 +162,18 @@ final class PowerSampler {
         // Observation 只失效读取该属性的视图。
         reader.prefetchStaticInfo()
 
-        // Helper 服务：仅在用户开启时检查/安装（XPC 版本检测 + osascript 均为阻塞调用）
+        // Helper 服务：启动时只做版本检查，不可因应用升级在后台突然弹管理员授权。
+        // 版本不匹配时关闭运行态开关；用户再次主动开启才执行安装/更新。
         if helperEnabled {
             Task { @MainActor in
                 let needsUpdate = await Task.detached(priority: .utility) {
                     reader.needsHelperUpdate()
                 }.value
-                guard needsUpdate else { return }
-                let installed = await Task.detached(priority: .utility) {
-                    reader.installHelperIfNeeded()
-                }.value
-                self.helperNeedsUpdate = !installed
+                self.helperNeedsUpdate = needsUpdate
+                if needsUpdate {
+                    UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
+                    self.helperEnabled = false
+                }
             }
         }
 
@@ -259,7 +261,9 @@ final class PowerSampler {
     }
 
     private func sampleUI() {
-        let ps = reader.readPowerSource()
+        // IOPS 在睡眠切换/驱动重载时可能瞬时失败。此时保留上次 UI 状态，不能把
+        // 失败合成为 0%/离电并污染插拔状态机。
+        guard let ps = reader.readPowerSource() else { return }
         let info = reader.readBatteryInfo()
 
         let previousCharging = currentIsCharging
@@ -309,6 +313,9 @@ final class PowerSampler {
         if (info?.temperature ?? 0) != currentTemperature { currentTemperature = info?.temperature ?? 0 }
         if (info?.voltage ?? 0) != currentVoltage { currentVoltage = info?.voltage ?? 0 }
         if (info?.instantAmperage ?? 0) != currentAmperage { currentAmperage = info?.instantAmperage ?? 0 }
+        if abs((info?.adapterInputPower ?? 0) - currentAdapterInputPower) > 0.05 {
+            currentAdapterInputPower = info?.adapterInputPower ?? 0
+        }
         // currentInfo 只承载界面使用的元数据。电压、电流、温度和功率已有独立
         // 可观察字段；若把这些高频值也纳入 BatteryInfo 等值比较，会平白多触发
         // 一次读取该属性的视图更新。
@@ -338,8 +345,10 @@ final class PowerSampler {
                     (reader.readComponentPower(), reader.estimateDisplayPower())
                 }.value
                 self.isComponentPowerSampleInFlight = false
-                if component.cpu > 0 || component.gpu > 0 || component.dram > 0 {
-                    self.lastComponentPowerAt = Date()
+                if component.isAvailable,
+                   Date().timeIntervalSince(component.sampledAt) >= 0,
+                   Date().timeIntervalSince(component.sampledAt) < 120 {
+                    self.lastComponentPowerAt = component.sampledAt
                 }
                 if abs(self.cpuPower - component.cpu) > 0.02 { self.cpuPower = component.cpu }
                 if abs(self.gpuPower - component.gpu) > 0.02 { self.gpuPower = component.gpu }
@@ -392,7 +401,8 @@ final class PowerSampler {
     }
 
     private func sampleStorage() {
-        let ps = reader.readPowerSource()
+        // 采集失败时跳过这一分钟；伪造 0% 快照比一个明确的数据缺口更有害。
+        guard let ps = reader.readPowerSource() else { return }
         let info = reader.readBatteryInfo()
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
 

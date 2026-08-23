@@ -7,8 +7,8 @@ set -e
 
 APP_NAME="BatteryBar"
 PRODUCT_NAME="电池监测"
-APP_VERSION="1.1.0"
-APP_BUILD="2"
+APP_VERSION="1.2.0"
+APP_BUILD="3"
 HELPER_NAME="BatteryBarHelper"
 # 分发用 release 构建：debug 构建的 Swift 6 运行时在实测中空转约 40% CPU
 # （2026-08-22 排查，详见 MAINTENANCE_PLAN T-29），release 构建空闲为 0

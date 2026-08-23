@@ -41,10 +41,16 @@ let package = Package(
     name: "BatteryBar",
     platforms: [.macOS(.v14)],
     targets: [
+        // App 与特权 Helper 共用的纯解析/归一化逻辑，保持协议两端口径一致并可单测。
+        .target(
+            name: "TelemetryCore",
+            dependencies: [],
+            path: "Sources/TelemetryCore"
+        ),
         // 主应用
         .executableTarget(
             name: "BatteryBar",
-            dependencies: [],
+            dependencies: ["TelemetryCore"],
             path: "Sources/BatteryBar",
             resources: [
                 .copy("Resources/AppIcon.png"),
@@ -61,13 +67,13 @@ let package = Package(
         // Privileged Helper Tool
         .executableTarget(
             name: "BatteryBarHelper",
-            dependencies: [],
+            dependencies: ["TelemetryCore"],
             path: "Sources/BatteryBarHelper"
         ),
         // 单元测试
         .testTarget(
             name: "BatteryBarTests",
-            dependencies: ["BatteryBar"],
+            dependencies: ["BatteryBar", "TelemetryCore"],
             path: "Tests/BatteryBarTests",
             swiftSettings: testingSwiftSettings,
             linkerSettings: testingLinkerSettings

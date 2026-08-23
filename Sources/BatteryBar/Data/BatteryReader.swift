@@ -86,22 +86,32 @@ final class BatteryReader: @unchecked Sendable {
     private var helperReadyCache: (ready: Bool, checkedAt: Date)?
     private let helperStatusTTL: TimeInterval = 300
 
-    func readPowerSource() -> PowerSourceInfo {
+    func readPowerSource() -> PowerSourceInfo? {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [Any],
-              let first = list.first,
-              let desc = IOPSGetPowerSourceDescription(info, first as CFTypeRef)?.takeUnretainedValue() as? [String: Any]
+              !list.isEmpty
         else {
-            return PowerSourceInfo(level: 0, isCharging: false, isPluggedIn: false, timeRemaining: -1, capacity: 0)
+            return nil
         }
 
-        let capacity = desc[kIOPSCurrentCapacityKey] as? Int ?? 0
-        let maxCap = desc[kIOPSMaxCapacityKey] as? Int ?? 100
-        let level = maxCap > 0 ? Double(capacity) / Double(maxCap) * 100 : 0
+        let descriptions = list.compactMap {
+            IOPSGetPowerSourceDescription(info, $0 as CFTypeRef)?.takeUnretainedValue() as? [String: Any]
+        }
+        guard let desc = descriptions.first(where: {
+            ($0[kIOPSTypeKey] as? String) == kIOPSInternalBatteryType
+        }) ?? descriptions.first,
+              let capacity = desc[kIOPSCurrentCapacityKey] as? Int,
+              let maxCap = desc[kIOPSMaxCapacityKey] as? Int,
+              maxCap > 0,
+              capacity >= 0 else { return nil }
+
+        let level = min(100, max(0, Double(capacity) / Double(maxCap) * 100))
         let isCharging = desc[kIOPSIsChargingKey] as? Bool ?? false
         let powerSource = desc[kIOPSPowerSourceStateKey] as? String ?? ""
         let isPluggedIn = powerSource == kIOPSACPowerValue
-        let timeRemaining = desc[kIOPSTimeToEmptyKey] as? Int ?? -1
+        let timeRemaining = (isCharging
+            ? desc[kIOPSTimeToFullChargeKey] as? Int
+            : desc[kIOPSTimeToEmptyKey] as? Int) ?? -1
 
         return PowerSourceInfo(level: level, isCharging: isCharging, isPluggedIn: isPluggedIn, timeRemaining: timeRemaining, capacity: capacity)
     }
@@ -112,38 +122,74 @@ final class BatteryReader: @unchecked Sendable {
         defer { IOObjectRelease(service) }
 
         // macOS 27+：顶层 DesignCapacity 已移除，改放到 BatteryData 嵌套字典里
-        let designCap = readInt(service, "DesignCapacity")
-            ?? readNestedInt(service, "BatteryData", key: "DesignCapacity") ?? 0
+        // 新系统把温度等 pack 级数据移到了 AppleSmartBatteryPack/BatteryData；
+        // 只匹配 AppleSmartBattery 会漏掉本机真实存在的传感器数据。
+        let packService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBatteryPack"))
+        defer { if packService != 0 { IOObjectRelease(packService) } }
+
+        let designCap = Self.firstValidCapacity([
+            readInt(service, "DesignCapacity"),
+            readNestedInt(service, "BatteryData", key: "DesignCapacity"),
+            readNestedInt(packService, "BatteryData", key: "DesignCapacity"),
+        ])
         // 顶层 MaxCapacity 语义随系统版本变化：
         //   - 旧系统：mAh（>1000）
         //   - macOS 27+：健康度百分比（≤100）
         let maxCapRaw = readInt(service, "MaxCapacity") ?? 100
         // 实际满充容量（mAh）：优先 BatteryData.FullChargeCapacity（macOS 27+），
         // 其次 FccComp1（部分旧系统），再退到旧版顶层 mAh 或百分比推算
-        let fcc = readNestedInt(service, "BatteryData", key: "FullChargeCapacity")
-            ?? readNestedInt(service, "BatteryData", key: "FccComp1")
+        let fcc = Self.firstValidCapacity([
+            readNestedInt(service, "BatteryData", key: "FullChargeCapacity"),
+            readNestedInt(service, "BatteryData", key: "FccComp1"),
+            readNestedInt(packService, "BatteryData", key: "FullChargeCapacity"),
+            readNestedInt(packService, "BatteryData", key: "FccComp1"),
+        ])
         let actualMaxCap: Int
-        if let fcc, fcc > 0 {
+        if fcc > 0 {
             actualMaxCap = fcc
         } else if maxCapRaw > 1000 {
-            actualMaxCap = maxCapRaw
+            actualMaxCap = Self.normalizedCapacity(maxCapRaw)
         } else if designCap > 0 {
-            actualMaxCap = designCap * maxCapRaw / 100
+            actualMaxCap = Self.normalizedCapacity(designCap * maxCapRaw / 100)
         } else {
             actualMaxCap = 0
         }
 
-        let cycles = readInt(service, "CycleCount") ?? 0
-        let voltage = readDouble(service, "Voltage") ?? 0
-        let amperage = readInt(service, "InstantAmperage") ?? readInt(service, "Amperage") ?? 0
-        let temp = readDouble(service, "Temperature") ?? 0
+        let cycles = Self.firstValidCycleCount([
+            readInt(service, "CycleCount"),
+            readNestedInt(packService, "BatteryData", key: "CycleCount"),
+        ])
+        let voltage = Self.firstValidDouble([
+            readDouble(service, "Voltage"),
+            readNestedDouble(service, "BatteryData", key: "Voltage"),
+            readNestedDouble(packService, "BatteryData", key: "Voltage"),
+        ], normalize: Self.normalizedBatteryVoltage)
+        let amperageCandidates = [
+            readDouble(service, "InstantAmperage"),
+            readDouble(service, "Amperage"),
+            readNestedDouble(service, "BatteryData", key: "InstantAmperage"),
+            readNestedDouble(service, "BatteryData", key: "Amperage"),
+            readNestedDouble(packService, "BatteryData", key: "InstantAmperage"),
+            readNestedDouble(packService, "BatteryData", key: "Amperage"),
+        ].compactMap { $0 }
+        let amperage = amperageCandidates.first(where: {
+            $0.isFinite && abs($0) <= 30_000
+        }).map(Self.normalizedBatteryCurrent) ?? 0
+        let temperature = Self.firstValidDouble([
+            readDouble(service, "Temperature"),
+            readNestedDouble(service, "BatteryData", key: "Temperature"),
+            readDouble(packService, "Temperature"),
+            readNestedDouble(packService, "BatteryData", key: "Temperature"),
+            readNestedDouble(packService, "BatteryData", key: "VirtualTemperature"),
+        ], normalize: Self.normalizedBatteryTemperature)
         // IORegistry 顶层字段名实测：Serial / DeviceName（不是 SerialNumber / DeviceName）
         // DeviceName 是电池管理芯片型号（如 bq20z451），不是机器型号
         let batteryChipName = readString(service, "DeviceName") ?? ""
         var serial = readString(service, "Serial") ?? readString(service, "SerialNumber") ?? ""
         var mfg = readString(service, "Manufacturer") ?? ""
-        let isCharging = readBool(service, "IsCharging")
-        let externalConnected = readBool(service, "ExternalConnected")
+        let powerSource = readPowerSource()
+        let isCharging = readOptionalBool(service, "IsCharging") ?? powerSource?.isCharging ?? false
+        let externalConnected = readOptionalBool(service, "ExternalConnected") ?? powerSource?.isPluggedIn ?? false
 
         // Fallback：Apple Silicon 上 AppleSmartBattery 不暴露 Manufacturer/Serial，
         // 用缓存的 system_profiler 兜底（首次可能为空，等 prefetchStaticInfo 完成后填充）
@@ -163,22 +209,30 @@ final class BatteryReader: @unchecked Sendable {
             deviceName = batteryChipName
         }
 
-        let batteryPower = abs(voltage * Double(amperage)) / 1_000_000
+        // 优先使用电源遥测/电池控制器直接给出的 BatteryPower（mW）。电压×瞬时电流
+        // 只作最后兜底：瞬时电流在满电维持阶段抖动明显，不能替代控制器功率口径。
+        let directBatteryPower = Self.firstValidDouble([
+            readNestedDouble(service, "PowerTelemetryData", key: "BatteryPower"),
+            readNestedDouble(service, "BatteryData", key: "BatteryPower"),
+            readNestedDouble(packService, "BatteryData", key: "BatteryPower"),
+        ], normalize: Self.normalizedBatteryPower)
+        let calculatedBatteryPower = abs(voltage * amperage) / 1_000_000
+        let batteryPower = directBatteryPower > 0 ? directBatteryPower : calculatedBatteryPower
 
         // Apple Silicon 的 PowerTelemetryData 提供系统负载与适配器输入功率，单位 mW。
         // 旧实现把 batteryPower（充电时只是电池包净流入功率）标成“系统总功耗”，
         // 在接电且满电时会显示 0.x W，而机器真实负载通常仍有数瓦到十几瓦。
-        let telemetrySystemLoad = Self.normalizedTelemetryPower(
+        let telemetrySystemLoad = Self.normalizedTelemetryMilliwatts(
             readNestedDouble(service, "PowerTelemetryData", key: "SystemLoad")
         )
-        let telemetryInputPower = Self.normalizedTelemetryPower(
+        let telemetryInputPower = Self.normalizedTelemetryMilliwatts(
             readNestedDouble(service, "PowerTelemetryData", key: "SystemPowerIn")
         )
 
-        let legacySystemPower = Self.normalizedTelemetryPower(
-            readNestedDouble(service, "BatteryData", key: "SystemPower")
-                ?? readNestedDouble(service, "BatteryData", key: "AdapterPower")
-        )
+        let legacySystemPower = Self.firstValidDouble([
+            readNestedDouble(service, "BatteryData", key: "SystemPower"),
+            readNestedDouble(service, "BatteryData", key: "AdapterPower"),
+        ], normalize: Self.normalizedTelemetryPower)
         let systemPower: Double
         let systemPowerAvailable: Bool
         let systemPowerIsEstimated: Bool
@@ -211,8 +265,8 @@ final class BatteryReader: @unchecked Sendable {
             serialNumber: serial,
             manufacturer: mfg,
             voltage: voltage,
-            instantAmperage: Double(amperage),
-            temperature: temp / 100.0,
+            instantAmperage: amperage,
+            temperature: temperature,
             isCharging: isCharging,
             externalConnected: externalConnected,
             systemPower: systemPower,
@@ -234,6 +288,74 @@ final class BatteryReader: @unchecked Sendable {
         let watts = raw > 250 ? raw / 1000.0 : raw
         guard watts > 0, watts < 500 else { return 0 }
         return watts
+    }
+
+    /// PowerTelemetryData 的单位由节点定义为 mW；显式换算避免小于 250mW 时被启发式误判为 W。
+    static func normalizedTelemetryMilliwatts(_ raw: Double?) -> Double {
+        guard let raw, raw.isFinite, raw > 0, raw < 500_000 else { return 0 }
+        let watts = raw / 1_000
+        return watts > 0 && watts < 500 ? watts : 0
+    }
+
+    /// 电池包直接功率允许正负号（充入/放出），对外统一返回绝对瓦数。
+    static func normalizedBatteryPower(_ raw: Double?) -> Double {
+        guard let raw, raw.isFinite, abs(raw) > 0, abs(raw) < 500_000 else { return 0 }
+        let watts = abs(raw) / 1_000
+        return watts > 0 && watts < 500 ? watts : 0
+    }
+
+    /// IORegistry Temperature/VirtualTemperature 使用百分之一摄氏度；兼容少数直接给 °C 的节点。
+    static func normalizedBatteryTemperature(_ raw: Double?) -> Double {
+        guard let raw, raw.isFinite, raw > 0 else { return 0 }
+        let celsius = raw > 150 ? raw / 100 : raw
+        return (celsius >= -20 && celsius <= 100) ? celsius : 0
+    }
+
+    static func normalizedBatteryVoltage(_ raw: Double?) -> Double {
+        guard let raw, raw.isFinite, raw >= 5_000, raw <= 30_000 else { return 0 }
+        return raw
+    }
+
+    static func normalizedBatteryCurrent(_ raw: Double?) -> Double {
+        guard let raw, raw.isFinite, abs(raw) <= 30_000 else { return 0 }
+        return raw
+    }
+
+    static func normalizedCapacity(_ raw: Int?) -> Int {
+        guard let raw, raw > 0, raw <= 100_000 else { return 0 }
+        return raw
+    }
+
+    static func normalizedCycleCount(_ raw: Int?) -> Int {
+        guard let raw, raw >= 0, raw <= 10_000 else { return 0 }
+        return raw
+    }
+
+    private static func firstValidCapacity(_ candidates: [Int?]) -> Int {
+        for raw in candidates {
+            let value = normalizedCapacity(raw)
+            if value > 0 { return value }
+        }
+        return 0
+    }
+
+    private static func firstValidCycleCount(_ candidates: [Int?]) -> Int {
+        for raw in candidates {
+            let value = normalizedCycleCount(raw)
+            if value > 0 { return value }
+        }
+        return 0
+    }
+
+    private static func firstValidDouble(
+        _ candidates: [Double?],
+        normalize: (Double?) -> Double
+    ) -> Double {
+        for raw in candidates {
+            let value = normalize(raw)
+            if value > 0 { return value }
+        }
+        return 0
     }
 
     // MARK: - system_profiler fallback
@@ -372,8 +494,8 @@ final class BatteryReader: @unchecked Sendable {
             watts: 0,
             volts: 0,
             amps: 0,
-            protocolName: ps.isPluggedIn ? "未知" : "未连接",
-            isConnected: ps.isPluggedIn
+            protocolName: ps?.isPluggedIn == true ? "未知" : "未连接",
+            isConnected: ps?.isPluggedIn == true
         )
     }
 
@@ -479,7 +601,8 @@ final class BatteryReader: @unchecked Sendable {
             let connection = getHelperConnection()
             let semaphore = DispatchSemaphore(value: 0)
             var gotResult = false
-            var result = ComponentPower(cpu: 0, gpu: 0, display: 0, other: 0, dram: 0)
+            var result = ComponentPower(cpu: 0, gpu: 0, display: 0, other: 0, dram: 0,
+                                        isAvailable: false, sampledAt: .distantPast)
 
             let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
                 batteryReaderLogger.error("ComponentPower XPC error")
@@ -488,12 +611,19 @@ final class BatteryReader: @unchecked Sendable {
 
             if let proxy = proxy {
                 proxy.getComponentPower? { dict in
+                    let cpu = Self.normalizedComponentPower(dict["cpu"] as? Double)
+                    let gpu = Self.normalizedComponentPower(dict["gpu"] as? Double)
+                    let dram = Self.normalizedComponentPower(dict["dram"] as? Double)
+                    let sampleTime = dict["sampleTime"] as? Double ?? 0
+                    let explicitAvailable = dict["available"] as? Bool
                     result = ComponentPower(
-                        cpu: dict["cpu"] as? Double ?? 0,
-                        gpu: dict["gpu"] as? Double ?? 0,
+                        cpu: cpu,
+                        gpu: gpu,
                         display: 0,
                         other: 0,
-                        dram: dict["dram"] as? Double ?? 0
+                        dram: dram,
+                        isAvailable: explicitAvailable ?? (cpu > 0 || gpu > 0 || dram > 0),
+                        sampledAt: sampleTime > 0 ? Date(timeIntervalSince1970: sampleTime) : Date()
                     )
                     gotResult = true
                     semaphore.signal()
@@ -510,7 +640,13 @@ final class BatteryReader: @unchecked Sendable {
         }
 
         // Fallback: 直接调用（无 root 权限，返回 0）
-        return ComponentPower(cpu: 0, gpu: 0, display: 0, other: 0, dram: 0)
+        return ComponentPower(cpu: 0, gpu: 0, display: 0, other: 0, dram: 0,
+                              isAvailable: false, sampledAt: .distantPast)
+    }
+
+    static func normalizedComponentPower(_ raw: Double?) -> Double {
+        guard let raw, raw.isFinite, raw >= 0, raw < 500 else { return 0 }
+        return raw
     }
 
     /// 估算屏幕功耗 (W)
@@ -566,7 +702,9 @@ final class BatteryReader: @unchecked Sendable {
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let power = (json["SPPowerDataType"] as? [[String: Any]])?.first,
+               let power = (json["SPPowerDataType"] as? [[String: Any]])?.first(where: {
+                   $0["sppower_battery_health_info"] != nil
+               }),
                let healthInfo = power["sppower_battery_health_info"] as? [String: Any],
                let healthStr = healthInfo["sppower_battery_health_maximum_capacity"] as? String,
                let percent = Double(healthStr.replacingOccurrences(of: "%", with: "")) {
@@ -581,7 +719,8 @@ final class BatteryReader: @unchecked Sendable {
         if let info = readBatteryInfo(), info.designCapacity > 0 {
             return Double(info.maxCapacity) / Double(info.designCapacity) * 100
         }
-        return 100
+        // 未知就是未知；返回 100 会把读取失败伪装成“健康度完美”。
+        return 0
     }
 
     // MARK: - Helper XPC 连接
@@ -637,8 +776,8 @@ final class BatteryReader: @unchecked Sendable {
     }
 
     /// 当前要求的 helper 版本（不匹配则需重新安装）
-    /// 4.1：继承流式 powermetrics，并直接拒绝未授权 XPC 连接。
-    private static let requiredHelperVersion = "4.1"
+    /// 4.2：增加显式样本可用性/时间戳，0 W 不再被误判为无数据。
+    private static let requiredHelperVersion = "4.2"
 
     /// 检查已安装的 helper 版本是否满足要求
     /// 返回 true 表示需要更新（版本不匹配或无法通信）
@@ -849,8 +988,8 @@ final class BatteryReader: @unchecked Sendable {
         IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String
     }
 
-    private func readBool(_ entry: io_registry_entry_t, _ key: String) -> Bool {
-        IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool ?? false
+    private func readOptionalBool(_ entry: io_registry_entry_t, _ key: String) -> Bool? {
+        IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
     }
 
     private func readNestedInt(_ entry: io_registry_entry_t, _ dict: String, key: String) -> Int? {
@@ -870,6 +1009,8 @@ struct ComponentPower {
     let display: Double
     let other: Double
     let dram: Double
+    let isAvailable: Bool
+    let sampledAt: Date
 
     var total: Double { cpu + gpu + display + other + dram }
 }

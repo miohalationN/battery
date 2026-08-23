@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import TelemetryCore
 
 /// XPC 协议
 @objc protocol HelperProtocol {
@@ -34,6 +35,7 @@ class HelperTool: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
     private var latestCPU: Double = 0
     private var latestGPU: Double = 0
     private var latestDRAM: Double = 0
+    private var latestSampleAt = Date.distantPast
     private var lastRequestAt = Date.distantPast
     private let idleTimeout: TimeInterval = 60
     private var idleTimer: DispatchSourceTimer?
@@ -103,12 +105,18 @@ extension HelperTool: HelperProtocol {
                 startPowermetricsLocked()
             }
             // 流式模式下直接返回最近采样（刚启动时可能还是 0，下一轮请求即有值）
-            reply(["cpu": latestCPU, "gpu": latestGPU, "dram": latestDRAM])
+            reply([
+                "cpu": latestCPU,
+                "gpu": latestGPU,
+                "dram": latestDRAM,
+                "available": latestSampleAt != .distantPast,
+                "sampleTime": latestSampleAt == .distantPast ? 0 : latestSampleAt.timeIntervalSince1970,
+            ])
         }
     }
 
     func getVersion(withReply reply: @escaping (String) -> Void) {
-        reply("4.1")
+        reply("4.2")
     }
 
     // MARK: - powermetrics 流式进程管理（以下方法均在 powerQueue 上执行）
@@ -120,7 +128,7 @@ extension HelperTool: HelperProtocol {
         if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27 {
             samplers.append("dram")
         }
-        return ["--samplers", samplers.joined(separator: ","), "-i", "10000"]
+        return ["--samplers", samplers.joined(separator: ","), "-i", "10000", "-b", "1"]
     }
 
     private func startPowermetricsLocked() {
@@ -129,6 +137,10 @@ extension HelperTool: HelperProtocol {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/powermetrics")
         process.arguments = powermetricsArguments()
+        var environment = ProcessInfo.processInfo.environment
+        environment["LANG"] = "C"
+        environment["LC_ALL"] = "C"
+        process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -201,17 +213,18 @@ extension HelperTool: HelperProtocol {
         } else {
             pendingBuffer = ""
         }
+        var parsedAny = false
         for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            // 兼容 mW / uW / W 三种单位输出（不同 macOS 版本/机型可能不同）
-            if trimmed.contains("CPU Power") {
-                latestCPU = parsePower(from: trimmed)
-            } else if trimmed.contains("GPU Power") {
-                latestGPU = parsePower(from: trimmed)
-            } else if trimmed.contains("DRAM Power") {
-                latestDRAM = parsePower(from: trimmed)
+            guard let metric = PowerMetricsParser.parse(line: String(line)) else { continue }
+            parsedAny = true
+            switch metric.component {
+            case .cpu: latestCPU = metric.watts
+            case .gpu: latestGPU = metric.watts
+            case .dram: latestDRAM = metric.watts
             }
         }
+        // 成功解析一轮即认为样本可用；0 W 也是合法数据，不能以“至少一个非零”代替状态。
+        if parsedAny { latestSampleAt = Date() }
     }
 
     /// 空闲检查：app 关闭或用户关闭开关后停止拉取 → 60s 无请求终止 powermetrics，
@@ -231,33 +244,6 @@ extension HelperTool: HelperProtocol {
         idleTimer = timer
     }
 
-    /// 解析功率行：支持 "1234 mW"、"1.23 W"、"1234 uW" 三种单位，返回瓦特
-    private func parsePower(from line: String) -> Double {
-        // 优先匹配 mW（最常见）
-        if let range = line.range(of: "mW") {
-            return extractValue(line, before: range.lowerBound, divisor: 1000.0)
-        }
-        // 其次匹配 uW（微瓦）
-        if let range = line.range(of: "uW") {
-            return extractValue(line, before: range.lowerBound, divisor: 1_000_000.0)
-        }
-        // 最后匹配独立的 W（不能匹配到 mW/uW 中的 W）
-        // 用正则确保 W 前面不是 m/u
-        if let range = line.range(of: #"(?<![mu])W"#, options: .regularExpression) {
-            return extractValue(line, before: range.lowerBound, divisor: 1.0)
-        }
-        return 0
-    }
-
-    /// 从 line 中截取 unitRange 前面的最后一个数字，除以 divisor 转换为瓦特
-    private func extractValue(_ line: String, before unitRange: String.Index, divisor: Double) -> Double {
-        let beforeUnit = line[..<unitRange]
-        if let value = beforeUnit.split(separator: " ").last,
-           let v = Double(value.trimmingCharacters(in: .whitespaces)) {
-            return v / divisor
-        }
-        return 0
-    }
 }
 
 // 启动 helper，等待 XPC 调用

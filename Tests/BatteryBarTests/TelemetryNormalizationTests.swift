@@ -36,4 +36,44 @@ import Foundation
         #expect(BatteryReader.normalizedTelemetryPower(600_000) == 0)   // 600 W
         #expect(BatteryReader.normalizedTelemetryPower(1e9) == 0)
     }
+
+    @Test func signedBatteryPowerUsesAbsoluteMilliwatts() {
+        #expect(abs(BatteryReader.normalizedBatteryPower(-5_963) - 5.963) < 0.0001)
+        #expect(BatteryReader.normalizedBatteryPower(200) == 0.2)
+        #expect(BatteryReader.normalizedBatteryPower(Double.nan) == 0)
+        #expect(BatteryReader.normalizedBatteryPower(600_000) == 0)
+    }
+
+    @Test func knownTelemetryAlwaysUsesMilliwattsIncludingLowValues() {
+        #expect(BatteryReader.normalizedTelemetryMilliwatts(13_759) == 13.759)
+        #expect(BatteryReader.normalizedTelemetryMilliwatts(200) == 0.2)
+        #expect(BatteryReader.normalizedTelemetryMilliwatts(-1) == 0)
+    }
+
+    @Test func packTemperatureUsesCentiDegreesAndRejectsSentinels() {
+        // 本机 AppleSmartBatteryPack/BatteryData 实测 4159 → 41.59 °C。
+        #expect(abs(BatteryReader.normalizedBatteryTemperature(4_159) - 41.59) < 0.0001)
+        #expect(BatteryReader.normalizedBatteryTemperature(31.5) == 31.5)
+        #expect(BatteryReader.normalizedBatteryTemperature(65_535) == 0)
+        #expect(BatteryReader.normalizedBatteryTemperature(nil) == 0)
+    }
+
+    @Test func electricalRangesRejectImplausibleValues() {
+        #expect(BatteryReader.normalizedBatteryVoltage(12_796) == 12_796)
+        #expect(BatteryReader.normalizedBatteryVoltage(100) == 0)
+        #expect(BatteryReader.normalizedBatteryCurrent(-469) == -469)
+        #expect(BatteryReader.normalizedBatteryCurrent(1.8e19) == 0)
+        #expect(BatteryReader.normalizedCapacity(4_382) == 4_382)
+        #expect(BatteryReader.normalizedCapacity(-1) == 0)
+        #expect(BatteryReader.normalizedCycleCount(139) == 139)
+        #expect(BatteryReader.normalizedCycleCount(100_000) == 0)
+    }
+
+    @Test func componentPowerBoundaryRejectsUntrustedHelperValues() {
+        #expect(BatteryReader.normalizedComponentPower(0) == 0)
+        #expect(BatteryReader.normalizedComponentPower(14.2) == 14.2)
+        #expect(BatteryReader.normalizedComponentPower(-1) == 0)
+        #expect(BatteryReader.normalizedComponentPower(Double.infinity) == 0)
+        #expect(BatteryReader.normalizedComponentPower(500) == 0)
+    }
 }
