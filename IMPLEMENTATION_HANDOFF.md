@@ -292,3 +292,46 @@ gate 为真实校验（红色必然代表必需取证不可读）。Build workfl
 - 未启用、更新、卸载系统 Helper，未触发管理员授权，未运行 `powermetrics`，未发起 WebDAV
   请求或修改用户数据。限制：IORegistry/powermetrics 字段随系统和机型变化，所有不可用
   情况选择显示「—」/缺口而非伪造值；分项功率是模型估算，不是精密功率计。
+
+## 十三、1.3.0 前后台采样节奏专项（2026-08-23）
+
+### 13.1 基础读数生命周期
+
+- 基线 `860cbab`，实现提交 `2d8fa62`，测试夹具修复 `f6fefac`。主窗口与菜单栏弹窗分别
+  登记可见需求：任一界面打开时立即读取一次，随后按用户设置的 1–30 秒轮询；两个界面
+  都关闭后固定为 15 秒低频轮询并提供 2 秒 timer leeway。重复生命周期事件幂等，关闭
+  一个界面不会把仍可见的另一个误降频；每分钟历史落盘保持独立。
+- 设置项从易误解的「界面刷新」明确为「前台轮询」；页面展示当前模式、历史/分项节奏与
+  「上次成功读取」秒级心跳。心跳隔离在小视图内，不带设置表单每秒重建。状态栏通知只在
+  电量或充电态真正变化时发送，不再随相同值的每个 tick 广播。
+- 实机每秒直接读 IORegistry 并施加 CPU 负载：`SystemLoad`/温度连续约 10 秒维持
+  `6279mW/37.50°C`，随后一起更新为 `14575mW/37.79°C`。因此 1 秒是读取尝试频率，
+  不能迫使驱动每秒产出；其价值是把驱动新值出现后的额外显示延迟压到约 1 秒以内。
+
+### 13.2 高级分项采样
+
+- CPU/GPU 分项从基础 UI timer 拆为独立 10 秒 timer，与 Helper 的 `powermetrics -i 10000`
+  对齐；用户主动开启后才持续运行并服务实时读数与分钟历史，默认关闭时零 powermetrics。
+  慢 XPC 仍禁止重叠。Helper 失败或样本超过 30 秒时，分钟快照写明确缺口（0），不再把旧
+  分项值无限复制成看似连续的历史。界面同步说明开启高级采样会在后台持续运行。
+
+### 13.3 Gate、安装与限制
+
+- GitHub Build run [32625961800](https://github.com/miohalationN/battery/actions/runs/32625961800)
+  success：103 tests / 14 suites passed，release App+Helper、完整 SwiftUI 编译、package 与
+  artifact 上传全部成功。首轮 `32625876817` 的 App 编译已成功，测试失败仅因 Swift
+  Testing 宏不能直接包裹 mutating 调用；修复夹具后全量重跑。新增反例覆盖前后台策略、
+  双界面关闭次序、重复事件幂等、边界持久化与高级/历史独立节奏。
+- 本地全源 parse、非视图 Swift 6 typecheck、Helper build、shell `bash -n` 与 diff check
+  通过。安装后 5 秒 `sample` 中主线程 3766/3787（99.45%）样本在 `mach_msg` 等待，
+  约 0.55% 落在 1 秒基础读取，无 SwiftUI body/layout/Chart 栈；稳定 `ps` CPU 0.0%。
+- 已安装对应 artifact 至 `/Users/mio/Applications/BatteryBar.app`，版本 1.3.0 (4)，
+  `codesign --verify --deep --strict` 通过。主二进制 SHA-256
+  `d6793c78c8d7d1d6270dcb3b9681fe9ae8dc8a50e0500e52a54894dd8d14c84e`，bundled Helper
+  `6ba5636413239f8ecce1c1757fa42291fc04bda27a8c272d1b8565996071f025`；旧 1.2.0 可恢复地
+  位于 `/Users/mio/.Trash/BatteryBar-1.2.0-pre-1.3.0.app`。journal 在一分钟窗口 inode
+  `21822045` 不变、行数 132→133，确认继续纯追加。
+- 未启用/安装/卸载系统 Helper，UserDefaults 开关为 false，无 powermetrics 进程；未发起
+  WebDAV 请求或修改历史内容。限制：锁屏导致本轮无法做最终 UI 点击/截图验收；GitHub 已
+  证明视图完整编译，运行进程与数据通路正常。不同机型/系统的底层出数周期仍可能不同，
+  应用只显示驱动真实发布值，不插值、不制造“每秒新数据”。
