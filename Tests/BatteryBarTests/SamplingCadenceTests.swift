@@ -17,26 +17,34 @@ import Testing
     @Test func closingOneOfTwoSurfacesKeepsForegroundDemand() {
         var demand = LiveReadingDemand()
 
-        #expect(demand.set(.mainWindow, visible: true))
-        #expect(demand.set(.statusPopover, visible: true))
+        let insertedMain = demand.set(.mainWindow, visible: true)
+        let insertedPopover = demand.set(.statusPopover, visible: true)
+        #expect(insertedMain)
+        #expect(insertedPopover)
         #expect(demand.hasVisibleSurface)
 
-        #expect(demand.set(.statusPopover, visible: false))
+        let removedPopover = demand.set(.statusPopover, visible: false)
+        #expect(removedPopover)
         #expect(demand.hasVisibleSurface)
 
-        #expect(demand.set(.mainWindow, visible: false))
+        let removedMain = demand.set(.mainWindow, visible: false)
+        #expect(removedMain)
         #expect(!demand.hasVisibleSurface)
     }
 
     @Test func duplicateLifecycleEventsAreIdempotent() {
         var demand = LiveReadingDemand()
 
-        #expect(demand.set(.mainWindow, visible: true))
-        #expect(!demand.set(.mainWindow, visible: true))
+        let firstInsert = demand.set(.mainWindow, visible: true)
+        let duplicateInsert = demand.set(.mainWindow, visible: true)
+        #expect(firstInsert)
+        #expect(!duplicateInsert)
         #expect(demand.hasVisibleSurface)
 
-        #expect(demand.set(.mainWindow, visible: false))
-        #expect(!demand.set(.mainWindow, visible: false))
+        let firstRemoval = demand.set(.mainWindow, visible: false)
+        let duplicateRemoval = demand.set(.mainWindow, visible: false)
+        #expect(firstRemoval)
+        #expect(!duplicateRemoval)
         #expect(!demand.hasVisibleSurface)
     }
 
