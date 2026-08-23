@@ -83,11 +83,11 @@ struct CycleTab: View {
             HStack {
                 Text("仅含下降 ≥5% 且持续 ≥15 分钟的记录；折算满电续航 = 时长 ÷ 下降幅度 × 100，不同电量降幅可比较")
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Text("拖动查看记录")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
             if chartRecords.count < 2 {
                 EmptyChartState(
@@ -155,8 +155,8 @@ struct CycleTab: View {
                         }
                     }
                 }
-                .font(.system(size: 9, design: .rounded).monospacedDigit())
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 10, design: .rounded).monospacedDigit())
+                .foregroundStyle(.secondary)
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3]))
                     .foregroundStyle(.quaternary)
             }
@@ -166,8 +166,8 @@ struct CycleTab: View {
                 AxisValueLabel {
                     if let hours = value.as(Double.self) {
                         Text(String(format: "%.1fh", hours))
-                            .font(.system(size: 9, design: .rounded).monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 10, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.secondary)
                     }
                 }
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))

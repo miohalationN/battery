@@ -20,40 +20,58 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     private let syncLock = NSLock()
     private var isSyncing = false
 
-    func start(config: SyncConfig) {
-        guard config.isEnabled, config.syncInterval != .manual else { return }
+    /// 让运行中的调度器与最新配置保持一致。
+    ///
+    /// 每次启用状态或同步间隔变化时都先撤销旧 timer；这样从关闭切到开启会立即
+    /// 建立调度，切到手动/关闭会停止调度，修改间隔也不会继续沿用启动时的周期。
+    @MainActor
+    func applySchedule(config: SyncConfig) {
         timer?.invalidate()
+        timer = nil
+        guard config.isEnabled, config.syncInterval != .manual else { return }
         let interval = config.syncInterval.seconds
         // 定时器回调中实时读取配置，避免用户修改配置后仍用旧值
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        let nextTimer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @Sendable [weak self] in
                 guard let self else { return }
                 let cfg = self.store.currentConfig()
                 await self.sync(config: cfg)
             }
         }
+        RunLoop.main.add(nextTimer, forMode: .common)
+        timer = nextTimer
     }
 
+    @MainActor
     func stop() {
         timer?.invalidate()
         timer = nil
     }
 
-    func sync(config: SyncConfig) async {
+    /// 成功时返回真实完成时间；任何校验失败、并发跳过或网络错误都返回 nil。
+    /// 调用方只能用非 nil 值更新“上次同步”，禁止把尝试时间冒充成功时间。
+    @discardableResult
+    func sync(config: SyncConfig) async -> Date? {
         // 并发保护：定时器触发的 sync 和手动"立即同步"可能并发，会导致远程数据损坏
         // NSLock 不能在 async 函数中直接使用，封装到同步方法里
-        guard tryStartSyncing() else { return }
+        guard tryStartSyncing() else { return nil }
         defer { endSyncing() }
 
-        guard config.isEnabled, !config.serverURL.isEmpty else { return }
+        guard config.isEnabled, !config.serverURL.isEmpty else { return nil }
+        guard let serverURL = URL(string: config.serverURL) else {
+            await publishState(.failed("服务器地址无效"))
+            return nil
+        }
+        do {
+            try WebDAVEndpointPolicy.validate(serverURL)
+        } catch {
+            await publishState(.failed(error.localizedDescription))
+            return nil
+        }
         guard let password = KeychainHelper.getPassword(for: config.username) else {
             syncLogger.error("No password for \(config.username)")
             await publishState(.failed("未找到密码"))
-            return
-        }
-        guard let serverURL = URL(string: config.serverURL) else {
-            await publishState(.failed("服务器地址无效"))
-            return
+            return nil
         }
 
         await publishState(.syncing)
@@ -79,10 +97,18 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             store.updateLastSyncAt(now)
             syncLogger.info("Sync done at \(now.description)")
             await publishState(.success(now))
+            return now
         } catch {
             syncLogger.error("Sync failed: \(error.localizedDescription)")
             await publishState(.failed(error.localizedDescription))
+            return nil
         }
+    }
+
+    /// 供状态页与回归测试确认当前实际调度周期，不暴露 Timer 本身。
+    @MainActor
+    var scheduledInterval: TimeInterval? {
+        timer?.timeInterval
     }
 
     @MainActor

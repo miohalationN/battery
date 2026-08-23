@@ -7,6 +7,8 @@ struct SyncTab: View {
     @State private var testResult: String?
     @State private var password = ""
     @State private var refreshInterval: Int = 1
+    @State private var localSnapshotCount = 0
+    @State private var localRecordCount = 0
     // 密码防抖：用户停止输入 0.6s 后才写入 Keychain，避免每次按键都触发 SecItem 操作
     @State private var passwordDebounceTask: Task<Void, Never>?
 
@@ -15,12 +17,13 @@ struct SyncTab: View {
             VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
                 PageHeader(
                     title: "数据与同步",
-                    subtitle: "控制采样频率并备份历史记录",
+                    subtitle: "调整实时读数，并安全备份历史记录",
                     systemImage: "arrow.triangle.branch",
                     tint: .bbPurple,
                     badge: config.isEnabled ? "WebDAV 已启用" : "仅本机"
                 )
                 refreshSection
+                localDataSection
                 syncToggleCard
                 if config.isEnabled {
                     configWarning
@@ -37,8 +40,15 @@ struct SyncTab: View {
         .onAppear {
             // 从 DataStore 恢复用户上次设置的刷新间隔
             refreshInterval = Int(DataStore.shared.currentRefreshInterval())
+            reloadLocalCounts()
             // 预填密码（用于测试连接 / 同步），从 Keychain 读取
             if let pw = KeychainHelper.getPassword(for: config.username) { password = pw }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .batterySnapshotsDidChange)) { _ in
+            reloadLocalCounts()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .batteryCyclesDidChange)) { _ in
+            reloadLocalCounts()
         }
     }
 
@@ -46,9 +56,14 @@ struct SyncTab: View {
 
     private var refreshSection: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "数据刷新", systemImage: "arrow.clockwise.circle.fill", tint: .bbBlue)
+            SectionHeader(title: "实时读数", systemImage: "arrow.clockwise.circle.fill", tint: .bbBlue)
             HStack {
-                Text("采样间隔").font(.system(size: 11)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("界面刷新间隔").font(.system(size: 11, weight: .medium))
+                    Text("历史记录仍每分钟保存一次")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 HStack(spacing: 0) {
                     Button { if refreshInterval > 1 { refreshInterval -= 1; applyRefreshInterval() } } label: {
@@ -71,7 +86,7 @@ struct SyncTab: View {
                     }
                     .buttonStyle(.plain)
                 }
-                Text("秒").font(.system(size: 11)).foregroundStyle(.tertiary)
+                Text("秒").font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
         .glassCard(accent: .bbBlue)
@@ -86,7 +101,9 @@ struct SyncTab: View {
                 .foregroundStyle(config.isEnabled ? Color.bbMint : Color.secondary)
             Text("启用 WebDAV 同步").font(.system(size: 13, weight: .semibold))
             Spacer()
-            Toggle("", isOn: $config.isEnabled).labelsHidden().onChange(of: config.isEnabled) { save() }
+            Toggle("", isOn: $config.isEnabled).labelsHidden().onChange(of: config.isEnabled) {
+                save(reconfigureSchedule: true)
+            }
         }
         .glassCard(accent: config.isEnabled ? .bbMint : .clear)
     }
@@ -96,16 +113,39 @@ struct SyncTab: View {
         NotificationCenter.default.post(name: .init("RefreshIntervalChanged"), object: Double(refreshInterval))
     }
 
+    private var localDataSection: some View {
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "本机数据", systemImage: "internaldrive.fill", tint: .bbTeal)
+            HStack(spacing: BBDesign.itemSpacing) {
+                StatTile(icon: "waveform.path.ecg", tint: .bbBlue,
+                         value: "\(localSnapshotCount)", unit: "点", label: "历史采样")
+                StatTile(icon: "list.bullet.rectangle", tint: .bbTeal,
+                         value: "\(localRecordCount)", unit: "条", label: "离电记录")
+                StatTile(icon: "clock.arrow.circlepath", tint: .bbAmber,
+                         value: "24", unit: "小时", label: "采样保留")
+            }
+            Text("未启用 WebDAV 时，全部数据只保存在这台 Mac；历史采样每分钟写入一次。")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+        .glassCard(accent: .bbTeal)
+    }
+
+    private func reloadLocalCounts() {
+        localSnapshotCount = DataStore.shared.allSnapshots().count
+        localRecordCount = OffPowerRecordAnalyzer.displayableRecords(from: DataStore.shared.allCycles()).count
+    }
+
     // MARK: - 配置不完整警告
 
     /// 启用同步但服务器地址/用户名/密码未填全时的警告（password 含 Keychain 预填）
     @ViewBuilder
     private var configWarning: some View {
-        if config.serverURL.isEmpty || config.username.isEmpty || password.isEmpty {
+        if let warning = configurationWarningText {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 11))
-                Text("配置不完整：请填写服务器地址、用户名与密码，否则同步不会执行")
+                Text(warning)
                     .font(.system(size: 11))
             }
             .foregroundStyle(.orange)
@@ -170,7 +210,9 @@ struct SyncTab: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("同步间隔").font(.system(size: 11)).foregroundStyle(.secondary)
                 Picker("", selection: $config.syncInterval) { ForEach(SyncInterval.allCases, id: \.self) { Text($0.label).tag($0) } }
-                    .pickerStyle(.segmented).onChange(of: config.syncInterval) { save() }
+                    .pickerStyle(.segmented).onChange(of: config.syncInterval) {
+                        save(reconfigureSchedule: true)
+                    }
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("同步方向").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -245,7 +287,11 @@ struct SyncTab: View {
     private var actionButtons: some View {
         HStack {
             Button {
-                Task { await syncEngine.sync(config: config); config.lastSyncAt = Date(); save() }
+                Task {
+                    if let completedAt = await syncEngine.sync(config: config) {
+                        config.lastSyncAt = completedAt
+                    }
+                }
             } label: {
                 HStack(spacing: 6) {
                     if case .syncing = syncEngine.state {
@@ -257,7 +303,7 @@ struct SyncTab: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(config.serverURL.isEmpty || (syncEngine.state == .syncing))
+            .disabled(!serverURLIsAllowed || (syncEngine.state == .syncing))
             Spacer()
         }
     }
@@ -276,10 +322,37 @@ struct SyncTab: View {
         }
     }
 
-    private func save() { DataStore.shared.updateConfig(config) }
+    private func save(reconfigureSchedule: Bool = false) {
+        DataStore.shared.updateConfig(config)
+        if reconfigureSchedule {
+            syncEngine.applySchedule(config: config)
+        }
+    }
+
+    private var serverURLIsAllowed: Bool {
+        guard let url = URL(string: config.serverURL) else { return false }
+        return (try? WebDAVEndpointPolicy.validate(url)) != nil
+    }
+
+    private var configurationWarningText: String? {
+        if config.serverURL.isEmpty || config.username.isEmpty || password.isEmpty {
+            return "配置不完整：请填写服务器地址、用户名与密码，否则同步不会执行"
+        }
+        guard let url = URL(string: config.serverURL) else {
+            return "服务器地址无效"
+        }
+        do {
+            try WebDAVEndpointPolicy.validate(url)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
 
     private func testConnection() async {
         guard let url = URL(string: config.serverURL) else { testResult = "❌ 无效的 URL"; return }
+        do { try WebDAVEndpointPolicy.validate(url) }
+        catch { testResult = "❌ \(error.localizedDescription)"; return }
         let pw = KeychainHelper.getPassword(for: config.username) ?? password
         guard !pw.isEmpty else { testResult = "❌ 请先输入密码"; return }
         let client = WebDAVClient(baseURL: url, username: config.username, password: pw)

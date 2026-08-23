@@ -760,7 +760,7 @@ final class BatteryReader: @unchecked Sendable {
         // 用 osascript 请求管理员权限执行安装
         // 顺序很重要：先 bootout 杀旧进程释放文件锁，再 cp 覆盖二进制，最后 bootstrap 启动新进程
         let script = """
-        do shell script "mkdir -p /Library/PrivilegedHelperTools && (launchctl bootout system/\(helperID) 2>/dev/null || true) && sleep 1 && cp '\(helperPath)' '\(installPath)' && chown root:wheel '\(installPath)' && chmod 755 '\(installPath)' && cp '\(tempPlist.path)' '\(plistPath)' && chown root:wheel '\(plistPath)' && chmod 644 '\(plistPath)' && sleep 1 && launchctl bootstrap system/ '\(plistPath)'" with administrator privileges with prompt "BatteryBar 需要安装后台服务以读取 CPU/GPU 分项功耗"
+        do shell script "mkdir -p /Library/PrivilegedHelperTools && (launchctl bootout system/\(helperID) 2>/dev/null || true) && sleep 1 && cp '\(helperPath)' '\(installPath)' && chown root:wheel '\(installPath)' && chmod 755 '\(installPath)' && cp '\(tempPlist.path)' '\(plistPath)' && chown root:wheel '\(plistPath)' && chmod 644 '\(plistPath)' && sleep 1 && launchctl bootstrap system/ '\(plistPath)'" with administrator privileges with prompt "\(AppBrand.displayName)需要安装后台服务以读取 CPU/GPU 分项功耗"
         """
 
         let task = Process()
@@ -805,7 +805,7 @@ final class BatteryReader: @unchecked Sendable {
         }
 
         let script = """
-        do shell script "(launchctl bootout system/\(Self.helperIdentifier) 2>/dev/null || true) && rm -f '\(installPath)' '\(plistPath)'" with administrator privileges with prompt "BatteryBar 需要移除后台服务"
+        do shell script "(launchctl bootout system/\(Self.helperIdentifier) 2>/dev/null || true) && rm -f '\(installPath)' '\(plistPath)'" with administrator privileges with prompt "\(AppBrand.displayName)需要移除后台服务"
         """
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")

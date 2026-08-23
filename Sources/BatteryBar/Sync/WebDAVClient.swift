@@ -2,6 +2,16 @@ import Foundation
 
 /// 轻量 WebDAV 客户端，基于 URLSession + XMLParser
 final class WebDAVClient {
+    private static let secureSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = true
+        return URLSession(
+            configuration: configuration,
+            delegate: WebDAVRedirectPolicyDelegate(),
+            delegateQueue: nil
+        )
+    }()
+
     let baseURL: URL
     let username: String
     let password: String
@@ -14,14 +24,14 @@ final class WebDAVClient {
 
     /// 列出目录内容
     func listFiles(at path: String) async throws -> [WebDAVFile] {
-        let url = url(for: path)
+        let url = try url(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = "PROPFIND"
         request.setValue("1", forHTTPHeaderField: "Depth")
         request.httpBody = propfindBody.data(using: .utf8)
         addAuth(&request)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.secureSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw WebDAVError.requestFailed
         }
@@ -30,13 +40,13 @@ final class WebDAVClient {
 
     /// 上传数据
     func upload(data: Data, to path: String) async throws {
-        let url = url(for: path)
+        let url = try url(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.httpBody = data
         addAuth(&request)
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await Self.secureSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw WebDAVError.uploadFailed
         }
@@ -44,12 +54,12 @@ final class WebDAVClient {
 
     /// 下载数据
     func download(from path: String) async throws -> Data {
-        let url = url(for: path)
+        let url = try url(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         addAuth(&request)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.secureSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw WebDAVError.downloadFailed
         }
@@ -58,12 +68,12 @@ final class WebDAVClient {
 
     /// 创建目录
     func createFolder(at path: String) async throws {
-        let url = url(for: path)
+        let url = try url(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = "MKCOL"
         addAuth(&request)
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await Self.secureSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw WebDAVError.requestFailed
         }
@@ -71,12 +81,12 @@ final class WebDAVClient {
 
     /// 删除文件
     func delete(at path: String) async throws {
-        let url = url(for: path)
+        let url = try url(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         addAuth(&request)
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await Self.secureSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw WebDAVError.requestFailed
         }
@@ -86,7 +96,8 @@ final class WebDAVClient {
 
     /// 稳健的 URL 拼接：去掉前导 `/` 后再追加，避免 `appendingPathComponent`
     /// 对已经是 URL 编码或绝对路径形式产生意外结果。
-    private func url(for path: String) -> URL {
+    private func url(for path: String) throws -> URL {
+        try WebDAVEndpointPolicy.validate(baseURL)
         let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
         return baseURL.appendingPathComponent(trimmed)
     }
@@ -111,6 +122,27 @@ final class WebDAVClient {
     }
 }
 
+/// URLSession 默认会跟随重定向；初始 HTTPS 地址若被降级到 HTTP，也必须在发送下一跳
+/// 请求前拦截，不能只验证用户输入的首个 URL。
+private final class WebDAVRedirectPolicyDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let originalURL = task.originalRequest?.url,
+              let redirectedURL = request.url,
+              WebDAVEndpointPolicy.allowsRedirect(from: originalURL, to: redirectedURL)
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 struct WebDAVFile {
     let path: String
     let name: String
@@ -119,11 +151,60 @@ struct WebDAVFile {
     let modifiedDate: Date?
 }
 
-enum WebDAVError: Error {
+/// WebDAV 使用 Basic Auth，非 TLS 连接会把可还原的凭据暴露在链路上。
+/// 仅允许 HTTPS；HTTP 只对本机回环地址开放，便于本地开发和隔离测试。
+enum WebDAVEndpointPolicy {
+    private static let loopbackHosts: Set<String> = ["localhost", "127.0.0.1", "::1"]
+
+    static func validate(_ url: URL) throws {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased(),
+              !host.isEmpty
+        else { throw WebDAVError.invalidURL }
+
+        if scheme == "https" { return }
+        if scheme == "http", loopbackHosts.contains(host) { return }
+        throw WebDAVError.insecureTransport
+    }
+
+    /// Basic Auth 重定向只允许同源，避免 HTTPS 请求把凭据带到另一个主机或端口。
+    static func allowsRedirect(from source: URL, to destination: URL) -> Bool {
+        guard (try? validate(destination)) != nil,
+              source.scheme?.lowercased() == destination.scheme?.lowercased(),
+              source.host?.lowercased() == destination.host?.lowercased(),
+              effectivePort(of: source) == effectivePort(of: destination)
+        else { return false }
+        return true
+    }
+
+    private static func effectivePort(of url: URL) -> Int? {
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "https": return 443
+        case "http": return 80
+        default: return nil
+        }
+    }
+}
+
+enum WebDAVError: Error, LocalizedError {
+    case invalidURL
+    case insecureTransport
     case requestFailed
     case uploadFailed
     case downloadFailed
     case parseError
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL: "服务器地址无效"
+        case .insecureTransport: "WebDAV 仅允许 HTTPS（本机 localhost 可使用 HTTP）"
+        case .requestFailed: "WebDAV 请求失败"
+        case .uploadFailed: "WebDAV 上传失败"
+        case .downloadFailed: "WebDAV 下载失败"
+        case .parseError: "WebDAV 响应无法解析"
+        }
+    }
 }
 
 /// 简单的 PROPFIND XML 解析

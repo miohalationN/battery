@@ -1,6 +1,7 @@
-# BatteryBar
+# 电池监测
 
-macOS 菜单栏电池监控应用
+macOS 菜单栏电池与功耗监测应用。内部可执行文件、数据目录与 GitHub Artifact
+暂时保留 `BatteryBar` 名称，以保证现有安装、历史数据、Helper 和自动化脚本无损兼容。
 
 ## 功能
 

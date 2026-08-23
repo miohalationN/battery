@@ -22,4 +22,9 @@ enum TimeRange: String, CaseIterable {
         case .day24: return (.hour, 3)
         }
     }
+
+    /// 返回完整墙上时间范围，避免 Swift Charts 按少量现有样本自动缩放并铺满全宽。
+    func domain(endingAt end: Date) -> ClosedRange<Date> {
+        end.addingTimeInterval(-hours * 3600)...end
+    }
 }

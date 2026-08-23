@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// BatteryBar 的视觉令牌与复用组件。
+/// 电池监测的视觉令牌与复用组件。
 ///
 /// 设计语言围绕三件事：石墨色背景承载长期使用、薄荷绿表达电池状态、
 /// 暖黄色表达实时能量。卡片只承担分组，不用大面积灰底争夺图表注意力。
@@ -57,7 +57,7 @@ extension View {
                         RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous)
                             .fill(
                                 LinearGradient(
-                                    colors: [accent.opacity(0.075), Color.clear],
+                                    colors: [accent.opacity(0.095), Color.clear],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
                                 )
@@ -68,7 +68,7 @@ extension View {
                 RoundedRectangle(cornerRadius: BBDesign.cornerRadius, style: .continuous)
                     .strokeBorder(
                         LinearGradient(
-                            colors: [Color.white.opacity(0.24), Color.primary.opacity(0.075)],
+                            colors: [Color.white.opacity(0.22), Color.primary.opacity(0.105)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
@@ -207,8 +207,8 @@ struct StatTile: View {
                     .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 Spacer(minLength: 4)
                 Text(label)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
             }
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(value)
@@ -217,8 +217,8 @@ struct StatTile: View {
                     .minimumScaleFactor(0.72)
                 if !unit.isEmpty {
                     Text(unit)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -272,11 +272,11 @@ struct ChartLegendItem: View {
                 .fill(color)
                 .frame(width: 14, height: 3)
             Text(label)
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
             if let value {
                 Text(value)
-                    .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 10, weight: .semibold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.primary)
             }
         }
@@ -291,15 +291,15 @@ struct EmptyChartState: View {
     var body: some View {
         VStack(spacing: 7) {
             Image(systemName: systemImage)
-                .font(.system(size: 23, weight: .medium))
-                .foregroundStyle(.quaternary)
+                .font(.system(size: 21, weight: .medium))
+                .foregroundStyle(.secondary)
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             Text(detail)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, minHeight: 146)
+        .frame(maxWidth: .infinity, minHeight: 104)
     }
 }

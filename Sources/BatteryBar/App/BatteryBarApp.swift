@@ -131,11 +131,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         sampler.start()
 
-        // 启动自动同步：仅在配置启用且间隔非手动时启动
+        // 启动时让自动同步调度器与持久化配置一致
         let config = DataStore.shared.currentConfig()
-        if config.isEnabled && config.syncInterval != .manual {
-            syncEngine.start(config: config)
-        }
+        syncEngine.applySchedule(config: config)
 
         // 初始用 variableLength，后续在 refreshTitle 中改为固定值
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -211,13 +209,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let settingsItem = menu.addItem(withTitle: "电池设置…", action: #selector(openBatterySettingsFromMenu(_:)), keyEquivalent: "")
         settingsItem.target = self
 
-        let aboutItem = menu.addItem(withTitle: "关于 BatteryBar", action: #selector(showAbout(_:)), keyEquivalent: "")
+        let aboutItem = menu.addItem(withTitle: "关于 \(AppBrand.displayName)", action: #selector(showAbout(_:)), keyEquivalent: "")
         aboutItem.target = self
 
         menu.addItem(.separator())
 
         // target 为 nil 走响应链，最终由 NSApplication 处理 terminate
-        menu.addItem(withTitle: "退出 BatteryBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(withTitle: "退出 \(AppBrand.displayName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         return menu
     }
 
@@ -247,7 +245,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // 常见失败原因：直接运行 .build 里的裸二进制（无 bundle），或 bundle 不在可注册位置
             let alert = NSAlert()
             alert.messageText = "开机自启动设置失败"
-            alert.informativeText = "\(error.localizedDescription)\n请确认 BatteryBar 已安装到「应用程序」或个人目录的「应用程序」。"
+            alert.informativeText = "\(error.localizedDescription)\n请确认\(AppBrand.displayName)已安装到「应用程序」或个人目录的「应用程序」。"
             alert.alertStyle = .warning
             alert.runModal()
         }
@@ -383,12 +381,11 @@ struct ContentView: View {
                     .frame(width: 34, height: 34)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("BatteryBar")
+                    Text(AppBrand.displayName)
                         .font(.system(size: 14, weight: .bold, design: .rounded))
-                    Text("ENERGY MONITOR")
-                        .font(.system(size: 7.5, weight: .bold, design: .rounded))
-                        .tracking(0.7)
-                        .foregroundStyle(.tertiary)
+                    Text(AppBrand.tagline)
+                        .font(.system(size: 9, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 16)

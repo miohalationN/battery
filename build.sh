@@ -30,15 +30,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.batterybar.app</string>
     <key>CFBundleName</key>
-    <string>BatteryBar</string>
+    <string>电池监测</string>
     <key>CFBundleDisplayName</key>
-    <string>BatteryBar</string>
+    <string>电池监测</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>2</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

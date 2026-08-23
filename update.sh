@@ -45,15 +45,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.batterybar.app</string>
     <key>CFBundleName</key>
-    <string>BatteryBar</string>
+    <string>电池监测</string>
     <key>CFBundleDisplayName</key>
-    <string>BatteryBar</string>
+    <string>电池监测</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>2</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -77,7 +77,6 @@ open "$APP_PATH"
 
 echo ""
 echo "=== 更新完成 ==="
-echo "BatteryBar 已更新并启动"
+echo "电池监测已更新并启动"
 echo ""
-echo "首次切换低电量模式时会自动安装后台服务（需要输入密码）"
-echo "之后切换不再需要密码"
+echo "首次开启高级分项采样时会安装后台服务（需要输入密码）"

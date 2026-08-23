@@ -10,7 +10,7 @@ BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME.dmg"
 DMG_DIR="$BUILD_DIR/dmg"
-VOLUME_NAME="BatteryBar"
+VOLUME_NAME="电池监测"
 ICON_DIR="Sources/BatteryBar/Resources"
 
 echo "=== Building $APP_NAME ==="
@@ -34,15 +34,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.batterybar.app</string>
     <key>CFBundleName</key>
-    <string>BatteryBar</string>
+    <string>电池监测</string>
     <key>CFBundleDisplayName</key>
-    <string>BatteryBar</string>
+    <string>电池监测</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>2</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -79,5 +79,5 @@ echo "Size: $(du -h "$DMG_NAME" | cut -f1)"
 echo ""
 echo "To install:"
 echo "1. Open $DMG_NAME"
-echo "2. Drag BatteryBar to Applications"
+echo "2. Drag 电池监测 to Applications"
 echo "3. Launch from Applications or Spotlight"

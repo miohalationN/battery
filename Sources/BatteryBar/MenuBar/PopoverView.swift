@@ -42,7 +42,7 @@ struct PopoverView: View {
                 .frame(width: 24, height: 24)
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             VStack(alignment: .leading, spacing: 0) {
-                Text("BatteryBar")
+                Text(AppBrand.displayName)
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                 Text("电池与能耗监控")
                     .font(.system(size: 8))

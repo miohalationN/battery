@@ -75,4 +75,63 @@ import Foundation
         #expect(decoded.remotePath == SyncConfig.default.remotePath)
         #expect(decoded.syncInterval == SyncConfig.default.syncInterval)
     }
+
+    @Test func webDAVTransportPolicyRequiresTLSOutsideLoopback() throws {
+        try WebDAVEndpointPolicy.validate(#require(URL(string: "https://dav.example.com/root")))
+        try WebDAVEndpointPolicy.validate(#require(URL(string: "http://localhost:8080/dav")))
+        try WebDAVEndpointPolicy.validate(#require(URL(string: "http://127.0.0.1:8080/dav")))
+
+        #expect(throws: WebDAVError.self) {
+            try WebDAVEndpointPolicy.validate(#require(URL(string: "http://192.168.1.10/dav")))
+        }
+        #expect(throws: WebDAVError.self) {
+            try WebDAVEndpointPolicy.validate(#require(URL(string: "dav.example.com")))
+        }
+
+        let source = try #require(URL(string: "https://dav.example.com/root"))
+        #expect(WebDAVEndpointPolicy.allowsRedirect(
+            from: source,
+            to: try #require(URL(string: "https://dav.example.com/root/"))
+        ))
+        #expect(!WebDAVEndpointPolicy.allowsRedirect(
+            from: source,
+            to: try #require(URL(string: "https://attacker.example/root"))
+        ))
+        #expect(!WebDAVEndpointPolicy.allowsRedirect(
+            from: source,
+            to: try #require(URL(string: "http://dav.example.com/root"))
+        ))
+    }
+
+    @Test @MainActor func scheduleFollowsEnabledAndIntervalChanges() {
+        let engine = SyncEngine()
+        var config = SyncConfig.default
+
+        engine.applySchedule(config: config)
+        #expect(engine.scheduledInterval == nil)
+
+        config.isEnabled = true
+        config.syncInterval = .hour1
+        engine.applySchedule(config: config)
+        #expect(engine.scheduledInterval == 3600)
+
+        config.syncInterval = .min15
+        engine.applySchedule(config: config)
+        #expect(engine.scheduledInterval == 900)
+
+        config.syncInterval = .manual
+        engine.applySchedule(config: config)
+        #expect(engine.scheduledInterval == nil)
+
+        engine.stop()
+    }
+
+    @Test func disabledSyncCannotReportSuccess() async {
+        let engine = SyncEngine()
+        var config = SyncConfig.default
+        config.isEnabled = false
+
+        let completedAt = await engine.sync(config: config)
+        #expect(completedAt == nil)
+    }
 }

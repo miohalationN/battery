@@ -6,6 +6,9 @@ set -e
 # Info.plist 不再包含 SMPrivilegedExecutables / SMAuthorizedClients。
 
 APP_NAME="BatteryBar"
+PRODUCT_NAME="电池监测"
+APP_VERSION="1.1.0"
+APP_BUILD="2"
 HELPER_NAME="BatteryBarHelper"
 # 分发用 release 构建：debug 构建的 Swift 6 运行时在实测中空转约 40% CPU
 # （2026-08-22 排查，详见 MAINTENANCE_PLAN T-29），release 构建空闲为 0
@@ -53,15 +56,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>
-    <string>$APP_NAME</string>
+    <string>$PRODUCT_NAME</string>
     <key>CFBundleDisplayName</key>
-    <string>$APP_NAME</string>
+    <string>$PRODUCT_NAME</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>$APP_BUILD</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>$APP_VERSION</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

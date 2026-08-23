@@ -3,6 +3,14 @@ import Testing
 @testable import BatteryBar
 
 @Suite struct ChartDownsamplerTests {
+    @Test func timeRangeDomainKeepsTheRequestedWallClockSpan() {
+        let end = Date(timeIntervalSince1970: 1_800_000_000)
+
+        #expect(TimeRange.hour1.domain(endingAt: end).lowerBound == end.addingTimeInterval(-3600))
+        #expect(TimeRange.day6.domain(endingAt: end).lowerBound == end.addingTimeInterval(-21_600))
+        #expect(TimeRange.day24.domain(endingAt: end).lowerBound == end.addingTimeInterval(-86_400))
+    }
+
     private func snapshots(count: Int, spikeAt: Int? = nil) -> [BatterySnapshot] {
         var result: [BatterySnapshot] = []
         result.reserveCapacity(count)

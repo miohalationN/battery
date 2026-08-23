@@ -5,6 +5,8 @@ private struct PowerRangeStats {
     var average: Double = 0
     var peak: Double = 0
     var low: Double = 0
+    var sampleCount: Int = 0
+    var coverage: TimeInterval = 0
 }
 
 /// 功耗页信息架构：当前负载 → 构成 → 历史趋势 → 数据来源 → 高级采样。
@@ -17,7 +19,7 @@ struct PowerTab: View {
     @State private var snapshots: [BatterySnapshot] = []
     @State private var chartSnapshots: [BatterySnapshot] = []
     @State private var rangeStats = PowerRangeStats()
-    @State private var timeRange: TimeRange = .day6
+    @State private var timeRange: TimeRange = .hour1
     // Helper 安装中状态
     @State private var isInstallingHelper = false
 
@@ -90,7 +92,9 @@ struct PowerTab: View {
         rangeStats = PowerRangeStats(
             average: count > 0 ? sum / Double(count) : 0,
             peak: count > 0 ? peak : 0,
-            low: count > 0 ? low : 0
+            low: count > 0 ? low : 0,
+            sampleCount: filtered.count,
+            coverage: max(0, (filtered.last?.timestamp.timeIntervalSince(filtered.first?.timestamp ?? Date())) ?? 0)
         )
     }
 
@@ -121,9 +125,9 @@ struct PowerTab: View {
                     value: chartSnapshots.last.map { String(format: "%.1fW", $0.wattage) }
                 )
                 Spacer()
-                Text("拖动曲线查看采样点")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+                Text(coverageText)
+                    .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
 
             if chartSnapshots.isEmpty {
@@ -140,13 +144,24 @@ struct PowerTab: View {
         .glassCard(accent: .bbAmber)
     }
 
+    private var coverageText: String {
+        guard rangeStats.sampleCount > 1 else {
+            return rangeStats.sampleCount == 1 ? "1 个有效点 · 正在采集" : "尚无有效点"
+        }
+        let minutes = max(1, Int(rangeStats.coverage / 60))
+        let span = minutes < 60
+            ? "\(minutes) 分钟"
+            : String(format: "%.1f 小时", Double(minutes) / 60)
+        return "\(rangeStats.sampleCount) 个有效点 · 覆盖 \(span)"
+    }
+
     private var dataSourceFootnote: some View {
         HStack(spacing: 4) {
             Image(systemName: "info.circle").font(.system(size: 10))
             Text("系统负载优先来自 IORegistry 系统遥测，离电时以电池放出功率估算，接电无遥测时不显示。CPU/GPU 为 powermetrics 实测；显示器按亮度估算。")
                 .font(.system(size: 10))
         }
-        .foregroundStyle(.tertiary)
+        .foregroundStyle(.secondary)
         .padding(.horizontal, 4)
     }
 }

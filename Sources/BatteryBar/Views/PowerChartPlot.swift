@@ -47,11 +47,12 @@ struct PowerChartPlot: View, @MainActor Equatable {
             }
         }
         .chartXSelection(value: $selectedTime)
+        .chartXScale(domain: xDomain)
         .chartXAxis {
             AxisMarks(values: .stride(by: timeRange.axisStride.component, count: timeRange.axisStride.count)) {
                 AxisValueLabel(format: .dateTime.hour().minute())
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3]))
                     .foregroundStyle(.quaternary)
             }
@@ -61,8 +62,8 @@ struct PowerChartPlot: View, @MainActor Equatable {
                 AxisValueLabel {
                     if let watts = value.as(Double.self) {
                         Text(String(format: "%.0fW", watts))
-                            .font(.system(size: 9, design: .rounded).monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 10, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.secondary)
                     }
                 }
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
@@ -113,5 +114,13 @@ struct PowerChartPlot: View, @MainActor Equatable {
     private var yMaximum: Double {
         let maximum = max(2, snapshots.map(\.wattage).max() ?? 2)
         return ceil(maximum * 1.18 / 2) * 2
+    }
+
+    /// 选中的范围始终对应真实墙上时间，而不是被现有少量样本自动撑满。
+    /// 例如刚安装 5 分钟时选择“6 小时”，曲线只占最右侧 5 分钟，避免误导。
+    private var xDomain: ClosedRange<Date> {
+        let now = Date()
+        let end = max(now, snapshots.last?.timestamp ?? now)
+        return timeRange.domain(endingAt: end)
     }
 }
