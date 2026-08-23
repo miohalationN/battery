@@ -1,10 +1,25 @@
 import Foundation
 
+protocol WebDAVClientProtocol: Sendable {
+    func listFiles(at path: String) async throws -> [WebDAVFile]
+    func upload(data: Data, to path: String) async throws
+    func download(from path: String) async throws -> Data
+    func createFolder(at path: String) async throws
+}
+
 /// 轻量 WebDAV 客户端，基于 URLSession + XMLParser
-final class WebDAVClient {
+final class WebDAVClient: WebDAVClientProtocol, @unchecked Sendable {
+    /// PROPFIND 只应返回当前目录；超过 2 MiB 基本可判定为错误配置或恶意响应。
+    static let maximumListingBytes = 2 * 1_024 * 1_024
+    /// 单个同步对象的压缩/JSON 文件上限。解压后还有独立上限。
+    static let maximumDownloadBytes = 8 * 1_024 * 1_024
+
     private static let secureSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 90
+        configuration.httpMaximumConnectionsPerHost = 2
         return URLSession(
             configuration: configuration,
             delegate: WebDAVRedirectPolicyDelegate(),
@@ -31,11 +46,8 @@ final class WebDAVClient {
         request.httpBody = propfindBody.data(using: .utf8)
         addAuth(&request)
 
-        let (data, response) = try await Self.secureSession.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw WebDAVError.requestFailed
-        }
-        return WebDAVResponseParser.parse(data: data, baseURL: baseURL)
+        let data = try await boundedResponseData(for: request, maximumBytes: Self.maximumListingBytes)
+        return try WebDAVResponseParser.parseValidated(data: data, baseURL: baseURL)
     }
 
     /// 上传数据
@@ -46,10 +58,7 @@ final class WebDAVClient {
         request.httpBody = data
         addAuth(&request)
 
-        let (_, response) = try await Self.secureSession.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw WebDAVError.uploadFailed
-        }
+        try await performRequest(request)
     }
 
     /// 下载数据
@@ -59,11 +68,7 @@ final class WebDAVClient {
         request.httpMethod = "GET"
         addAuth(&request)
 
-        let (data, response) = try await Self.secureSession.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw WebDAVError.downloadFailed
-        }
-        return data
+        return try await boundedResponseData(for: request, maximumBytes: Self.maximumDownloadBytes)
     }
 
     /// 创建目录
@@ -73,9 +78,10 @@ final class WebDAVClient {
         request.httpMethod = "MKCOL"
         addAuth(&request)
 
-        let (_, response) = try await Self.secureSession.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw WebDAVError.requestFailed
+        do {
+            try await performRequest(request)
+        } catch WebDAVError.httpStatus(405) {
+            // 多数 WebDAV 服务以 405 表示 MKCOL 目标已存在，属于幂等成功。
         }
     }
 
@@ -86,10 +92,7 @@ final class WebDAVClient {
         request.httpMethod = "DELETE"
         addAuth(&request)
 
-        let (_, response) = try await Self.secureSession.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw WebDAVError.requestFailed
-        }
+        try await performRequest(request)
     }
 
     // MARK: - Private
@@ -106,6 +109,35 @@ final class WebDAVClient {
         let credential = "\(username):\(password)"
         let base64 = Data(credential.utf8).base64EncodedString()
         request.setValue("Basic \(base64)", forHTTPHeaderField: "Authorization")
+    }
+
+    /// 使用下载任务把响应先落到 URLSession 临时文件，再检查大小后读入内存；
+    /// 避免 `data(for:)` 在校验 Content-Length 前已经分配任意大的响应。
+    private func boundedResponseData(for request: URLRequest, maximumBytes: Int) async throws -> Data {
+        let (temporaryURL, response) = try await Self.secureSession.download(for: request)
+        let http = try validatedHTTPResponse(response)
+        if http.expectedContentLength > Int64(maximumBytes) {
+            throw WebDAVError.responseTooLarge
+        }
+        let attributes = try FileManager.default.attributesOfItem(atPath: temporaryURL.path)
+        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        guard size <= maximumBytes else { throw WebDAVError.responseTooLarge }
+        return try Data(contentsOf: temporaryURL, options: .mappedIfSafe)
+    }
+
+    /// 对无需响应体的写请求同样使用 download task，避免恶意服务器返回巨大 body。
+    private func performRequest(_ request: URLRequest) async throws {
+        let (_, response) = try await Self.secureSession.download(for: request)
+        _ = try validatedHTTPResponse(response)
+    }
+
+    private func validatedHTTPResponse(_ response: URLResponse) throws -> HTTPURLResponse {
+        guard let http = response as? HTTPURLResponse else { throw WebDAVError.requestFailed }
+        switch http.statusCode {
+        case 200...299: return http
+        case 404: throw WebDAVError.notFound
+        default: throw WebDAVError.httpStatus(http.statusCode)
+        }
     }
 
     private var propfindBody: String {
@@ -143,7 +175,7 @@ private final class WebDAVRedirectPolicyDelegate: NSObject, URLSessionTaskDelega
     }
 }
 
-struct WebDAVFile {
+struct WebDAVFile: Sendable {
     let path: String
     let name: String
     let isDirectory: Bool
@@ -187,9 +219,14 @@ enum WebDAVEndpointPolicy {
     }
 }
 
-enum WebDAVError: Error, LocalizedError {
+enum WebDAVError: Error, LocalizedError, Equatable {
     case invalidURL
     case insecureTransport
+    case notFound
+    case httpStatus(Int)
+    case responseTooLarge
+    case decompressedDataTooLarge
+    case tooManyEntries
     case requestFailed
     case uploadFailed
     case downloadFailed
@@ -199,6 +236,11 @@ enum WebDAVError: Error, LocalizedError {
         switch self {
         case .invalidURL: "服务器地址无效"
         case .insecureTransport: "WebDAV 仅允许 HTTPS（本机 localhost 可使用 HTTP）"
+        case .notFound: "WebDAV 目标不存在"
+        case .httpStatus(let status): "WebDAV 请求失败（HTTP \(status)）"
+        case .responseTooLarge: "WebDAV 响应超过安全大小限制"
+        case .decompressedDataTooLarge: "WebDAV 压缩数据解压后超过安全限制"
+        case .tooManyEntries: "WebDAV 返回的设备或文件数量超过安全限制"
         case .requestFailed: "WebDAV 请求失败"
         case .uploadFailed: "WebDAV 上传失败"
         case .downloadFailed: "WebDAV 下载失败"
@@ -218,6 +260,10 @@ final class WebDAVResponseParser: NSObject, XMLParserDelegate {
     private var baseURL: URL?
 
     static func parse(data: Data, baseURL: URL) -> [WebDAVFile] {
+        (try? parseValidated(data: data, baseURL: baseURL)) ?? []
+    }
+
+    static func parseValidated(data: Data, baseURL: URL) throws -> [WebDAVFile] {
         let parser = XMLParser(data: data)
         let delegate = WebDAVResponseParser()
         delegate.baseURL = baseURL
@@ -225,7 +271,7 @@ final class WebDAVResponseParser: NSObject, XMLParserDelegate {
         // 启用命名空间处理：elementName 将为本地名（无 "D:" 前缀），
         // 避免 WebDAV PROPFIND 响应中的 "D:response" 等带前缀元素名导致比较失败
         parser.shouldProcessNamespaces = true
-        parser.parse()
+        guard parser.parse() else { throw WebDAVError.parseError }
         return delegate.files
     }
 

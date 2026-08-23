@@ -334,6 +334,8 @@ private struct PowerDiagnosticsSection: View {
                     diagRow("适配器输入功率", adapterInputText)
                     diagRow("适配器额定功率", adapterWattsText)
                     diagRow("充电协议", sampler.currentInfo?.adapterProtocol ?? "—")
+                    diagRow("低电量模式", sampler.currentLowPowerModeEnabled ? "已开启" : "关闭")
+                    diagRow("系统热压力", sampler.currentThermalState)
                 }
                 .padding(.top, 6)
             } label: {

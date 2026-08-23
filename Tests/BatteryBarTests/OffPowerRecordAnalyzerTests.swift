@@ -53,6 +53,26 @@ import Foundation
         #expect(lightRecord.cycle.duration < heavyRecord.cycle.duration)
     }
 
+    @Test func longTrendIsBoundedAndKeepsEndpointsAndExtreme() {
+        var cycles: [ChargeCycle] = []
+        cycles.reserveCapacity(1_000)
+        for index in 0..<1_000 {
+            let duration = index == 500 ? 20.0 : Double(2 + (index % 5))
+            cycles.append(cycle(
+                daysAgo: Double(1_000 - index),
+                start: 90,
+                end: 80,
+                durationH: duration
+            ))
+        }
+        let normalized = OffPowerRecordAnalyzer.normalizedRecords(from: cycles)
+        let chart = OffPowerRecordAnalyzer.chartRecords(normalized, maxPoints: 240)
+        #expect(chart.count <= 240)
+        #expect(chart.first?.cycle.id == normalized.first?.cycle.id)
+        #expect(chart.last?.cycle.id == normalized.last?.cycle.id)
+        #expect(chart.contains { $0.cycle.id == normalized[500].cycle.id })
+    }
+
     @Test func smallDropOrShortDurationExcludedFromTrend() {
         let smallDrop = cycle(daysAgo: 3, start: 80, end: 78, durationH: 3)      // 下降 <5%
         let tooShort = cycle(daysAgo: 2, start: 80, end: 70, durationH: 0.2)     // 12 分钟 <15 分钟

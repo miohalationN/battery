@@ -37,6 +37,8 @@ final class PowerSampler {
     private(set) var currentVoltage: Double = 0
     private(set) var currentAmperage: Double = 0
     private(set) var currentAdapterInputPower: Double = 0
+    private(set) var currentLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
+    private(set) var currentThermalState = "正常"
     private(set) var currentInfo: BatteryInfo?
     private(set) var systemHealthPercent: Double = 0
     /// 最近一次基础读数轮询成功的时刻。只有明确读取它的小视图会跟随失效。
@@ -104,9 +106,10 @@ final class PowerSampler {
         )
 
         // 启动时读取当前电源状态
-        let ps = reader.readPowerSource()
-        let info = reader.readBatteryInfo()
-        let currentlyPluggedIn = info?.externalConnected ?? ps?.isPluggedIn ?? usage.wasExternalConnected
+        let reading = reader.readBatteryReading()
+        let currentlyPluggedIn = reading?.batteryInfo?.externalConnected
+            ?? reading?.powerSource.isPluggedIn
+            ?? usage.wasExternalConnected
 
         if currentlyPluggedIn {
             // 启动时在充电：保留上次统计，当前统计清零
@@ -158,19 +161,27 @@ final class PowerSampler {
         sampleUI()
         sampleStorage()
 
-        // 后台读取系统健康度（system_profiler 耗时 1-3s，不能阻塞主线程）
+        // 优先使用同一轮 IORegistry 的实际/设计容量，避免启动时额外再跑一份
+        // system_profiler。只有容量字段确实不可用时才走后台兜底。
         let reader = reader
-        Task { @MainActor in
-            let health = await Task.detached(priority: .userInitiated) {
-                reader.readSystemHealthPercent()
-            }.value
-            if health != self.systemHealthPercent { self.systemHealthPercent = health }
+        let directHealth = reading?.batteryInfo?.healthPercent ?? 0
+        if directHealth > 0 {
+            systemHealthPercent = directHealth
+        } else {
+            Task { @MainActor in
+                let health = await Task.detached(priority: .userInitiated) {
+                    reader.readSystemHealthPercent()
+                }.value
+                if health != self.systemHealthPercent { self.systemHealthPercent = health }
+            }
         }
 
         // 后台预加载静态信息（机器型号、序列号、制造商），避免主线程每秒 spawn system_profiler。
         // 加载完成无需广播：下一次轻量采样会经 shouldPublishMetadata 比对出新字段并写入 currentInfo，
         // Observation 只失效读取该属性的视图。
-        reader.prefetchStaticInfo()
+        reader.prefetchStaticInfo(
+            includeBatteryFallback: reading?.batteryInfo?.serialNumber.isEmpty ?? true
+        )
 
         // Helper 服务：启动时只做版本检查，不可因应用升级在后台突然弹管理员授权。
         // 版本不匹配时关闭运行态开关；用户再次主动开启才执行安装/更新。
@@ -306,12 +317,15 @@ final class PowerSampler {
         guard helperEnabled, !isComponentPowerSampleInFlight else { return }
         isComponentPowerSampleInFlight = true
         let reader = reader
+        let screenOn = !isSleeping && !areScreensSleeping
         Task { @MainActor in
             let (component, display) = await Task.detached(priority: .utility) { () -> (ComponentPower, Double) in
-                (reader.readComponentPower(), reader.estimateDisplayPower())
+                (reader.readComponentPower(), reader.estimateDisplayPower(screenOn: screenOn))
             }.value
             self.isComponentPowerSampleInFlight = false
 
+            // 关闭开关或 sampler stop 后，迟到的 XPC 结果不得重新写回已清零状态。
+            guard self.helperEnabled, self.isStarted else { return }
             let age = Date().timeIntervalSince(component.sampledAt)
             guard component.isAvailable, age >= 0, age < 120 else { return }
             self.lastComponentPowerAt = component.sampledAt
@@ -361,12 +375,16 @@ final class PowerSampler {
     private func sampleUI() {
         // IOPS 在睡眠切换/驱动重载时可能瞬时失败。此时保留上次 UI 状态，不能把
         // 失败合成为 0%/离电并污染插拔状态机。
-        guard let ps = reader.readPowerSource() else { return }
-        let info = reader.readBatteryInfo()
+        guard let reading = reader.readBatteryReading() else { return }
+        let ps = reading.powerSource
+        let info = reading.batteryInfo
 
         let previousLevel = currentLevel
         let previousCharging = currentIsCharging
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
+        let processInfo = ProcessInfo.processInfo
+        let lowPowerModeEnabled = processInfo.isLowPowerModeEnabled
+        let thermalState = Self.thermalStateLabel(processInfo.thermalState)
 
         // 插拔检测（每秒检查，立即响应，不等 sampleStorage 的每分钟检查）
         if wasExternalConnected && !isPluggedIn {
@@ -415,6 +433,10 @@ final class PowerSampler {
         if abs((info?.adapterInputPower ?? 0) - currentAdapterInputPower) > 0.05 {
             currentAdapterInputPower = info?.adapterInputPower ?? 0
         }
+        if lowPowerModeEnabled != currentLowPowerModeEnabled {
+            currentLowPowerModeEnabled = lowPowerModeEnabled
+        }
+        if thermalState != currentThermalState { currentThermalState = thermalState }
         // currentInfo 只承载界面使用的元数据。电压、电流、温度和功率已有独立
         // 可观察字段；若把这些高频值也纳入 BatteryInfo 等值比较，会平白多触发
         // 一次读取该属性的视图更新。
@@ -477,8 +499,9 @@ final class PowerSampler {
 
     private func sampleStorage() {
         // 采集失败时跳过这一分钟；伪造 0% 快照比一个明确的数据缺口更有害。
-        guard let ps = reader.readPowerSource() else { return }
-        let info = reader.readBatteryInfo()
+        guard let reading = reader.readBatteryReading() else { return }
+        let ps = reading.powerSource
+        let info = reading.batteryInfo
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
 
         let componentAge = Date().timeIntervalSince(lastComponentPowerAt)
@@ -498,7 +521,9 @@ final class PowerSampler {
             gpuPower: hasFreshComponents ? gpuPower : 0,
             displayPower: hasFreshComponents ? displayPower : 0,
             dramPower: hasFreshComponents ? dramPower : 0,
-            externalConnected: isPluggedIn
+            externalConnected: isPluggedIn,
+            lowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            thermalState: Self.thermalStateLabel(ProcessInfo.processInfo.thermalState)
         )
         DataStore.shared.saveSnapshot(snapshot)
 
@@ -526,6 +551,16 @@ final class PowerSampler {
         reader.openBatterySettings()
     }
 
+    private static func thermalStateLabel(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: "正常"
+        case .fair: "偏高"
+        case .serious: "较高"
+        case .critical: "严重"
+        @unknown default: "未知"
+        }
+    }
+
     /// 用户手动开启 Helper：安装（osascript 弹一次管理员密码框）在后台线程执行，
     /// 主线程保持响应；仅当安装成功后才写入 UserDefaults，避免密码取消/错误时开关仍显示开启。
     func enableHelperInBackground() async {
@@ -544,8 +579,8 @@ final class PowerSampler {
 
     /// 用户手动关闭 Helper：后台卸载 root 守护进程（弹一次管理员密码框），
     /// 停止读取分项功耗并清零数据。
-    /// 用户取消密码框时守护进程保留，但 app 停止调用——helper 4.0 起
-    /// powermetrics 有 60s 空闲自停，保留亦无持续开销。
+    /// 用户取消密码框时 launchd job 可能保留，但 app 停止调用；helper 5.0 的
+    /// powermetrics 60s 空闲自停，Helper 进程本身也会退出。
     func disableHelperInBackground() async {
         stopComponentPowerTimer()
         UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")

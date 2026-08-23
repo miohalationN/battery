@@ -1,75 +1,40 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # 最低系统要求：macOS 14.0（Sonoma）
 # 此脚本编译并更新 /Applications 中的 BatteryBar，helper 随 app 打包到 Resources。
 
 APP_NAME="BatteryBar"
-APP_PATH="/Applications/$APP_NAME.app"
+INSTALL_ROOT="${BATTERYBAR_INSTALL_DIR:-$HOME/Applications}"
+APP_PATH="$INSTALL_ROOT/$APP_NAME.app"
 BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
-ICON_DIR="Sources/BatteryBar/Resources"
 
 echo "=== 正在更新 $APP_NAME ==="
 
 # 1. 关闭正在运行的 app
 echo "关闭应用..."
-pkill -f "$APP_NAME.app" 2>/dev/null || true
+pkill -x "$APP_NAME" 2>/dev/null || true
 sleep 0.5
 
-# 2. 编译（包含 helper）
-echo "编译中..."
-swift build -c release
-
-# 3. 创建 app bundle
-echo "打包中..."
-rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$APP_BUNDLE/Contents/Resources"
-
-# 复制主应用
-cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
-cp "$ICON_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
-cp "$ICON_DIR/AppIcon.png" "$APP_BUNDLE/Contents/Resources/"
-
-# 复制 helper 到 Resources（app 内自动安装用）
-cp "$BUILD_DIR/BatteryBarHelper" "$APP_BUNDLE/Contents/Resources/"
-
-cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>BatteryBar</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.batterybar.app</string>
-    <key>CFBundleName</key>
-    <string>电池监测</string>
-    <key>CFBundleDisplayName</key>
-    <string>电池监测</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleVersion</key>
-    <string>4</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.3.0</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-PLIST
+# 2–3. 统一使用正式打包脚本，避免 update.sh 产生未签名的第二种 App。
+echo "编译并签名中..."
+bash build-app.sh
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 # 4. 替换 Applications 中的 app
-echo "安装到 Applications..."
-rm -rf "$APP_PATH"
-cp -R "$APP_BUNDLE" "$APP_PATH"
+echo "安装到 $INSTALL_ROOT..."
+mkdir -p "$INSTALL_ROOT"
+BACKUP_PATH="$INSTALL_ROOT/$APP_NAME.pre-update.$$.app"
+if [ -e "$APP_PATH" ]; then
+    mv "$APP_PATH" "$BACKUP_PATH"
+fi
+if ! ditto "$APP_BUNDLE" "$APP_PATH"; then
+    if [ -e "$BACKUP_PATH" ]; then mv "$BACKUP_PATH" "$APP_PATH"; fi
+    exit 1
+fi
+codesign --verify --deep --strict "$APP_PATH"
+if [ -e "$BACKUP_PATH" ]; then rm -rf "$BACKUP_PATH"; fi
 
 # 5. 重新打开
 echo "启动应用..."

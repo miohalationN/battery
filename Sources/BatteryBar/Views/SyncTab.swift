@@ -43,7 +43,11 @@ struct SyncTab: View {
             refreshInterval = Int(DataStore.shared.currentRefreshInterval())
             reloadLocalCounts()
             // 预填密码（用于测试连接 / 同步），从 Keychain 读取
-            if let pw = KeychainHelper.getPassword(for: config.username) { password = pw }
+            password = KeychainHelper.getPassword(
+                serverURL: config.serverURL,
+                username: config.username,
+                allowLegacyMigration: true
+            ) ?? ""
         }
         .onReceive(NotificationCenter.default.publisher(for: .batterySnapshotsDidChange)) { _ in
             reloadLocalCounts()
@@ -207,7 +211,9 @@ struct SyncTab: View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             SectionHeader(title: "服务器配置", systemImage: "server.rack", tint: .bbPurple)
             glassField("服务器地址", text: $config.serverURL, placeholder: "https://dav.jianguoyun.com/dav/")
+                .onChange(of: config.serverURL) { credentialIdentityDidChange() }
             glassField("用户名", text: $config.username, placeholder: "username")
+                .onChange(of: config.username) { credentialIdentityDidChange() }
             glassField("远程路径", text: $config.remotePath, placeholder: "/BatteryBar")
             HStack(spacing: 8) {
                 Image(systemName: "lock").font(.system(size: 11)).foregroundStyle(.tertiary)
@@ -235,13 +241,20 @@ struct SyncTab: View {
     private func schedulePasswordSave() {
         passwordDebounceTask?.cancel()
         let pw = password
+        let serverURL = config.serverURL
         let user = config.username
         guard !pw.isEmpty else { return }
         passwordDebounceTask = Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
             if Task.isCancelled { return }
-            try? KeychainHelper.setPassword(pw, for: user)
+            try? KeychainHelper.setPassword(pw, serverURL: serverURL, username: user)
         }
+    }
+
+    private func credentialIdentityDidChange() {
+        passwordDebounceTask?.cancel()
+        password = KeychainHelper.getPassword(serverURL: config.serverURL, username: config.username) ?? ""
+        testResult = nil
     }
 
     // MARK: - 同步设置
@@ -395,7 +408,7 @@ struct SyncTab: View {
         guard let url = URL(string: config.serverURL) else { testResult = "❌ 无效的 URL"; return }
         do { try WebDAVEndpointPolicy.validate(url) }
         catch { testResult = "❌ \(error.localizedDescription)"; return }
-        let pw = KeychainHelper.getPassword(for: config.username) ?? password
+        let pw = password
         guard !pw.isEmpty else { testResult = "❌ 请先输入密码"; return }
         let client = WebDAVClient(baseURL: url, username: config.username, password: pw)
         do { _ = try await client.listFiles(at: config.remotePath); testResult = "✅ 连接成功" }

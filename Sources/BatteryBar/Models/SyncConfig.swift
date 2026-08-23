@@ -58,11 +58,20 @@ struct SyncConfig: Codable {
     )
 
     private static func deviceIdentifier() -> String {
+        UUID().uuidString
+    }
+
+    /// 早期版本把可跨应用关联的硬件 Platform UUID 用作远端目录名。
+    /// 发现该旧值时原地换成应用随机 UUID；旧远端目录仍会在下载时被扫描，数据不丢。
+    mutating func migrateLegacyHardwareIdentifierIfNeeded() -> Bool {
         let platformExpert = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
         defer { IOObjectRelease(platformExpert) }
         guard platformExpert != 0,
               let uuid = IORegistryEntryCreateCFProperty(platformExpert, kIOPlatformUUIDKey as CFString, kCFAllocatorDefault, 0)
-        else { return UUID().uuidString }
-        return uuid.takeRetainedValue() as? String ?? UUID().uuidString
+        else { return false }
+        guard let hardwareUUID = uuid.takeRetainedValue() as? String,
+              deviceID.caseInsensitiveCompare(hardwareUUID) == .orderedSame else { return false }
+        deviceID = UUID().uuidString
+        return true
     }
 }

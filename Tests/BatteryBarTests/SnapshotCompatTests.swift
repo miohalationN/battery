@@ -124,6 +124,25 @@ import Foundation
         }
     }
 
+    @Test func contextualPowerStateRoundTripRemainsOptionalForLegacyData() throws {
+        let current = BatterySnapshot(
+            timestamp: base, level: 55, isCharging: false, wattage: 8,
+            temperature: 31, screenOn: true, externalConnected: false,
+            lowPowerModeEnabled: true, thermalState: "偏高"
+        )
+        let decoded = try JSONDecoder().decode(BatterySnapshot.self, from: JSONEncoder().encode(current))
+        #expect(decoded.lowPowerModeEnabled == true)
+        #expect(decoded.thermalState == "偏高")
+
+        let legacyJSON = """
+        {"id":"\(UUID().uuidString)","timestamp":1720780800.0,"level":50,"isCharging":false,
+         "wattage":7.0,"temperature":30.0,"screenOn":true}
+        """.data(using: .utf8)!
+        let legacy = try JSONDecoder().decode(BatterySnapshot.self, from: legacyJSON)
+        #expect(legacy.lowPowerModeEnabled == nil)
+        #expect(legacy.thermalState == nil)
+    }
+
     @Test func memberwiseDefaultsDeriveFromChargingState() {
         let charging = BatterySnapshot(timestamp: base, level: 90, isCharging: true, wattage: 30, temperature: 0, screenOn: true)
         #expect(charging.systemPowerAvailable == false)

@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import IOKit
 import IOKit.ps
+import Security
 import os
 
 private let batteryReaderLogger = Logger(subsystem: "com.batterybar", category: "BatteryReader")
@@ -20,6 +21,13 @@ final class BatteryReader: @unchecked Sendable {
         let isPluggedIn: Bool
         let timeRemaining: Int
         let capacity: Int
+    }
+
+    /// 同一轮采样的 IOPS 与 IORegistry 结果。调用方必须消费这一个快照，避免先后
+    /// 两次读取跨过插拔边界，也避免每秒重复调用 IOPSCopyPowerSourcesInfo。
+    struct BatteryReading {
+        let powerSource: PowerSourceInfo
+        let batteryInfo: BatteryInfo?
     }
 
     /// 静态信息缓存：机器型号、电池序列号、制造商等几乎不变的字段。
@@ -41,7 +49,7 @@ final class BatteryReader: @unchecked Sendable {
     /// 在 PowerSampler.start() 中调用，避免主线程阻塞。
     /// 加载完成后通过 `staticInfoLoaded` 通知外部触发 UI 刷新。
     private static let staticInfoLoadedNotification = Notification.Name("BatteryReaderStaticInfoLoaded")
-    func prefetchStaticInfo() {
+    func prefetchStaticInfo(includeBatteryFallback: Bool = true) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             // 已缓存则跳过
@@ -55,7 +63,7 @@ final class BatteryReader: @unchecked Sendable {
             let model = self.readHardwareModel()
             var serialFallback = ""
             var mfgFallback = ""
-            if let profile = self.readSystemProfilerBattery() {
+            if includeBatteryFallback, let profile = self.readSystemProfilerBattery() {
                 serialFallback = profile.serialNumber
                 mfgFallback = profile.manufacturer
             }
@@ -67,7 +75,7 @@ final class BatteryReader: @unchecked Sendable {
             self.staticInfoLock.lock()
             self._staticInfo = info
             self.staticInfoLock.unlock()
-            batteryReaderLogger.info("Static info prefetched: model=\(model ?? "nil", privacy: .public), serial=\(serialFallback, privacy: .public)")
+            batteryReaderLogger.info("Static info prefetched: model=\(model ?? "nil", privacy: .public), serial=\(serialFallback, privacy: .private(mask: .hash))")
             NotificationCenter.default.post(name: Self.staticInfoLoadedNotification, object: nil)
         }
     }
@@ -116,7 +124,19 @@ final class BatteryReader: @unchecked Sendable {
         return PowerSourceInfo(level: level, isCharging: isCharging, isPluggedIn: isPluggedIn, timeRemaining: timeRemaining, capacity: capacity)
     }
 
+    func readBatteryReading() -> BatteryReading? {
+        guard let powerSource = readPowerSource() else { return nil }
+        return BatteryReading(
+            powerSource: powerSource,
+            batteryInfo: readBatteryInfo(powerSource: powerSource)
+        )
+    }
+
     func readBatteryInfo() -> BatteryInfo? {
+        readBatteryInfo(powerSource: readPowerSource())
+    }
+
+    private func readBatteryInfo(powerSource: PowerSourceInfo?) -> BatteryInfo? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
@@ -126,11 +146,16 @@ final class BatteryReader: @unchecked Sendable {
         // 只匹配 AppleSmartBattery 会漏掉本机真实存在的传感器数据。
         let packService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBatteryPack"))
         defer { if packService != 0 { IOObjectRelease(packService) } }
+        // 同一轮只把大型嵌套字典从 IORegistry 复制一次；旧实现每取一个字段都会
+        // 再次跨 IOKit 边界创建整份 CFDictionary，是前台 1 秒轮询的主要分配热点。
+        let batteryData = readDictionary(service, "BatteryData")
+        let packBatteryData = readDictionary(packService, "BatteryData")
+        let telemetryData = readDictionary(service, "PowerTelemetryData")
 
         let designCap = Self.firstValidCapacity([
             readInt(service, "DesignCapacity"),
-            readNestedInt(service, "BatteryData", key: "DesignCapacity"),
-            readNestedInt(packService, "BatteryData", key: "DesignCapacity"),
+            dictionaryInt(batteryData, key: "DesignCapacity"),
+            dictionaryInt(packBatteryData, key: "DesignCapacity"),
         ])
         // 顶层 MaxCapacity 语义随系统版本变化：
         //   - 旧系统：mAh（>1000）
@@ -139,10 +164,10 @@ final class BatteryReader: @unchecked Sendable {
         // 实际满充容量（mAh）：优先 BatteryData.FullChargeCapacity（macOS 27+），
         // 其次 FccComp1（部分旧系统），再退到旧版顶层 mAh 或百分比推算
         let fcc = Self.firstValidCapacity([
-            readNestedInt(service, "BatteryData", key: "FullChargeCapacity"),
-            readNestedInt(service, "BatteryData", key: "FccComp1"),
-            readNestedInt(packService, "BatteryData", key: "FullChargeCapacity"),
-            readNestedInt(packService, "BatteryData", key: "FccComp1"),
+            dictionaryInt(batteryData, key: "FullChargeCapacity"),
+            dictionaryInt(batteryData, key: "FccComp1"),
+            dictionaryInt(packBatteryData, key: "FullChargeCapacity"),
+            dictionaryInt(packBatteryData, key: "FccComp1"),
         ])
         let actualMaxCap: Int
         if fcc > 0 {
@@ -157,37 +182,36 @@ final class BatteryReader: @unchecked Sendable {
 
         let cycles = Self.firstValidCycleCount([
             readInt(service, "CycleCount"),
-            readNestedInt(packService, "BatteryData", key: "CycleCount"),
+            dictionaryInt(packBatteryData, key: "CycleCount"),
         ])
         let voltage = Self.firstValidDouble([
             readDouble(service, "Voltage"),
-            readNestedDouble(service, "BatteryData", key: "Voltage"),
-            readNestedDouble(packService, "BatteryData", key: "Voltage"),
+            dictionaryDouble(batteryData, key: "Voltage"),
+            dictionaryDouble(packBatteryData, key: "Voltage"),
         ], normalize: Self.normalizedBatteryVoltage)
         let amperageCandidates = [
             readDouble(service, "InstantAmperage"),
             readDouble(service, "Amperage"),
-            readNestedDouble(service, "BatteryData", key: "InstantAmperage"),
-            readNestedDouble(service, "BatteryData", key: "Amperage"),
-            readNestedDouble(packService, "BatteryData", key: "InstantAmperage"),
-            readNestedDouble(packService, "BatteryData", key: "Amperage"),
+            dictionaryDouble(batteryData, key: "InstantAmperage"),
+            dictionaryDouble(batteryData, key: "Amperage"),
+            dictionaryDouble(packBatteryData, key: "InstantAmperage"),
+            dictionaryDouble(packBatteryData, key: "Amperage"),
         ].compactMap { $0 }
         let amperage = amperageCandidates.first(where: {
             $0.isFinite && abs($0) <= 30_000
         }).map(Self.normalizedBatteryCurrent) ?? 0
         let temperature = Self.firstValidDouble([
             readDouble(service, "Temperature"),
-            readNestedDouble(service, "BatteryData", key: "Temperature"),
+            dictionaryDouble(batteryData, key: "Temperature"),
             readDouble(packService, "Temperature"),
-            readNestedDouble(packService, "BatteryData", key: "Temperature"),
-            readNestedDouble(packService, "BatteryData", key: "VirtualTemperature"),
+            dictionaryDouble(packBatteryData, key: "Temperature"),
+            dictionaryDouble(packBatteryData, key: "VirtualTemperature"),
         ], normalize: Self.normalizedBatteryTemperature)
         // IORegistry 顶层字段名实测：Serial / DeviceName（不是 SerialNumber / DeviceName）
         // DeviceName 是电池管理芯片型号（如 bq20z451），不是机器型号
         let batteryChipName = readString(service, "DeviceName") ?? ""
         var serial = readString(service, "Serial") ?? readString(service, "SerialNumber") ?? ""
         var mfg = readString(service, "Manufacturer") ?? ""
-        let powerSource = readPowerSource()
         let isCharging = readOptionalBool(service, "IsCharging") ?? powerSource?.isCharging ?? false
         let externalConnected = readOptionalBool(service, "ExternalConnected") ?? powerSource?.isPluggedIn ?? false
 
@@ -212,9 +236,9 @@ final class BatteryReader: @unchecked Sendable {
         // 优先使用电源遥测/电池控制器直接给出的 BatteryPower（mW）。电压×瞬时电流
         // 只作最后兜底：瞬时电流在满电维持阶段抖动明显，不能替代控制器功率口径。
         let directBatteryPower = Self.firstValidDouble([
-            readNestedDouble(service, "PowerTelemetryData", key: "BatteryPower"),
-            readNestedDouble(service, "BatteryData", key: "BatteryPower"),
-            readNestedDouble(packService, "BatteryData", key: "BatteryPower"),
+            dictionaryDouble(telemetryData, key: "BatteryPower"),
+            dictionaryDouble(batteryData, key: "BatteryPower"),
+            dictionaryDouble(packBatteryData, key: "BatteryPower"),
         ], normalize: Self.normalizedBatteryPower)
         let calculatedBatteryPower = abs(voltage * amperage) / 1_000_000
         let batteryPower = directBatteryPower > 0 ? directBatteryPower : calculatedBatteryPower
@@ -223,15 +247,15 @@ final class BatteryReader: @unchecked Sendable {
         // 旧实现把 batteryPower（充电时只是电池包净流入功率）标成“系统总功耗”，
         // 在接电且满电时会显示 0.x W，而机器真实负载通常仍有数瓦到十几瓦。
         let telemetrySystemLoad = Self.normalizedTelemetryMilliwatts(
-            readNestedDouble(service, "PowerTelemetryData", key: "SystemLoad")
+            dictionaryDouble(telemetryData, key: "SystemLoad")
         )
         let telemetryInputPower = Self.normalizedTelemetryMilliwatts(
-            readNestedDouble(service, "PowerTelemetryData", key: "SystemPowerIn")
+            dictionaryDouble(telemetryData, key: "SystemPowerIn")
         )
 
         let legacySystemPower = Self.firstValidDouble([
-            readNestedDouble(service, "BatteryData", key: "SystemPower"),
-            readNestedDouble(service, "BatteryData", key: "AdapterPower"),
+            dictionaryDouble(batteryData, key: "SystemPower"),
+            dictionaryDouble(batteryData, key: "AdapterPower"),
         ], normalize: Self.normalizedTelemetryPower)
         let systemPower: Double
         let systemPowerAvailable: Bool
@@ -658,16 +682,17 @@ final class BatteryReader: @unchecked Sendable {
     ///   - MacBook Pro (14"): 基础 2.0W + 亮度系数 (0-100% ≈ 0-3.0W)
     ///   - MacBook Pro (16"): 基础 2.5W + 亮度系数 (0-100% ≈ 0-4.0W)
     /// 此处采用通用简化模型：基础 1.5W + 亮度 × 2.5W。
-    func estimateDisplayPower() -> Double {
-        var brightness: Float = 0.7 // 默认假设 70% 亮度
+    func estimateDisplayPower(screenOn: Bool = true) -> Double {
+        guard screenOn else { return 0 }
+        var brightness: Float = 0
 
         // 通过 IOKit 读取主显示器亮度 (0.0-1.0)
         // kIODisplayBrightnessKey = "brightness"
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"))
-        if service != 0 {
-            defer { IOObjectRelease(service) }
-            IODisplayGetFloatParameter(service, 0, "brightness" as CFString, &brightness)
-        }
+        guard service != 0 else { return 0 }
+        defer { IOObjectRelease(service) }
+        guard IODisplayGetFloatParameter(service, 0, "brightness" as CFString, &brightness) == kIOReturnSuccess,
+              brightness.isFinite, brightness >= 0, brightness <= 1 else { return 0 }
 
         let basePower = 1.5
         let brightnessPower = Double(brightness) * 2.5
@@ -776,8 +801,9 @@ final class BatteryReader: @unchecked Sendable {
     }
 
     /// 当前要求的 helper 版本（不匹配则需重新安装）
-    /// 4.2：增加显式样本可用性/时间戳，0 W 不再被误判为无数据。
-    private static let requiredHelperVersion = "4.2"
+    /// 5.0：Helper 调用方同时校验 bundle id 与安装时绑定的客户端 CDHash；
+    /// launchd 改为按 XPC 请求启动，Helper 空闲后退出。
+    private static let requiredHelperVersion = "5.0"
 
     /// 检查已安装的 helper 版本是否满足要求
     /// 返回 true 表示需要更新（版本不匹配或无法通信）
@@ -844,17 +870,63 @@ final class BatteryReader: @unchecked Sendable {
         if isHelperInstalled() && !needsHelperUpdate() { return true }
 
         let helperPath: String
-        if let bundledPath = Bundle.main.path(forResource: "BatteryBarHelper", ofType: nil) {
+        if let bundledPath = validatedBundledHelperPath() {
             helperPath = bundledPath
-        } else if let envPath = ProcessInfo.processInfo.environment["BATTERYBAR_HELPER_PATH"],
-                  FileManager.default.fileExists(atPath: envPath) {
-            // 仅开发调试用
-            helperPath = envPath
         } else {
+#if DEBUG
+            if let envPath = ProcessInfo.processInfo.environment["BATTERYBAR_HELPER_PATH"],
+               FileManager.default.fileExists(atPath: envPath) {
+                // 仅 Debug 裸二进制开发使用；Release 构建绝不接受环境变量提供的 root payload。
+                helperPath = envPath
+            } else {
+                batteryReaderLogger.error("Helper binary not found in app bundle. Ensure build-app.sh was used.")
+                return false
+            }
+#else
             batteryReaderLogger.error("Helper binary not found in app bundle. Ensure build-app.sh was used.")
             return false
+#endif
         }
         return installHelper(from: helperPath)
+    }
+
+    /// 只接受当前已签名 App Bundle 内、解析符号链接后仍位于 Resources 下的 Helper。
+    /// 这既阻止 Release 环境变量替换 payload，也避免 bundle 内符号链接逃逸。
+    private func validatedBundledHelperPath() -> String? {
+        guard let resourceURL = Bundle.main.resourceURL?.resolvingSymlinksInPath(),
+              let rawURL = Bundle.main.url(forResource: "BatteryBarHelper", withExtension: nil)
+        else { return nil }
+        let helperURL = rawURL.resolvingSymlinksInPath()
+        let resourcePrefix = resourceURL.path.hasSuffix("/") ? resourceURL.path : resourceURL.path + "/"
+        guard helperURL.path.hasPrefix(resourcePrefix),
+              FileManager.default.isExecutableFile(atPath: helperURL.path),
+              staticCodeIsValid(at: Bundle.main.bundleURL),
+              staticCodeIsValid(at: helperURL)
+        else {
+            batteryReaderLogger.error("Rejecting untrusted bundled Helper")
+            return nil
+        }
+        return helperURL.path
+    }
+
+    private func staticCodeIsValid(at url: URL) -> Bool {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
+              let code else { return false }
+        return SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess
+    }
+
+    private func currentExecutableCDHash() -> String? {
+        guard let executableURL = Bundle.main.executableURL else { return nil }
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &code) == errSecSuccess,
+              let code else { return nil }
+        var infoCF: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &infoCF) == errSecSuccess,
+              let info = infoCF as? [String: Any],
+              let hash = info[kSecCodeInfoUnique as String] as? Data,
+              !hash.isEmpty else { return nil }
+        return hash.map { String(format: "%02x", $0) }.joined()
     }
 
     /// 执行安装
@@ -862,9 +934,11 @@ final class BatteryReader: @unchecked Sendable {
         let helperID = "com.batterybar.helper"
         let installPath = "/Library/PrivilegedHelperTools/\(helperID)"
         let plistPath = "/Library/LaunchDaemons/\(helperID).plist"
+        guard let authorizedClientCDHash = currentExecutableCDHash() else {
+            batteryReaderLogger.error("Cannot bind Helper to the current signed executable")
+            return false
+        }
 
-        // 先写 plist 到临时文件
-        let tempPlist = FileManager.default.temporaryDirectory.appendingPathComponent("\(helperID).plist")
         let plistContent = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -881,30 +955,41 @@ final class BatteryReader: @unchecked Sendable {
                 <key>\(helperID)</key>
                 <true/>
             </dict>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
+            <key>EnvironmentVariables</key>
+            <dict>
+                <key>BATTERYBAR_AUTHORIZED_CLIENT_CDHASH</key>
+                <string>\(authorizedClientCDHash)</string>
+            </dict>
         </dict>
         </plist>
         """
 
-        do {
-            try plistContent.write(to: tempPlist, atomically: true, encoding: .utf8)
-        } catch {
-            batteryReaderLogger.error("Failed to write plist: \(error.localizedDescription)")
-            return false
-        }
-
-        // 用 osascript 请求管理员权限执行安装
-        // 顺序很重要：先 bootout 杀旧进程释放文件锁，再 cp 覆盖二进制，最后 bootstrap 启动新进程
+        // 用 osascript 请求管理员权限执行安装。所有动态路径都通过 argv 传入，再由
+        // AppleScript 的 `quoted form of` 生成 shell 参数；禁止把路径直接插进命令字符串。
+        // plist 内容也由提权 shell 直接写入最终路径，不经过可被同用户进程替换的临时文件。
+        // 顺序很重要：先 bootout 杀旧进程释放文件锁，再 cp 覆盖二进制，最后 bootstrap 启动新进程。
         let script = """
-        do shell script "mkdir -p /Library/PrivilegedHelperTools && (launchctl bootout system/\(helperID) 2>/dev/null || true) && sleep 1 && cp '\(helperPath)' '\(installPath)' && chown root:wheel '\(installPath)' && chmod 755 '\(installPath)' && cp '\(tempPlist.path)' '\(plistPath)' && chown root:wheel '\(plistPath)' && chmod 644 '\(plistPath)' && sleep 1 && launchctl bootstrap system/ '\(plistPath)'" with administrator privileges with prompt "\(AppBrand.displayName)需要安装后台服务以读取 CPU/GPU 分项功耗"
+        on run argv
+            set helperSource to item 1 of argv
+            set helperDestination to item 2 of argv
+            set plistDestination to item 3 of argv
+            set plistContents to item 4 of argv
+            set authPrompt to item 5 of argv
+            set shellCommand to "mkdir -p /Library/PrivilegedHelperTools && (launchctl bootout system/com.batterybar.helper 2>/dev/null || true) && sleep 1 && cp " & quoted form of helperSource & " " & quoted form of helperDestination & " && chown root:wheel " & quoted form of helperDestination & " && chmod 755 " & quoted form of helperDestination & " && /usr/bin/printf %s " & quoted form of plistContents & " > " & quoted form of plistDestination & " && chown root:wheel " & quoted form of plistDestination & " && chmod 644 " & quoted form of plistDestination & " && sleep 1 && launchctl bootstrap system/ " & quoted form of plistDestination
+            do shell script shellCommand with administrator privileges with prompt authPrompt
+        end run
         """
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", script]
+        task.arguments = [
+            "-e", script, "--",
+            helperPath,
+            installPath,
+            plistPath,
+            plistContent,
+            "\(AppBrand.displayName)需要安装后台服务以读取 CPU/GPU 分项功耗",
+        ]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = Pipe()
@@ -912,8 +997,6 @@ final class BatteryReader: @unchecked Sendable {
         do {
             try task.run()
             task.waitUntilExit()
-            // 清理临时文件
-            try? FileManager.default.removeItem(at: tempPlist)
             if task.terminationStatus == 0 {
                 // 等待新 helper 启动
                 Thread.sleep(forTimeInterval: 2.0)
@@ -923,7 +1006,6 @@ final class BatteryReader: @unchecked Sendable {
             }
         } catch {
             batteryReaderLogger.error("Failed to install helper: \(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: tempPlist)
         }
         return false
     }
@@ -992,15 +1074,20 @@ final class BatteryReader: @unchecked Sendable {
         IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
     }
 
-    private func readNestedInt(_ entry: io_registry_entry_t, _ dict: String, key: String) -> Int? {
-        guard let dict = IORegistryEntryCreateCFProperty(entry, dict as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] else { return nil }
-        return dict[key] as? Int
+    private func readDictionary(_ entry: io_registry_entry_t, _ key: String) -> [String: Any]? {
+        guard entry != 0 else { return nil }
+        return IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? [String: Any]
     }
 
-    private func readNestedDouble(_ entry: io_registry_entry_t, _ dict: String, key: String) -> Double? {
-        guard let dict = IORegistryEntryCreateCFProperty(entry, dict as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] else { return nil }
-        return dict[key] as? Double
+    private func dictionaryInt(_ dictionary: [String: Any]?, key: String) -> Int? {
+        dictionary?[key] as? Int
     }
+
+    private func dictionaryDouble(_ dictionary: [String: Any]?, key: String) -> Double? {
+        dictionary?[key] as? Double
+    }
+
 }
 
 struct ComponentPower {

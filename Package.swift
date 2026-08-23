@@ -62,6 +62,8 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Charts"),
                 .linkedFramework("Security"),
+                .linkedFramework("ImageIO"),
+                .linkedFramework("Compression"),
             ]
         ),
         // Privileged Helper Tool

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
+import ImageIO
 
 @main
 struct BatteryBarApp: App {
@@ -42,11 +43,27 @@ struct BatteryBarApp: App {
         let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png")
         #endif
         if let url = iconURL,
-           let image = NSImage(contentsOf: url) {
+           let image = Self.runtimeIcon(from: url) {
             NSApplication.shared.applicationIconImage = image
         } else {
             NSApplication.shared.applicationIconImage = Self.drawAppIcon()
         }
+    }
+
+    /// Finder/Dock 继续由完整 ICNS 提供所有尺寸；进程内只显示 28–56pt 图标，没必要
+    /// 常驻解码 1024px PNG。缩成 256px 可显著降低 CG Image 物理页占用。
+    private static func runtimeIcon(from url: URL) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 256,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: 256, height: 256))
     }
 
     /// 用 CoreGraphics 绘制 1024×1024 电池图标作为 App 图标

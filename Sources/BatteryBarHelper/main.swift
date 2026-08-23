@@ -11,9 +11,9 @@ import TelemetryCore
     func getVersion(withReply reply: @escaping (String) -> Void)
 }
 
-/// Privileged Helper — 以 root 权限常驻运行，通过 XPC 通信。
+/// Privileged Helper — 由 launchd 按 XPC 请求以 root 权限启动，空闲后退出。
 ///
-/// v4.1：继承 4.0 流式采样架构，并直接拒绝未通过签名校验的 XPC 连接。
+/// v5.0：调用方绑定安装时主程序 CDHash；Helper 本身不再 RunAtLoad/KeepAlive 常驻。
 /// v4.0 重大变更：
 /// - powermetrics 从「每次调用 spawn 子进程」改为懒启动常驻流式进程
 ///   （`-i 10000` 每 10s 输出一轮采样，逐行解析缓存最新值）。
@@ -43,6 +43,7 @@ class HelperTool: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
     private var processStartedAt = Date.distantPast
     private var failedStarts = 0
     private var cooldownUntil = Date.distantPast
+    private let processIdleTimeout: TimeInterval = 120
 
     override init() {
         self.listener = NSXPCListener(machServiceName: "com.batterybar.helper")
@@ -64,11 +65,9 @@ class HelperTool: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         return true
     }
 
-    /// 调用方校验：pid 反查 SecCode，要求签名有效（未被篡改）且 bundle id 匹配。
-    ///
-    /// 局限性（有意接受）：ad-hoc 签名无 TeamID，无法做同一开发者强校验，
-    /// 这里校验的是「代码完整 + bundle id 正确」，防的是随意进程白嫖 root helper；
-    /// 发布版换 Developer ID 后应改为硬编码 designated requirement。
+    /// 调用方校验：pid 反查 SecCode，要求签名有效、bundle id 匹配，并且 CDHash
+    /// 等于安装时写入 launchd 环境的主程序 CDHash。即便当前使用 ad-hoc 签名，
+    /// 其他进程也不能仅靠伪造 bundle id 调用现有 root Helper。
     private func isCallerAllowed(_ connection: NSXPCConnection) -> Bool {
         let pid = connection.processIdentifier
         var code: SecCode?
@@ -81,8 +80,11 @@ class HelperTool: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         guard SecCodeCheckValidity(code, [], nil) == errSecSuccess else {
             return false
         }
-        guard let identifier = codeIdentifier(code) else { return false }
-        return identifier == "com.batterybar.app"
+        return HelperAuthorization.allows(
+            identifier: codeIdentifier(code),
+            actualCDHash: codeDirectoryHash(code),
+            expectedCDHash: ProcessInfo.processInfo.environment["BATTERYBAR_AUTHORIZED_CLIENT_CDHASH"]
+        )
     }
 
     private func codeIdentifier(_ code: SecCode) -> String? {
@@ -93,6 +95,18 @@ class HelperTool: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &infoCF) == errSecSuccess,
               let info = infoCF as? [String: Any] else { return nil }
         return info[kSecCodeInfoIdentifier as String] as? String
+    }
+
+    private func codeDirectoryHash(_ code: SecCode) -> String? {
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return nil }
+        var infoCF: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &infoCF) == errSecSuccess,
+              let info = infoCF as? [String: Any],
+              let hash = info[kSecCodeInfoUnique as String] as? Data,
+              !hash.isEmpty else { return nil }
+        return hash.map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -116,7 +130,7 @@ extension HelperTool: HelperProtocol {
     }
 
     func getVersion(withReply reply: @escaping (String) -> Void) {
-        reply("4.2")
+        reply("5.0")
     }
 
     // MARK: - powermetrics 流式进程管理（以下方法均在 powerQueue 上执行）
@@ -233,11 +247,16 @@ extension HelperTool: HelperProtocol {
         let timer = DispatchSource.makeTimerSource(queue: powerQueue)
         timer.schedule(deadline: .now() + 30, repeating: 30)
         timer.setEventHandler { [self] in
-            guard let process = metricsProcess else { return }
-            if Date().timeIntervalSince(lastRequestAt) > idleTimeout {
+            let idleFor = Date().timeIntervalSince(lastRequestAt)
+            if let process = metricsProcess, idleFor > idleTimeout {
                 process.terminationHandler = nil  // 主动退出不触发重启
                 metricsProcess = nil
                 process.terminate()
+            }
+            // MachServices 会在下次 XPC 连接时重新拉起进程。Helper 本身不再常驻；
+            // 这只终止当前按需实例，不卸载 launchd job。
+            if metricsProcess == nil, idleFor > processIdleTimeout {
+                exit(EXIT_SUCCESS)
             }
         }
         timer.resume()

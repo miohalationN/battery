@@ -7,8 +7,8 @@ set -e
 
 APP_NAME="BatteryBar"
 PRODUCT_NAME="电池监测"
-APP_VERSION="1.3.0"
-APP_BUILD="4"
+APP_VERSION="1.4.0"
+APP_BUILD="5"
 HELPER_NAME="BatteryBarHelper"
 # 分发用 release 构建：debug 构建的 Swift 6 运行时在实测中空转约 40% CPU
 # （2026-08-22 排查，详见 MAINTENANCE_PLAN T-29），release 构建空闲为 0
@@ -128,6 +128,15 @@ codesign --force --sign - --entitlements /dev/stdin "$APP_BUNDLE" << 'ENTITLEMEN
 </dict>
 </plist>
 ENTITLEMENTS
+
+# 发行门禁：主应用和内嵌 helper 必须都能独立通过签名验证；release 主程序不得
+# 携带只为本地调试保留的 helper 路径覆盖入口。
+codesign --verify --deep --strict "$APP_BUNDLE"
+codesign --verify --strict "$APP_BUNDLE/Contents/Resources/$HELPER_NAME"
+if strings "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | grep -q 'BATTERYBAR_HELPER_PATH'; then
+    echo "ERROR: release binary contains debug-only helper path override" >&2
+    exit 1
+fi
 
 echo "=== 完成 ==="
 echo "App Bundle: $APP_BUNDLE"

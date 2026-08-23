@@ -10,6 +10,7 @@ import Charts
 struct CycleTab: View {
     @State private var records: [ChargeCycle] = []
     @State private var normalizedRecords: [OffPowerRecordAnalyzer.NormalizedRecord] = []
+    @State private var trendRecords: [OffPowerRecordAnalyzer.NormalizedRecord] = []
     @State private var avgFullChargeHours: Double?
     @State private var selectedRecordDate: Date?
 
@@ -44,6 +45,7 @@ struct CycleTab: View {
         let cycles = DataStore.shared.allCycles()
         records = OffPowerRecordAnalyzer.displayableRecords(from: cycles)
         normalizedRecords = OffPowerRecordAnalyzer.normalizedRecords(from: cycles)
+        trendRecords = OffPowerRecordAnalyzer.chartRecords(normalizedRecords)
         avgFullChargeHours = OffPowerRecordAnalyzer.averageFullChargeHours(of: normalizedRecords)
     }
 
@@ -70,7 +72,7 @@ struct CycleTab: View {
     // MARK: - 归一化趋势
 
     private var trendCard: some View {
-        let chartRecords = normalizedRecords
+        let chartRecords = trendRecords
         let averageHours = avgFullChargeHours ?? 0
         let maximumHours = max(1, chartRecords.map(\.fullChargeHours).max() ?? 1)
         let yMaximum = ceil(maximumHours * 1.18 * 2) / 2

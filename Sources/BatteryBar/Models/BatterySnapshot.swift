@@ -12,8 +12,9 @@ import Foundation
 /// 电源来源与 schema 演进（provenance）：
 /// - v1：只有 wattage（离电≈电池功率，接电=电池充电功率）。
 /// - v2：+ batteryPower/systemPowerAvailable/systemPowerIsEstimated，无电源来源字段。
-/// - v3：+ `externalConnected`（本结构）。**字段存在与否即可靠区分新旧格式**；
+/// - v3：+ `externalConnected`。**字段存在与否即可靠区分新旧格式**；
 ///   nil 表示旧数据来源未知，不得推断。
+/// - v4：+ `lowPowerModeEnabled` / `thermalState`；均为可选解释字段，不改变旧点可信度。
 struct BatterySnapshot: Codable, Identifiable, Equatable {
     var id: UUID
     var timestamp: Date
@@ -31,12 +32,15 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
     var gpuPower: Double       // GPU 功耗 (W)
     var displayPower: Double   // 显示器功耗 (W，按亮度估算)
     var dramPower: Double      // 内存功耗 (W)
+    /// 公开 Foundation 状态，用来解释同负载下的性能/功耗变化；nil 表示旧 schema 未记录。
+    var lowPowerModeEnabled: Bool?
+    var thermalState: String?
     var dirty: Bool            // 待同步
 
     init(timestamp: Date, level: Double, isCharging: Bool, wattage: Double, temperature: Double, screenOn: Bool,
          batteryPower: Double? = nil, systemPowerAvailable: Bool? = nil, systemPowerIsEstimated: Bool? = nil,
          cpuPower: Double = 0, gpuPower: Double = 0, displayPower: Double = 0, dramPower: Double = 0,
-         externalConnected: Bool? = nil) {
+         externalConnected: Bool? = nil, lowPowerModeEnabled: Bool? = nil, thermalState: String? = nil) {
         self.id = UUID()
         self.timestamp = timestamp
         self.level = level
@@ -52,6 +56,8 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         self.gpuPower = gpuPower
         self.displayPower = displayPower
         self.dramPower = dramPower
+        self.lowPowerModeEnabled = lowPowerModeEnabled
+        self.thermalState = thermalState
         self.dirty = true
     }
 
@@ -72,6 +78,8 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         gpuPower = try c.decodeIfPresent(Double.self, forKey: .gpuPower) ?? 0
         displayPower = try c.decodeIfPresent(Double.self, forKey: .displayPower) ?? 0
         dramPower = try c.decodeIfPresent(Double.self, forKey: .dramPower) ?? 0
+        lowPowerModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .lowPowerModeEnabled)
+        thermalState = try c.decodeIfPresent(String.self, forKey: .thermalState)
         dirty = try c.decodeIfPresent(Bool.self, forKey: .dirty) ?? true
     }
 
@@ -93,13 +101,16 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         try c.encode(gpuPower, forKey: .gpuPower)
         try c.encode(displayPower, forKey: .displayPower)
         try c.encode(dramPower, forKey: .dramPower)
+        try c.encodeIfPresent(lowPowerModeEnabled, forKey: .lowPowerModeEnabled)
+        try c.encodeIfPresent(thermalState, forKey: .thermalState)
         try c.encode(dirty, forKey: .dirty)
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, timestamp, level, isCharging, wattage, batteryPower
         case systemPowerAvailable, systemPowerIsEstimated, externalConnected
-        case temperature, screenOn, cpuPower, gpuPower, displayPower, dramPower, dirty
+        case temperature, screenOn, cpuPower, gpuPower, displayPower, dramPower
+        case lowPowerModeEnabled, thermalState, dirty
     }
 
     /// 可信的系统负载。
@@ -137,6 +148,8 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         if let externalConnected {
             json["ext"] = externalConnected
         }
+        if let lowPowerModeEnabled { json["lpm"] = lowPowerModeEnabled }
+        if let thermalState { json["thermal"] = thermalState }
         return json
     }
 
@@ -162,7 +175,9 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
             gpuPower: dict["gpu"] as? Double ?? 0,
             displayPower: dict["disp"] as? Double ?? 0,
             dramPower: dict["dram"] as? Double ?? 0,
-            externalConnected: dict["ext"] as? Bool
+            externalConnected: dict["ext"] as? Bool,
+            lowPowerModeEnabled: dict["lpm"] as? Bool,
+            thermalState: dict["thermal"] as? String
         )
         snap.id = id
         snap.dirty = false

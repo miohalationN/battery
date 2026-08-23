@@ -43,6 +43,20 @@ import Foundation
         #expect(!config.deviceID.isEmpty)
     }
 
+    @Test func webDAVCredentialIdentityIncludesOriginAndUsername() {
+        let a = KeychainHelper.credentialAccount(
+            serverURL: "https://DAV.example.com/path", username: "same-user"
+        )
+        let b = KeychainHelper.credentialAccount(
+            serverURL: "https://other.example.com/path", username: "same-user"
+        )
+        let defaultPort = KeychainHelper.credentialAccount(
+            serverURL: "https://dav.example.com:443/another", username: "same-user"
+        )
+        #expect(a == defaultPort)
+        #expect(a != b)
+    }
+
     @Test func syncIntervalSeconds() {
         #expect(SyncInterval.min15.seconds == 900)
         #expect(SyncInterval.hour1.seconds == 3600)

@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 import os
 
 private let syncLogger = Logger(subsystem: "com.batterybar", category: "Sync")
@@ -16,9 +17,31 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
     @Published private(set) var state: SyncState = .idle
 
     private var timer: Timer?
-    private let store = DataStore.shared
+    private let store: DataStore
+    private let credentialProvider: @Sendable (String, String) -> String?
+    private let clientFactory: @Sendable (URL, String, String) -> any WebDAVClientProtocol
     private let syncLock = NSLock()
     private var isSyncing = false
+
+    private static let maximumDevices = 32
+    private static let maximumFilesPerDevice = 4
+    private static let maximumRemoteSnapshots = 5_000
+    private static let maximumCycles = 5_000
+    private static let maximumInflatedSnapshotBytes = 6 * 1_024 * 1_024
+
+    init(
+        store: DataStore = .shared,
+        credentialProvider: @escaping @Sendable (String, String) -> String? = {
+            KeychainHelper.getPassword(serverURL: $0, username: $1)
+        },
+        clientFactory: @escaping @Sendable (URL, String, String) -> any WebDAVClientProtocol = {
+            WebDAVClient(baseURL: $0, username: $1, password: $2)
+        }
+    ) {
+        self.store = store
+        self.credentialProvider = credentialProvider
+        self.clientFactory = clientFactory
+    }
 
     /// 让运行中的调度器与最新配置保持一致。
     ///
@@ -68,20 +91,19 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
             await publishState(.failed(error.localizedDescription))
             return nil
         }
-        guard let password = KeychainHelper.getPassword(for: config.username) else {
+        guard let password = credentialProvider(config.serverURL, config.username) else {
             syncLogger.error("No password for \(config.username)")
             await publishState(.failed("未找到密码"))
             return nil
         }
 
         await publishState(.syncing)
-        let client = WebDAVClient(baseURL: serverURL, username: config.username, password: password)
+        let client = clientFactory(serverURL, config.username, password)
 
         do {
-            try await ensureDirs(client: client, config: config)
-
             switch config.syncDirection {
             case .bidirectional, .uploadOnly:
+                try await ensureDirs(client: client, config: config)
                 try await upload(client: client, config: config)
             case .downloadOnly: break
             }
@@ -132,7 +154,7 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         syncLock.unlock()
     }
 
-    private func upload(client: WebDAVClient, config: SyncConfig) async throws {
+    private func upload(client: any WebDAVClientProtocol, config: SyncConfig) async throws {
         let dirty = store.dirtySnapshots()
         guard !dirty.isEmpty else {
             // 没有 dirty snapshots 也要尝试上传 cycles
@@ -147,16 +169,26 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
 
             // 先下载云端已有同日文件，与本地 dirty 合并（timestamp 胜出），避免覆盖丢失
             var merged: [BatterySnapshot]
-            if let existing = try? await client.download(from: path),
-               let decompressed = try? (existing as NSData).decompressed(using: .zlib) as Data,
-               let text = String(data: decompressed, encoding: .utf8) {
+            do {
+                let existing = try await client.download(from: path)
+                let decompressed = try Self.boundedZlibDecompress(
+                    existing,
+                    maximumBytes: Self.maximumInflatedSnapshotBytes
+                )
+                guard let text = String(data: decompressed, encoding: .utf8) else {
+                    throw WebDAVError.parseError
+                }
                 var byID: [UUID: BatterySnapshot] = [:]
                 for s in snaps { byID[s.id] = s }
-                for line in text.split(separator: "\n") {
+                let lines = text.split(separator: "\n")
+                guard lines.count <= Self.maximumRemoteSnapshots else {
+                    throw WebDAVError.tooManyEntries
+                }
+                for line in lines {
                     guard let lineData = line.data(using: .utf8),
                           let dict = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                           let remote = BatterySnapshot.from(remoteJSON: dict)
-                    else { continue }
+                    else { throw WebDAVError.parseError }
                     if let local = byID[remote.id] {
                         // timestamp 胜出
                         if remote.timestamp > local.timestamp { byID[remote.id] = remote }
@@ -165,14 +197,15 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                     }
                 }
                 merged = byID.values.sorted { $0.timestamp < $1.timestamp }
-            } else {
+            } catch WebDAVError.notFound {
                 merged = snaps
             }
 
-            let jsonl = merged.map { snap -> String in
-                // toJSON 不会失败，但用 guard 替代 try! 更安全
-                guard let data = try? JSONSerialization.data(withJSONObject: snap.toJSON()),
-                      let str = String(data: data, encoding: .utf8) else { return "" }
+            let jsonl = try merged.map { snap -> String in
+                let data = try JSONSerialization.data(withJSONObject: snap.toJSON())
+                guard let str = String(data: data, encoding: .utf8) else {
+                    throw WebDAVError.parseError
+                }
                 return str
             }.joined(separator: "\n") + "\n"
 
@@ -186,14 +219,16 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         try await uploadCycles(client: client, config: config)
     }
 
-    private func uploadCycles(client: WebDAVClient, config: SyncConfig) async throws {
+    private func uploadCycles(client: any WebDAVClientProtocol, config: SyncConfig) async throws {
         let dirtyCycles = store.dirtyCycles()
         guard !dirtyCycles.isEmpty else { return }
-        let path = "\(config.remotePath)/cycles/cycles.json"
-        // 先下载合并（startDate 胜出），避免覆盖他机已上传数据
+        // v2 布局：每设备独立文件。旧共享 cycles.json 只读迁移，永不再覆盖写。
+        let path = "\(config.remotePath)/cycles/\(config.deviceID).json"
         var mergedCycles: [ChargeCycle] = dirtyCycles
-        if let data = try? await client.download(from: path),
-           let remote = try? JSONDecoder().decode([ChargeCycle].self, from: data) {
+        do {
+            let data = try await client.download(from: path)
+            let remote = try JSONDecoder().decode([ChargeCycle].self, from: data)
+            guard remote.count <= Self.maximumCycles else { throw WebDAVError.tooManyEntries }
             var byID: [UUID: ChargeCycle] = [:]
             for c in dirtyCycles { byID[c.id] = c }
             for c in remote {
@@ -203,56 +238,102 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                     byID[c.id] = c
                 }
             }
-            mergedCycles = Array(byID.values)
+            mergedCycles = byID.values.sorted { $0.startDate < $1.startDate }
+        } catch WebDAVError.notFound {
+            // 首次上传该设备文件。
         }
+        guard mergedCycles.count <= Self.maximumCycles else { throw WebDAVError.tooManyEntries }
         let data = try JSONEncoder().encode(mergedCycles)
         try await client.upload(data: data, to: path)
         store.markCyclesSynced(Set(dirtyCycles.map(\.id)))
     }
 
-    private func download(client: WebDAVClient, config: SyncConfig) async throws {
+    private func download(client: any WebDAVClientProtocol, config: SyncConfig) async throws {
         // 每设备一文件布局：snapshots/ 下是各设备的子目录
         let snapshotDir = "\(config.remotePath)/snapshots/"
-        guard let deviceDirs = try? await client.listFiles(at: snapshotDir) else { return }
+        let listedDeviceDirs: [WebDAVFile]
+        do {
+            listedDeviceDirs = try await client.listFiles(at: snapshotDir)
+        } catch WebDAVError.notFound {
+            listedDeviceDirs = []
+        }
+        let deviceDirs = listedDeviceDirs.filter { $0.isDirectory }
+        guard deviceDirs.count <= Self.maximumDevices + 1 else { throw WebDAVError.tooManyEntries }
 
-        var allSnapshots: [BatterySnapshot] = []
-        for deviceDir in deviceDirs where deviceDir.isDirectory {
+        var snapshotsByID: [UUID: BatterySnapshot] = [:]
+        for deviceDir in deviceDirs {
             // 部分服务器会把请求目录自身列入结果，跳过它以避免重复列举
             if normalized(deviceDir.path) == normalized(snapshotDir) { continue }
-            guard let files = try? await client.listFiles(at: deviceDir.path) else { continue }
-            for file in files where file.name.hasSuffix(".jsonl.gz") {
+            let files = try await client.listFiles(at: deviceDir.path)
+            let recentFiles = files.filter { !$0.isDirectory && isRelevantSnapshotFile($0.name) }
+            guard recentFiles.count <= Self.maximumFilesPerDevice else { throw WebDAVError.tooManyEntries }
+            for file in recentFiles {
                 let data = try await client.download(from: file.path)
-                guard let decompressed = try? (data as NSData).decompressed(using: .zlib) as Data,
-                      let text = String(data: decompressed, encoding: .utf8) else { continue }
+                let decompressed = try Self.boundedZlibDecompress(
+                    data,
+                    maximumBytes: Self.maximumInflatedSnapshotBytes
+                )
+                guard let text = String(data: decompressed, encoding: .utf8) else {
+                    throw WebDAVError.parseError
+                }
 
                 for line in text.split(separator: "\n") {
                     guard let lineData = line.data(using: .utf8),
                           let dict = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                           let snap = BatterySnapshot.from(remoteJSON: dict)
-                    else { continue }
-                    allSnapshots.append(snap)
+                    else { throw WebDAVError.parseError }
+                    if let existing = snapshotsByID[snap.id] {
+                        if snap.timestamp > existing.timestamp { snapshotsByID[snap.id] = snap }
+                    } else {
+                        snapshotsByID[snap.id] = snap
+                    }
+                }
+                if snapshotsByID.count > Self.maximumRemoteSnapshots {
+                    snapshotsByID = Dictionary(
+                        uniqueKeysWithValues: snapshotsByID.values
+                            .sorted { $0.timestamp > $1.timestamp }
+                            .prefix(Self.maximumRemoteSnapshots)
+                            .map { ($0.id, $0) }
+                    )
                 }
             }
         }
-        store.mergeSnapshots(allSnapshots)
+        store.mergeSnapshots(Array(snapshotsByID.values))
 
-        let cyclePath = "\(config.remotePath)/cycles/cycles.json"
-        if let data = try? await client.download(from: cyclePath),
-           let cycles = try? JSONDecoder().decode([ChargeCycle].self, from: data) {
-            // 远程 cycles 解码时 dirty 默认为 false（见 ChargeCycle.init(from:)），
-            // 避免下载后被误认为待上传，导致无限重传
-            store.mergeCycles(cycles)
+        let cycleDir = "\(config.remotePath)/cycles/"
+        let cycleFiles: [WebDAVFile]
+        do {
+            cycleFiles = try await client.listFiles(at: cycleDir)
+        } catch WebDAVError.notFound {
+            cycleFiles = []
         }
+        let jsonFiles = cycleFiles.filter { !$0.isDirectory && $0.name.hasSuffix(".json") }
+        guard jsonFiles.count <= Self.maximumDevices + 1 else { throw WebDAVError.tooManyEntries }
+        var cyclesByID: [UUID: ChargeCycle] = [:]
+        for file in jsonFiles {
+            let data = try await client.download(from: file.path)
+            let decoded = try JSONDecoder().decode([ChargeCycle].self, from: data)
+            guard decoded.count <= Self.maximumCycles else { throw WebDAVError.tooManyEntries }
+            for cycle in decoded {
+                if let existing = cyclesByID[cycle.id] {
+                    if cycle.startDate > existing.startDate { cyclesByID[cycle.id] = cycle }
+                } else {
+                    cyclesByID[cycle.id] = cycle
+                }
+            }
+            guard cyclesByID.count <= Self.maximumCycles else { throw WebDAVError.tooManyEntries }
+        }
+        store.mergeCycles(Array(cyclesByID.values))
     }
 
-    private func ensureDirs(client: WebDAVClient, config: SyncConfig) async throws {
+    private func ensureDirs(client: any WebDAVClientProtocol, config: SyncConfig) async throws {
         // 根目录、snapshots/、cycles/
         for sub in ["", "snapshots", "cycles"] {
             let path = sub.isEmpty ? config.remotePath : "\(config.remotePath)/\(sub)"
-            try? await client.createFolder(at: path)
+            try await client.createFolder(at: path)
         }
         // 本设备子目录：每设备一文件布局
-        try? await client.createFolder(at: "\(config.remotePath)/snapshots/\(config.deviceID)")
+        try await client.createFolder(at: "\(config.remotePath)/snapshots/\(config.deviceID)")
     }
 
     private func dayKey(_ date: Date) -> String {
@@ -260,6 +341,43 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"
         return f.string(from: date)
+    }
+
+    /// 本地只保留 24 小时，远端最多需要今天、昨天以及一个未来时钟容忍日。
+    private func isRelevantSnapshotFile(_ name: String, now: Date = Date()) -> Bool {
+        guard name.hasSuffix(".jsonl.gz") else { return false }
+        let stem = String(name.dropLast(".jsonl.gz".count))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let day = formatter.date(from: stem) else { return false }
+        let calendar = Calendar(identifier: .gregorian)
+        let lower = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now))!
+        let upper = calendar.date(byAdding: .day, value: 2, to: calendar.startOfDay(for: now))!
+        return day >= lower && day < upper
+    }
+
+    /// 一次性解压到固定上限缓冲区。达到缓冲区末端视为截断并拒绝，避免 zip bomb。
+    static func boundedZlibDecompress(_ data: Data, maximumBytes: Int) throws -> Data {
+        guard maximumBytes > 0, !data.isEmpty else { throw WebDAVError.parseError }
+        var output = Data(count: maximumBytes + 1)
+        let decodedSize = output.withUnsafeMutableBytes { outputBuffer in
+            data.withUnsafeBytes { inputBuffer in
+                compression_decode_buffer(
+                    outputBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                    outputBuffer.count,
+                    inputBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                    inputBuffer.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+        }
+        guard decodedSize > 0 else { throw WebDAVError.parseError }
+        guard decodedSize <= maximumBytes else { throw WebDAVError.decompressedDataTooLarge }
+        output.count = decodedSize
+        return output
     }
 
     /// 规范化路径用于比较：去掉首尾 `/`，便于把 `snapshots/` 自身条目从子目录列表中剔除。

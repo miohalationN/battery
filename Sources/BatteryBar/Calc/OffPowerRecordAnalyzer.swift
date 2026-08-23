@@ -57,4 +57,32 @@ enum OffPowerRecordAnalyzer {
         guard !records.isEmpty else { return nil }
         return records.map(\.fullChargeHours).reduce(0, +) / Double(records.count)
     }
+
+    /// 长期记录图表按桶保留局部最小/最大续航，避免数年历史生成数千个 Chart marks。
+    /// 汇总平均值仍由完整 records 计算，降采样只影响绘制。
+    static func chartRecords(_ records: [NormalizedRecord], maxPoints: Int = 240) -> [NormalizedRecord] {
+        guard maxPoints > 0 else { return [] }
+        guard records.count > maxPoints else { return records }
+        if maxPoints == 1 { return records.first.map { [$0] } ?? [] }
+        let sorted = records.sorted { $0.cycle.startDate < $1.cycle.startDate }
+        if maxPoints == 2 { return [sorted[0], sorted[sorted.count - 1]] }
+
+        let interiorCount = sorted.count - 2
+        let bucketCount = max(1, (maxPoints - 2) / 2)
+        var indices = [0]
+        for bucket in 0..<bucketCount {
+            let lower = 1 + bucket * interiorCount / bucketCount
+            let upper = 1 + (bucket + 1) * interiorCount / bucketCount
+            guard lower < upper else { continue }
+            let range = lower..<upper
+            let minimum = range.min { sorted[$0].fullChargeHours < sorted[$1].fullChargeHours }
+            let maximum = range.max { sorted[$0].fullChargeHours < sorted[$1].fullChargeHours }
+            for index in [minimum, maximum].compactMap({ $0 }).sorted() where indices.last != index {
+                indices.append(index)
+            }
+        }
+        let last = sorted.count - 1
+        if indices.last != last { indices.append(last) }
+        return indices.map { sorted[$0] }
+    }
 }

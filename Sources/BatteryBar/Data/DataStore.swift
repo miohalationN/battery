@@ -76,6 +76,10 @@ final class DataStore: @unchecked Sendable {
             }
             cycles = loadJSON(from: cyclesFile, backupOnFailure: true) ?? []
             syncConfig = loadJSON(from: configFile, backupOnFailure: true) ?? .default
+            if syncConfig.migrateLegacyHardwareIdentifierIfNeeded() {
+                saveJSON(syncConfig, to: configFile)
+                dataStoreLogger.notice("Replaced legacy hardware-derived WebDAV device identifier")
+            }
         }
     }
 
@@ -119,7 +123,7 @@ final class DataStore: @unchecked Sendable {
     }
 
     func markSnapshotsSynced(_ ids: Set<UUID>) {
-        queue.async { [self] in
+        queue.sync { [self] in
             for i in snapshots.indices where ids.contains(snapshots[i].id) {
                 snapshots[i].dirty = false
             }
@@ -130,7 +134,7 @@ final class DataStore: @unchecked Sendable {
 
     /// 合并远程快照：相同 UUID 时保留 timestamp 较新者（last-write-wins）
     func mergeSnapshots(_ remote: [BatterySnapshot]) {
-        queue.async { [self] in
+        queue.sync { [self] in
             var byID: [UUID: BatterySnapshot] = [:]
             // 本地先入表
             for snap in snapshots { byID[snap.id] = snap }
@@ -174,7 +178,7 @@ final class DataStore: @unchecked Sendable {
     }
 
     func markCyclesSynced(_ ids: Set<UUID>) {
-        queue.async { [self] in
+        queue.sync { [self] in
             for i in cycles.indices where ids.contains(cycles[i].id) {
                 cycles[i].dirty = false
             }
@@ -184,7 +188,7 @@ final class DataStore: @unchecked Sendable {
 
     /// 合并远程循环：相同 UUID 时保留 startDate 较新者（last-write-wins）
     func mergeCycles(_ remote: [ChargeCycle]) {
-        queue.async { [self] in
+        queue.sync { [self] in
             var byID: [UUID: ChargeCycle] = [:]
             for c in cycles { byID[c.id] = c }
             for var c in remote {
