@@ -246,3 +246,49 @@ gate 为真实校验（红色必然代表必需取证不可读）。Build workfl
 - 未安装、启用或卸载 Helper，未触发管理员授权，未触碰其他生产/外部系统。限制：内部
   `BatteryBar` 标识为兼容性设计，并非遗漏；尚未做公开发行所需 Developer ID/公证；
   性能取证只能证明指定 runner/滚动窗口，不承诺所有硬件始终满帧。
+
+## 十二、1.2.0 采集层与高级采样专项（2026-08-23）
+
+### 12.1 电池传感器与口径
+
+- 基线 `01cc139`，功能提交 `f122000`。`BatteryReader` 新增
+  `AppleSmartBatteryPack/BatteryData` 回退，修复新系统顶层无 `Temperature` 时温度恒为
+  「—」；温度按百分之一摄氏度归一化并限制在合理设备范围。电压、电流、容量、循环次数
+  同步增加有限值、范围与 UInt64 回绕哨兵过滤，多个候选逐项验证，坏的高优先级值不会
+  阻断后续有效回退。
+- 电池功率优先使用 `PowerTelemetryData/BatteryData.BatteryPower` 的控制器直读 mW，
+  电压×瞬时电流仅作最终兜底；`PowerTelemetryData` 已知字段固定按 mW 换算，低于 250mW
+  不再被启发式误判成数百瓦。系统负载、电池包功率和适配器输入功率保持三条独立通路。
+- IOPS 读取失败改为可失败结果；UI 保留最后可信状态，存储跳过该分钟，不再合成 0%/离电
+  污染快照和插拔状态机。健康度读取失败返回不可用而非伪造 100%；适配器输入功率改为
+  独立高频字段，诊断页不再冻结在首次样本。
+
+### 12.2 分项功耗采样
+
+- Helper 协议升至 4.2，显式返回 `available/sampleTime`，合法 0W 不再等同采样失败；
+  App 端对 XPC 数值再次做有限值/范围校验。`powermetrics` 强制 C locale 与行缓冲，
+  mW/uW/W 解析抽到双方共用、可单测的 `TelemetryCore`。
+- 界面将 CPU/GPU 从「实测」更正为 Apple 定义的模型估算；只有新鲜且系统负载为实测时
+  才计算相对占比。高级功能更名「分项功耗采样」，明确默认关闭、10s 模型估算、不可跨
+  机型比较。应用升级发现旧 Helper 时只标记需更新并关闭运行态开关，不会在启动时突然
+  弹管理员密码；仅用户再次主动开启才安装。
+
+### 12.3 证据、安装与边界
+
+- GitHub Build run [32624069980](https://github.com/miohalationN/battery/actions/runs/32624069980)
+  success：98 tests / 13 suites passed；新增温度、低 mW、异常电气值、XPC 边界和
+  powermetrics 解析反例。本地非视图 Swift 6 typecheck、全部测试 typecheck、全源 parse、
+  Helper build、shell 语法与 diff check 通过。
+- 同提交 UI Profile run [32624069970](https://github.com/miohalationN/battery/actions/runs/32624069970)
+  success：总览/功耗必需 Animation Hitches trace 各 51 schema，两份 SwiftUI trace 各
+  25 schema；截图、digest 与四份 trace 归档在 artifact `9489532099`（14 天保留）。
+- 实机只读探针：100%、接电未充电、温度约 41.9°C、约 12.8V，系统负载/电池功率/
+  适配器输入分离，容量 4223/4382mAh、139 次循环。安装后 UI 总览显示温度 42.2°C，
+  电源诊断同步显示电压、温度、适配器输入 3.4W、额定 15W、USB-PD；Helper 开关保持关闭。
+- 已安装 GitHub artifact 至 `/Users/mio/Applications/BatteryBar.app`，版本 1.2.0 (3)，
+  主二进制 SHA-256 `72e6bff020ebc35e6587b472478c0d0194851a9b6f9d76c9fab423673b462ddc`，
+  bundled Helper `3791e8771973d080407a44a86a285424905c0af287e94447d76108f70cf745e1`；
+  旧 app 可恢复地移至 `/Users/mio/.Trash/BatteryBar-pre-f122000-20260823-145434.app`。
+- 未启用、更新、卸载系统 Helper，未触发管理员授权，未运行 `powermetrics`，未发起 WebDAV
+  请求或修改用户数据。限制：IORegistry/powermetrics 字段随系统和机型变化，所有不可用
+  情况选择显示「—」/缺口而非伪造值；分项功率是模型估算，不是精密功率计。
