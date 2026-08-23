@@ -63,7 +63,7 @@ let package = Package(
                 .linkedFramework("Charts"),
                 .linkedFramework("Security"),
                 .linkedFramework("ImageIO"),
-                .linkedFramework("Compression"),
+                .linkedLibrary("compression"),
             ]
         ),
         // Privileged Helper Tool
