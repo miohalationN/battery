@@ -136,9 +136,9 @@ macOS 满电保持、优化充电暂停、80% 充电上限均呈现 `externalCon
 
 **更正**：早先报告把「power-hitches 51 schema」归到 run 32603697964 是错误的——
 该轮两个 power trace 均损坏（schemas=0）；51 schema 的 power-hitches 来自更早的
-run 32601875487。下表以最终 run 为准。
+run 32601875487。下表记录首次四份 trace 齐备的运行。
 
-### 11.2 最终 run 32614419174 结果（四份 trace 全部有效，首次齐备）
+### 11.2 run 32614419174 结果（四份 trace 全部有效，首次齐备）
 
 | trace | 模板 | schema 数 | gate | 体积 |
 |-------|------|-----------|------|------|
@@ -151,16 +151,25 @@ run 32601875487。下表以最终 run 为准。
 （UserDefaults 门控钩子驱动线性动画连续滚动）。workflow 结论 success 且
 gate 为真实校验（红色必然代表必需取证不可读）。Build workflow 对同提交全绿。
 
-### 11.3 工具链限制与需用户明确接受的项
+### 11.3 最终 Instruments GUI 判读（run 32618151756）
 
-- **行级指标需人工判读**：`xctrace export --xpath` 在 Xcode 26.6 工具链上对全部
-  目标表（swiftui-updates、hitches* 等，已试 5 种 xpath 变体）只返回表 schema
-  定义、不返回行数据。因此可见 hitch 数量/最长 hitch 时长无法在 CLI 量化，
-  **本执行方也无可用的 Instruments.app**（本机仅有 CLT，无 Xcode/Instruments），
-  无法完成人工打开 trace 的第 6 项要求——请用户在装有 Xcode 的机器上打开
-  artifact 中归档的四份 trace 判读 hitch 数值，此项作为需用户明确接受的限制保留。
-- 因此**不得宣称"零 hitch"或"跑满帧率"**；CLI 仅证明 trace 可读且结构完整
-  （schema 齐备），hitch 行提取数为 0 属导出能力限制而非测量结论。
+- commit `9a980cc` 的 UI Profile run `32618151756` 与 Build run `32618151748`
+  均成功；两页仍实际选择 Animation Hitches，required gate 各 51 schema。
+- 新增 `scripts/capture_trace_review.sh`，由完整 Xcode runner 打开两份 trace，
+  每页在 15/30/45 秒保存 1024×768 Instruments 截图。
+  [artifact 9487986440](https://github.com/miohalationN/battery/actions/runs/32618151756/artifacts/9487986440)
+  （zip SHA-256 `291fb609a7565fd238fb4d4aef22d6e3b7952d6c0c6efabd38760bfa54ce087c`）
+  同时归档四份 trace、digest 与六张截图，保留 14 天。
+- assurance agent 下载 artifact 后人工判读：usage 15 秒图无遮挡，已选中
+  `Summary: Hitches`，完整 1:05 时间范围明确显示 `No Data / Nothing to Display`；
+  power 三张图叠有 runner 的屏幕录制隐私提示，但其后方同一 Hitches 面板同样
+  清晰显示 `No Data / Nothing to Display`。
+- 原始 trace 的 indexed-store descriptor 交叉验证：两页 `hitches`、
+  `hitches-frame-lifetimes/framewait/gpu/renders/updates` 的 `next_event_id` 全部为 0。
+  因此本次确定性滚动窗口中，两页均为 **0 个 Instruments 识别的 hitch**，
+  最长 hitch 不适用。
+- 边界：该结论证明本次 Xcode runner 录制没有达到 Apple Hitches 判定阈值的事件；
+  它不提供逐帧 FPS 数值，也不等价于所有硬件、所有时刻都“跑满帧率”。
 
 ### 11.4 本机统计性证据（真实硬件、已安装 release 构建）
 
@@ -177,7 +186,8 @@ gate 为真实校验（红色必然代表必需取证不可读）。Build workfl
 ### 11.5 已安装二进制一致性
 
 安装产物取自 Build run 32601875482（commit fc8af96）；其后提交仅涉及采样脚本、
-工作流与文档（.py/.sh/.yml/.md），app 源码无变化，无需重装。
+工作流与文档（.py/.sh/.yml/.md），app 源码无变化，无需重装。最终视觉取证提交
+`9a980cc` 的 Build run 32618151748 也全绿。
 
 ## 十、自审发现（可操作项）
 
