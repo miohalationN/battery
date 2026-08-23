@@ -72,6 +72,13 @@ jobs:
             fi
           done
 
+      # Instruments GUI 是 xctrace CLI 无法导出行级 Hitches 数据时的人工验收面。
+      # 实验性取证不掩盖失败：步骤失败会明确标黄，截图目录仍由最终 artifact 上传。
+      - name: Capture Instruments visual review
+        continue-on-error: true
+        timeout-minutes: 8
+        run: bash scripts/capture_trace_review.sh /tmp /tmp/trace-review
+
       - name: Digest traces
         timeout-minutes: 15
         run: |
@@ -92,5 +99,6 @@ jobs:
             /tmp/*-swiftui.trace
             /tmp/*-hitches.trace
             /tmp/digest-*.txt
+            /tmp/trace-review/*.png
           retention-days: 14
           if-no-files-found: warn
