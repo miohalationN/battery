@@ -7,7 +7,7 @@ import Observation
 /// 消除旧实现 `@unchecked Sendable` 下定时器 / 后台队列并发写状态的数据竞争。
 /// SwiftUI 通过 Observation 属性级追踪订阅：视图 body 读到哪个属性，就只在
 /// 哪个属性变化时失效——页面根视图不读瓦片等高频字段，历史 Chart 因此不被
-/// 每秒采样带着重建。阻塞调用（system_profiler 健康度、XPC helper、powermetrics）
+/// 高频采样带着重建。阻塞调用（system_profiler 健康度、XPC helper、powermetrics）
 /// 通过 Task.detached 移出主线程，结果回写主线程；休眠回调用 MainActor.assumeIsolated
 /// 同步执行，避免 willSleep 到系统入睡之间 Task 排队延迟导致睡眠统计丢失。
 @MainActor
@@ -17,8 +17,10 @@ final class PowerSampler {
     private let cycleTracker: CycleTracker
     private let sleepWatcher = SleepWatcher()
     private var dispatchTimer: DispatchSourceTimer?
+    private var componentPowerTimer: DispatchSourceTimer?
     private var storageTimer: Timer?
     private var refreshObserver: NSObjectProtocol?
+    private var liveReadingDemand = LiveReadingDemand()
 
     private(set) var currentLevel: Double = 0
     private(set) var currentIsCharging: Bool = false
@@ -37,8 +39,11 @@ final class PowerSampler {
     private(set) var currentAdapterInputPower: Double = 0
     private(set) var currentInfo: BatteryInfo?
     private(set) var systemHealthPercent: Double = 0
-    /// 最近一次采样时刻（视图不观察；每秒写它只会让状态栏刷新，不该波及任何视图）
+    /// 最近一次基础读数轮询成功的时刻。只有明确读取它的小视图会跟随失效。
     private(set) var lastUpdateTime: Date = Date()
+    /// 当前基础读数的实际轮询间隔：有界面可见时跟随用户设置，否则固定低频。
+    private(set) var activeRefreshInterval: TimeInterval = SamplingCadence.backgroundInterval
+    private(set) var isForegroundReadingActive = false
 
     private(set) var cpuPower: Double = 0
     private(set) var gpuPower: Double = 0
@@ -70,13 +75,12 @@ final class PowerSampler {
     private var lastPlugInTime: Date?       // 上次插电时刻，用于判断是否为短暂插电
     private let shortPlugThreshold: TimeInterval = 30  // 30秒内重插拔视为短暂接触，继续累计统计
     private var saveTick: Int = 0
-    private var lastComponentPowerSampleAt = Date.distantPast
     private var isComponentPowerSampleInFlight = false
-    private let componentPowerInterval: TimeInterval = 15
     private var isSleeping: Bool = false
     private var areScreensSleeping: Bool = false
     private var sleepStartTime: Date?
     private var isStarted: Bool = false
+    /// 用户设置的前台轮询间隔；后台节奏不受它影响。
     private(set) var uiInterval: TimeInterval = 1
 
     init() {
@@ -95,7 +99,9 @@ final class PowerSampler {
         lastPlugInTime = usage.lastPlugInTime
 
         // 从 DataStore 恢复用户自定义的 UI 刷新间隔（重启后不丢失）
-        uiInterval = DataStore.shared.currentRefreshInterval()
+        uiInterval = SamplingCadence.sanitizedForegroundInterval(
+            DataStore.shared.currentRefreshInterval()
+        )
 
         // 启动时读取当前电源状态
         let ps = reader.readPowerSource()
@@ -140,8 +146,12 @@ final class PowerSampler {
             let interval = note.object as? Double
             Task { @MainActor [weak self] in
                 guard let interval else { return }
-                self?.uiInterval = interval
-                self?.restartTimer()
+                guard let self else { return }
+                self.uiInterval = SamplingCadence.sanitizedForegroundInterval(interval)
+                // 后台固定使用低频间隔；用户设置只在读数界面可见时重排定时器。
+                if self.isForegroundReadingActive {
+                    self.restartTimer(sampleImmediately: true)
+                }
             }
         }
 
@@ -173,6 +183,9 @@ final class PowerSampler {
                 if needsUpdate {
                     UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
                     self.helperEnabled = false
+                    self.stopComponentPowerTimer()
+                } else {
+                    self.restartComponentPowerTimer(sampleImmediately: true)
                 }
             }
         }
@@ -189,6 +202,7 @@ final class PowerSampler {
     func stop() {
         dispatchTimer?.cancel()
         dispatchTimer = nil
+        stopComponentPowerTimer()
         storageTimer?.invalidate()
         storageTimer = nil
         sleepWatcher.stop()
@@ -204,15 +218,52 @@ final class PowerSampler {
         sampleStorage()
     }
 
-    /// 重启 UI 定时器（应用新的刷新间隔）
-    private func restartTimer() {
+    /// 登记主窗口 / 菜单弹窗的可见性。任一界面打开即立即采样并切到用户频率；
+    /// 只有最后一个界面关闭后才回到后台低频，避免两个界面互相覆盖生命周期。
+    func setReadingSurface(_ surface: LiveReadingSurface, visible: Bool) {
+        let oldInterval = effectiveRefreshInterval
+        guard liveReadingDemand.set(surface, visible: visible) else { return }
+
+        let active = liveReadingDemand.hasVisibleSurface
+        if active != isForegroundReadingActive {
+            isForegroundReadingActive = active
+        }
+        let newInterval = effectiveRefreshInterval
+
+        guard isStarted else {
+            activeRefreshInterval = newInterval
+            return
+        }
+
+        // 每次打开一个读数界面都先取一次，不必等待下一个 timer deadline。
+        if visible { sampleUI() }
+        if oldInterval != newInterval {
+            restartTimer(sampleImmediately: false)
+        }
+    }
+
+    private var effectiveRefreshInterval: TimeInterval {
+        SamplingCadence.effectiveInterval(
+            foregroundInterval: uiInterval,
+            hasVisibleSurface: liveReadingDemand.hasVisibleSurface
+        )
+    }
+
+    /// 重启基础读数定时器。前台按用户设置轮询，后台固定 15 秒并给系统更大的
+    /// 合并唤醒空间；间隔是读取尝试频率，不代表电池驱动每轮都会发布新值。
+    private func restartTimer(sampleImmediately: Bool = false) {
         dispatchTimer?.cancel()
+        let interval = effectiveRefreshInterval
+        if activeRefreshInterval != interval { activeRefreshInterval = interval }
+        if sampleImmediately { sampleUI() }
+
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        // 给系统少量合并唤醒空间，减少菜单栏常驻应用的定时器能耗。
-        let leewayMilliseconds = Int(max(100, min(500, uiInterval * 100)))
+        let leewayMilliseconds = isForegroundReadingActive
+            ? Int(max(100, min(500, interval * 100)))
+            : 2_000
         timer.schedule(
-            deadline: .now(),
-            repeating: uiInterval,
+            deadline: .now() + interval,
+            repeating: interval,
             leeway: .milliseconds(leewayMilliseconds)
         )
         timer.setEventHandler { [weak self] in
@@ -222,6 +273,53 @@ final class PowerSampler {
         }
         timer.resume()
         dispatchTimer = timer
+    }
+
+    /// 高级分项采样独立于基础读数和界面可见性。用户主动开启后，Helper 与 App
+    /// 均按 10 秒节奏产出/读取缓存，给每分钟历史点提供真实的新鲜分项样本；默认关闭。
+    private func restartComponentPowerTimer(sampleImmediately: Bool) {
+        stopComponentPowerTimer()
+        guard isStarted, helperEnabled else { return }
+        if sampleImmediately { sampleComponentPower() }
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + SamplingCadence.componentPowerInterval,
+            repeating: SamplingCadence.componentPowerInterval,
+            leeway: .seconds(1)
+        )
+        timer.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.sampleComponentPower()
+            }
+        }
+        timer.resume()
+        componentPowerTimer = timer
+    }
+
+    private func stopComponentPowerTimer() {
+        componentPowerTimer?.cancel()
+        componentPowerTimer = nil
+    }
+
+    private func sampleComponentPower() {
+        guard helperEnabled, !isComponentPowerSampleInFlight else { return }
+        isComponentPowerSampleInFlight = true
+        let reader = reader
+        Task { @MainActor in
+            let (component, display) = await Task.detached(priority: .utility) { () -> (ComponentPower, Double) in
+                (reader.readComponentPower(), reader.estimateDisplayPower())
+            }.value
+            self.isComponentPowerSampleInFlight = false
+
+            let age = Date().timeIntervalSince(component.sampledAt)
+            guard component.isAvailable, age >= 0, age < 120 else { return }
+            self.lastComponentPowerAt = component.sampledAt
+            if abs(self.cpuPower - component.cpu) > 0.02 { self.cpuPower = component.cpu }
+            if abs(self.gpuPower - component.gpu) > 0.02 { self.gpuPower = component.gpu }
+            if abs(self.displayPower - display) > 0.02 { self.displayPower = display }
+            if abs(self.dramPower - component.dram) > 0.02 { self.dramPower = component.dram }
+        }
     }
 
     // MARK: - Sleep / Wake
@@ -266,6 +364,7 @@ final class PowerSampler {
         guard let ps = reader.readPowerSource() else { return }
         let info = reader.readBatteryInfo()
 
+        let previousLevel = currentLevel
         let previousCharging = currentIsCharging
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
 
@@ -322,42 +421,18 @@ final class PowerSampler {
         if shouldPublishMetadata(info) { currentInfo = info }
         lastUpdateTime = Date()
 
-        // 通知状态栏 AppDelegate 刷新 button.title（title 不自动响应 @Published）
-        NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)
-
-        // 检查通知
-        NotificationManager.shared.checkLowBattery(level: currentLevel, isCharging: currentIsCharging)
-        if previousCharging && !currentIsCharging && currentLevel >= 100 {
-            NotificationManager.shared.checkFullCharge(level: currentLevel, wasCharging: true)
-        }
-
-        // 分项功耗按墙上时间采样，不依赖用户设置的 UI 间隔；同时禁止慢 XPC
-        // 请求重叠，避免 helper 异常时后台堆积 detached task。
-        let now = Date()
-        if helperEnabled,
-           !isComponentPowerSampleInFlight,
-           now.timeIntervalSince(lastComponentPowerSampleAt) >= componentPowerInterval {
-            lastComponentPowerSampleAt = now
-            isComponentPowerSampleInFlight = true
-            let reader = reader
-            Task { @MainActor in
-                let (component, display) = await Task.detached(priority: .userInitiated) { () -> (ComponentPower, Double) in
-                    (reader.readComponentPower(), reader.estimateDisplayPower())
-                }.value
-                self.isComponentPowerSampleInFlight = false
-                if component.isAvailable,
-                   Date().timeIntervalSince(component.sampledAt) >= 0,
-                   Date().timeIntervalSince(component.sampledAt) < 120 {
-                    self.lastComponentPowerAt = component.sampledAt
-                }
-                if abs(self.cpuPower - component.cpu) > 0.02 { self.cpuPower = component.cpu }
-                if abs(self.gpuPower - component.gpu) > 0.02 { self.gpuPower = component.gpu }
-                if abs(self.displayPower - display) > 0.02 { self.displayPower = display }
-                if abs(self.dramPower - component.dram) > 0.02 { self.dramPower = component.dram }
+        // 状态栏只关心电量与充电态；相同数据不再每个轮询 tick 发通知。
+        let statusChanged = previousLevel != currentLevel || previousCharging != currentIsCharging
+        if statusChanged {
+            NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)
+            NotificationManager.shared.checkLowBattery(level: currentLevel, isCharging: currentIsCharging)
+            if previousCharging && !currentIsCharging && currentLevel >= 100 {
+                NotificationManager.shared.checkFullCharge(level: currentLevel, wasCharging: true)
             }
         }
 
-        // 速率缓存也按墙上时间更新，避免 UI 间隔调大后把计算周期成倍拉长。
+        // 速率缓存按墙上时间更新，避免前后台间隔变化把计算周期成倍拉长。
+        let now = Date()
         if now.timeIntervalSince(lastRateCalculationAt) >= rateCacheInterval {
             lastRateCalculationAt = now
             let snapshots = DataStore.shared.recentSnapshots(1440)
@@ -406,6 +481,8 @@ final class PowerSampler {
         let info = reader.readBatteryInfo()
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
 
+        let componentAge = Date().timeIntervalSince(lastComponentPowerAt)
+        let hasFreshComponents = helperEnabled && componentAge >= 0 && componentAge <= 30
         let snapshot = BatterySnapshot(
             timestamp: Date(),
             level: ps.level,
@@ -416,10 +493,11 @@ final class PowerSampler {
             batteryPower: info?.batteryPower ?? 0,
             systemPowerAvailable: info?.systemPowerAvailable ?? false,
             systemPowerIsEstimated: info?.systemPowerIsEstimated ?? false,
-            cpuPower: cpuPower,
-            gpuPower: gpuPower,
-            displayPower: displayPower,
-            dramPower: dramPower,
+            // Helper 失败或样本过期时写明确缺口（0），绝不把旧分项值无限复制进历史。
+            cpuPower: hasFreshComponents ? cpuPower : 0,
+            gpuPower: hasFreshComponents ? gpuPower : 0,
+            displayPower: hasFreshComponents ? displayPower : 0,
+            dramPower: hasFreshComponents ? dramPower : 0,
             externalConnected: isPluggedIn
         )
         DataStore.shared.saveSnapshot(snapshot)
@@ -458,6 +536,8 @@ final class PowerSampler {
         if installed {
             UserDefaults.standard.set(true, forKey: "BatteryBarHelperEnabled")
             helperEnabled = true
+            helperNeedsUpdate = false
+            restartComponentPowerTimer(sampleImmediately: true)
         }
         helperNeedsUpdate = !installed
     }
@@ -467,15 +547,18 @@ final class PowerSampler {
     /// 用户取消密码框时守护进程保留，但 app 停止调用——helper 4.0 起
     /// powermetrics 有 60s 空闲自停，保留亦无持续开销。
     func disableHelperInBackground() async {
+        stopComponentPowerTimer()
+        UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
+        helperEnabled = false
         let reader = reader
         await Task.detached(priority: .userInitiated) {
             _ = reader.uninstallHelper()
         }.value
-        UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
-        helperEnabled = false
         cpuPower = 0
         gpuPower = 0
+        displayPower = 0
         dramPower = 0
+        lastComponentPowerAt = .distantPast
     }
 
     /// 当前离电周期的亮屏时间（离电时显示）

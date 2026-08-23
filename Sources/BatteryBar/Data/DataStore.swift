@@ -359,16 +359,17 @@ final class DataStore: @unchecked Sendable {
         }
     }
 
-    // MARK: - Refresh Interval（UI 刷新间隔持久化）
+    // MARK: - Refresh Interval（前台读数轮询间隔持久化）
 
     func currentRefreshInterval() -> Double {
-        queue.sync { storedRefreshInterval }
+        queue.sync { SamplingCadence.sanitizedForegroundInterval(storedRefreshInterval) }
     }
 
     func updateRefreshInterval(_ interval: Double) {
         queue.async { [self] in
-            storedRefreshInterval = interval
-            if let data = try? JSONEncoder().encode(interval) {
+            let sanitized = SamplingCadence.sanitizedForegroundInterval(interval)
+            storedRefreshInterval = sanitized
+            if let data = try? JSONEncoder().encode(sanitized) {
                 try? data.write(to: refreshIntervalFile, options: .atomic)
             }
         }

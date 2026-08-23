@@ -237,7 +237,7 @@ private struct PowerLoadHero: View {
 private struct ComponentBreakdownCard: View {
     let sampler: PowerSampler
 
-    /// powermetrics 每 10s 产出、App 每 15s 取缓存，超过 30s 视为陈旧。
+    /// powermetrics 与 App 均每 10s 产出/取缓存，超过 30s 视为陈旧。
     private static let freshnessLimit: TimeInterval = 30
 
     var body: some View {
@@ -380,7 +380,7 @@ private struct AdvancedSamplingCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("分项功耗采样（Helper）")
                         .font(.system(size: 13, weight: .semibold))
-                    Text(enabled ? "已启用 — 每 10 秒读取 CPU/GPU 模型估算" : "默认关闭 — 不运行 powermetrics")
+                    Text(enabled ? "已启用 — 独立每 10 秒持续采样，用于实时读数与分钟历史" : "默认关闭 — 不运行 powermetrics")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -419,7 +419,7 @@ private struct AdvancedSamplingCard: View {
             }
             HStack(spacing: 4) {
                 Image(systemName: "info.circle").font(.system(size: 9))
-                Text("开启需一次管理员授权；结果适合观察本机趋势，不适合跨机型比较。关闭后零 powermetrics 调用").font(.system(size: 10))
+                Text("开启需一次管理员授权，后台也会持续运行；结果适合观察本机趋势，不适合跨机型比较。关闭后零 powermetrics 调用").font(.system(size: 10))
             }
             .foregroundStyle(.tertiary)
         }

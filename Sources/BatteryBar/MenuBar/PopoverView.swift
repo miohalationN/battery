@@ -49,9 +49,14 @@ struct PopoverView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
-            LiveBadge(text: "实时", tint: .bbMint)
+            LiveBadge(text: foregroundPollingText, tint: .bbMint)
         }
         .padding(.horizontal, 2)
+    }
+
+    private var foregroundPollingText: String {
+        let seconds = Int(sampler.uiInterval.rounded())
+        return "\(seconds) 秒轮询"
     }
 
     // MARK: - 顶部：电量 + 状态

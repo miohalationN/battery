@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SyncTab: View {
     @ObservedObject var syncEngine: SyncEngine
+    @Environment(PowerSampler.self) private var sampler
     @State private var config = DataStore.shared.currentConfig()
     @State private var testing = false
     @State private var testResult: String?
@@ -17,7 +18,7 @@ struct SyncTab: View {
             VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
                 PageHeader(
                     title: "数据与同步",
-                    subtitle: "调整实时读数，并安全备份历史记录",
+                    subtitle: "管理采样节奏，并安全备份历史记录",
                     systemImage: "arrow.triangle.branch",
                     tint: .bbPurple,
                     badge: config.isEnabled ? "WebDAV 已启用" : "仅本机"
@@ -59,8 +60,8 @@ struct SyncTab: View {
             SectionHeader(title: "实时读数", systemImage: "arrow.clockwise.circle.fill", tint: .bbBlue)
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("界面刷新间隔").font(.system(size: 11, weight: .medium))
-                    Text("历史记录仍每分钟保存一次")
+                    Text("前台轮询间隔").font(.system(size: 11, weight: .medium))
+                    Text("主窗口或菜单栏弹窗打开时生效")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -88,8 +89,49 @@ struct SyncTab: View {
                 }
                 Text("秒").font(.system(size: 11)).foregroundStyle(.secondary)
             }
+
+            Divider().opacity(0.45)
+
+            VStack(spacing: 7) {
+                cadenceRow(
+                    "当前模式",
+                    value: sampler.isForegroundReadingActive
+                        ? "前台 · \(Int(sampler.activeRefreshInterval.rounded())) 秒"
+                        : "后台 · \(Int(SamplingCadence.backgroundInterval)) 秒",
+                    tint: sampler.isForegroundReadingActive ? .bbMint : .secondary
+                )
+                cadenceRow("历史记录", value: "每 \(Int(SamplingCadence.historyInterval)) 秒", tint: .bbTeal)
+                cadenceRow(
+                    "CPU / GPU 分项",
+                    value: sampler.helperEnabled
+                        ? "独立每 \(Int(SamplingCadence.componentPowerInterval)) 秒"
+                        : "关闭（零采样）",
+                    tint: sampler.helperEnabled ? .bbAmber : .secondary
+                )
+                PollingHeartbeat(sampler: sampler)
+            }
+
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 10))
+                    .padding(.top, 1)
+                Text("这里设置的是应用向系统发起读取的频率，不是传感器的出数频率。macOS 电池驱动常会隔数秒到十余秒批量发布功率、温度等数据；选择 1 秒能更快接住新值，但相邻读数可能相同。")
+                    .font(.system(size: 10))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(.secondary)
         }
         .glassCard(accent: .bbBlue)
+    }
+
+    private func cadenceRow(_ label: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(tint).frame(width: 5, height: 5)
+            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+        }
     }
 
     // MARK: - 启用开关
@@ -358,5 +400,21 @@ struct SyncTab: View {
         let client = WebDAVClient(baseURL: url, username: config.username, password: pw)
         do { _ = try await client.listFiles(at: config.remotePath); testResult = "✅ 连接成功" }
         catch { testResult = "❌ \(error.localizedDescription)" }
+    }
+}
+
+/// 只让这一行跟随每次成功轮询失效，避免设置页其余表单每秒重建；同时给用户一个
+/// 可核对的“定时器确实在走”证据，和底层传感器是否产生新值明确分开。
+private struct PollingHeartbeat: View {
+    let sampler: PowerSampler
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle().fill(Color.bbBlue).frame(width: 5, height: 5)
+            Text("上次成功读取").font(.system(size: 10)).foregroundStyle(.secondary)
+            Spacer()
+            Text(sampler.lastUpdateTime, format: .dateTime.hour().minute().second())
+                .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+        }
     }
 }

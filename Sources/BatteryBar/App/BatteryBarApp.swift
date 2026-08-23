@@ -18,11 +18,13 @@ struct BatteryBarApp: App {
                 .background(OpenWindowRelay())
                 .onAppear {
                     appDelegate.sampler.start()
+                    appDelegate.sampler.setReadingSurface(.mainWindow, visible: true)
                     // 打开主窗口时显示 Dock 图标
                     NSApp.setActivationPolicy(.regular)
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 .onDisappear {
+                    appDelegate.sampler.setReadingSurface(.mainWindow, visible: false)
                     // 关闭主窗口时隐藏 Dock 图标，回到纯菜单栏模式
                     NSApp.setActivationPolicy(.accessory)
                 }
@@ -117,7 +119,7 @@ struct BatteryBarApp: App {
 
 /// AppDelegate — 状态栏（左键 Popover / 右键菜单）、开机自启；主窗口归 WindowGroup
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var observer: NSObjectProtocol?
@@ -163,6 +165,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 340, height: 536)
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: PopoverMenuBarView(sampler: sampler)
         )
@@ -261,6 +264,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    func popoverWillShow(_ notification: Notification) {
+        sampler.setReadingSurface(.statusPopover, visible: true)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        sampler.setReadingSurface(.statusPopover, visible: false)
     }
 
     /// 更新状态栏文字（跟随系统逻辑：纯百分比，不显示预估时间）
