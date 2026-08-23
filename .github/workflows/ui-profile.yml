@@ -2,7 +2,14 @@ name: UI Profile
 
 # Instruments 采样证据：在带 Xcode 的 runner 上安装本提交构建的 app，
 # 用 UserDefaults 门控的自动滚动驱动真实连续滚动，录制 SwiftUI 视图求值与
-# Animation Hitches。默认随 push 触发；也可 workflow_dispatch 手动运行。
+# Animation Hitches。
+#
+# gate 语义：
+# - 每页的 hitches trace 是必需取证：profile_page.sh 对其不可读/零 schema
+#   三次重试后非零退出 → 本 workflow 红；
+# - swiftui trace 是尽力取证：缺席不红，但存在即校验；
+# - digest 步骤不用 || true：trace 存在但损坏会红（缺失则 SKIP）。
+# artifact 上传用 if: always()，失败也保留现场。
 
 on:
   push:
@@ -44,19 +51,40 @@ jobs:
         run: bash scripts/profile_page.sh power
         timeout-minutes: 22
 
+      # 显式 gate：必需取证必须可读且非零 schema；尽力取证存在即校验
+      - name: Gate required traces
+        run: |
+          set -euo pipefail
+          for t in /tmp/usage-hitches.trace /tmp/power-hitches.trace; do
+            test -e "$t"
+            toc="$(xcrun xctrace export --input "$t" --toc)"
+            echo "$toc" | grep -q 'schema="'
+            n="$(echo "$toc" | grep -o 'schema="[A-Za-z0-9_.-]*"' | sort -u | wc -l | tr -d ' ')"
+            echo "gate ok (required): $t schemas=$n"
+          done
+          for t in /tmp/usage-swiftui.trace /tmp/power-swiftui.trace; do
+            if [ -e "$t" ]; then
+              toc="$(xcrun xctrace export --input "$t" --toc)"
+              echo "$toc" | grep -q 'schema="'
+              echo "gate ok (best-effort): $t"
+            else
+              echo "gate note: best-effort trace absent: $t"
+            fi
+          done
+
       - name: Digest traces
         timeout-minutes: 15
         run: |
-          python3 scripts/profile_digest.py /tmp/usage-swiftui.trace /tmp/digest-usage-swiftui.txt || true
-          python3 scripts/profile_digest.py /tmp/usage-hitches.trace /tmp/digest-usage-hitches.txt || true
-          python3 scripts/profile_digest.py /tmp/power-swiftui.trace /tmp/digest-power-swiftui.txt || true
-          python3 scripts/profile_digest.py /tmp/power-hitches.trace /tmp/digest-power-hitches.txt || true
-          echo "===== usage-swiftui =====";  cat /tmp/digest-usage-swiftui.txt  || true
-          echo "===== usage-hitches =====";  cat /tmp/digest-usage-hitches.txt  || true
-          echo "===== power-swiftui =====";  cat /tmp/digest-power-swiftui.txt  || true
-          echo "===== power-hitches =====";  cat /tmp/digest-power-hitches.txt  || true
+          python3 scripts/profile_digest.py /tmp/usage-swiftui.trace /tmp/digest-usage-swiftui.txt
+          python3 scripts/profile_digest.py /tmp/usage-hitches.trace /tmp/digest-usage-hitches.txt
+          python3 scripts/profile_digest.py /tmp/power-swiftui.trace /tmp/digest-power-swiftui.txt
+          python3 scripts/profile_digest.py /tmp/power-hitches.trace /tmp/digest-power-hitches.txt
+          for f in /tmp/digest-*.txt; do
+            echo "===== $f ====="; cat "$f"
+          done
 
       - name: Upload traces and digests
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ui-profile

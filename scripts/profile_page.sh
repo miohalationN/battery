@@ -1,31 +1,70 @@
 #!/bin/bash
 # 在 CI runner 上对一个页面做 Instruments 采样：
 #   scripts/profile_page.sh usage|power
-# 每个页面产出两份 trace：
-#   <page>-swiftui.trace  —— SwiftUI 模板（视图 body 求值证据）
-#   <page>-hitches.trace  —— Animation Hitches / Core Animation（掉帧证据）
-# 时间线：启动 → 静止采样窗(~12s，验证每秒采样不重建根/Chart) → 自动滚动(~50s)。
-# xctrace 偶发在 attach 阶段挂起：每次录制用看门狗限时并重试一次。
+#
+# 产物与验收语义：
+#   <page>-hitches.trace  —— 必需取证：不可读/零 schema 视为步骤失败（非零退出）
+#   <page>-swiftui.trace  —— 尽力取证：失败仅告警，不阻断
+#
+# trace 有效判定（两条件同时满足）：
+#   1) 路径存在（Instruments trace 是目录包，用 -e 而不是 -f）；
+#   2) `xcrun xctrace export --input <trace> --toc` 命令成功且输出含 ≥1 个 schema=" 条目。
+# 无效 trace 删除后重试（最多 3 次）；必需取证三次仍失败 → 非零返回，不固定成功。
 set -euo pipefail
 
-PAGE="$1"
-OUT="/tmp"
-TEMPLATES=$(xcrun xctrace list templates 2>/dev/null || true)
-echo "$TEMPLATES"
+PAGE="${1:-}"
+case "$PAGE" in
+  usage|power) ;;
+  *) echo "usage: $0 usage|power" >&2; exit 2 ;;
+esac
+
+OUT_ROOT="/tmp"
+
+# 允许清理的路径白名单：必须位于 /tmp 且文件名完全匹配预期产物
+is_managed_trace_path() {
+  case "$1" in
+    /tmp/usage-swiftui.trace|/tmp/usage-hitches.trace|\
+/tmp/power-swiftui.trace|/tmp/power-hitches.trace) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+remove_stale_trace() {
+  local p="$1"
+  if ! is_managed_trace_path "$p"; then
+    echo "!! refusing to remove unexpected path: $p" >&2
+    exit 2
+  fi
+  rm -rf -- "$p"
+}
+
+# trace 有效性：存在（目录包）且 toc 导出成功且包含 schema
+validate_trace() {
+  local p="$1"
+  [ -e "$p" ] || return 1
+  local toc
+  toc="$(mktemp)"
+  local rc=1
+  if xcrun xctrace export --input "$p" --toc > "$toc" 2>/dev/null \
+     && grep -q 'schema="' "$toc"; then
+    rc=0
+  fi
+  rm -f "$toc"
+  return $rc
+}
 
 pick_template() {
+  local templates="$1"
+  shift
+  local candidate
   for candidate in "$@"; do
-    if echo "$TEMPLATES" | grep -q "$candidate"; then
+    if echo "$templates" | grep -q "$candidate"; then
       echo "$candidate"
       return
     fi
   done
   echo ""
 }
-
-SWIFTUI_TPL=$(pick_template "SwiftUI" "Time Profiler")
-HITCH_TPL=$(pick_template "Animation Hitches" "Hitches" "Core Animation FPS" "Time Profiler")
-echo "swiftui template: $SWIFTUI_TPL ; hitches template: $HITCH_TPL"
 
 launch_app() {
   killall BatteryBar 2>/dev/null || true
@@ -44,55 +83,84 @@ launch_app() {
   sleep 8
 }
 
-# 带看门狗的录制：超过 limit 秒强杀（视为该次失败）
+# 单次录制：xctrace 偶发挂起（attach 或保存阶段），看门狗限时强杀
 record_once() {
   local tpl="$1" limit="$2" out="$3"
   xcrun xctrace record --template "$tpl" --attach BatteryBar --time-limit "${limit}s" --output "$out" &
   local pid=$!
   (
     sleep $((limit + 180))
-    kill -9 $pid 2>/dev/null || true
+    kill -9 "$pid" 2>/dev/null || true
   ) &
   local watchdog=$!
   set +e
-  wait $pid
+  wait "$pid"
   local rc=$?
   set -e
-  kill $watchdog 2>/dev/null || true
-  wait $watchdog 2>/dev/null || true
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
   return $rc
 }
 
-# 录制 + 一次重试；输出存在即认为成功
+# record <template> <time_limit_s> <kind> <required>
+# kind ∈ swiftui|hitches；产物路径固定为 /tmp/<PAGE>-<kind>.trace
 record() {
-  local tpl="$1" limit="$2" out="$3"
-  if [ -z "$tpl" ]; then
-    echo "!! no template available, skip $out"
-    return 0
+  local tpl="$1" limit="$2" kind="$3" required="$4"
+  local out="${OUT_ROOT}/${PAGE}-${kind}.trace"
+  if ! is_managed_trace_path "$out"; then
+    echo "!! unexpected product path: $out" >&2
+    return 2
   fi
-  rm -f "$out"
+  if [ -z "$tpl" ]; then
+    echo "!! no usable template for $kind"
+    [ "$required" = "required" ] && return 1 || return 0
+  fi
+
+  remove_stale_trace "$out"
+  local attempt
   for attempt in 1 2 3; do
     echo "--- record attempt $attempt: $tpl -> $out ---"
-    if record_once "$tpl" "$limit" "$out"; then
-      echo "recording finished (rc=0)"
-    else
-      echo "recording exited rc=$?"
-    fi
-    [ -f "$out" ] && { echo "trace file present: $out"; return 0; }
-    pkill -9 xctrace 2>/dev/null || true
     launch_app
+    record_once "$tpl" "$limit" "$out" || echo "recording exited rc=$?"
+    if validate_trace "$out"; then
+      echo "trace accepted: $out"
+      return 0
+    fi
+    echo "trace invalid: $out (missing/unreadable/no schema), removing and retrying"
+    remove_stale_trace "$out"
+    pkill -9 xctrace 2>/dev/null || true
   done
-  echo "!! recording failed after retries: $out"
-  return 0   # 不让单份 trace 失败拖垮整个步骤，digest 阶段会如实报告缺失
+
+  if [ "$required" = "required" ]; then
+    echo "!! REQUIRED trace failed after 3 attempts: $out" >&2
+    return 1
+  fi
+  echo "best-effort trace unavailable after 3 attempts: $out (tolerated)"
+  return 0
 }
 
-# ---- 第一遍：SwiftUI body 求值（含静止窗 + 滚动窗）----
-launch_app
-record "$SWIFTUI_TPL" 75 "$OUT/$PAGE-swiftui.trace"
+main() {
+  local templates
+  templates="$(xcrun xctrace list templates 2>/dev/null || true)"
+  echo "$templates"
+  local swiftui_tpl hitches_tpl
+  swiftui_tpl="$(pick_template "$templates" "SwiftUI" "Time Profiler")"
+  hitches_tpl="$(pick_template "$templates" "Animation Hitches" "Hitches" "Core Animation FPS" "Time Profiler")"
+  echo "swiftui template: $swiftui_tpl ; hitches template: $hitches_tpl"
 
-# ---- 第二遍：掉帧/hitch ----
-launch_app
-record "$HITCH_TPL" 65 "$OUT/$PAGE-hitches.trace"
+  # 尽力取证：SwiftUI body 求值
+  record "$swiftui_tpl" 75 "swiftui" best-effort
+  # 必需取证：掉帧/hitch
+  if ! record "$hitches_tpl" 65 "hitches" required; then
+    echo "!! page [$PAGE] failed: required hitches trace could not be produced" >&2
+    exit 1
+  fi
 
-killall BatteryBar 2>/dev/null || true
-ls -la "$OUT"/"$PAGE"-*.trace 2>/dev/null || ls -la "$OUT" | grep trace || true
+  killall BatteryBar 2>/dev/null || true
+  ls -la "$OUT_ROOT"/"$PAGE"-*.trace 2>/dev/null || true
+}
+
+# 仅直接执行时运行 main；被测试 harness source 时不执行
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
