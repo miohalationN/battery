@@ -27,8 +27,6 @@ struct PowerTab: View {
     @State private var rangeEnergyWh: Double = 0
     @State private var rangeOverallCoverage: Double = 0
     @State private var timeRange: TimeRange = .hour1
-    // Helper 安装中状态
-    @State private var isInstallingHelper = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -47,7 +45,7 @@ struct PowerTab: View {
                     temperatureCard
                     PowerDiagnosticsSection(sampler: sampler)
                     dataSourceFootnote
-                    AdvancedSamplingCard(sampler: sampler, isInstallingHelper: $isInstallingHelper)
+                    AdvancedSamplingCard(sampler: sampler)
                         .id(ProfileSupport.bottomAnchorID)
                 }
                 .padding(.horizontal, BBDesign.pagePadding)
@@ -423,7 +421,7 @@ private struct ComponentBreakdownCard: View {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 13))
                         .foregroundStyle(.tertiary)
-                    Text("开启下方「分项功耗采样」后显示 CPU/GPU 模型估算")
+                    Text("开启下方「高级采样」后显示 CPU / GPU / 内存分项模型估算")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -617,44 +615,41 @@ private struct PowerDiagnosticsSection: View {
     }
 }
 
-// MARK: - 高级采样（Helper 开关，底部）
+// MARK: - 高级采样（底部）
 
+/// 「高级采样」主开关只控制分项采样是否运行。
+///
+/// 开关开启：检查 Helper 状态，必要时安装/更新，成功后启动 CPU/GPU/内存分项采样；
+/// 开关关闭：只停止分项采样并清空读数，绝不卸载 Helper、绝不请求管理员密码；
+/// 移除后台服务是「采样诊断」里的独立显式操作（二次确认 + 管理员授权 + 需重装说明）。
+/// 状态五态均由 HelperLifecycleState.label 映射，失败保留原因并提供重试。
 private struct AdvancedSamplingCard: View {
     let sampler: PowerSampler
-    @Binding var isInstallingHelper: Bool
 
     var body: some View {
+        let state = sampler.helperState
         let enabled = sampler.helperEnabled
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             HStack(spacing: 10) {
-                Image(systemName: "shield.lefthalf.filled")
+                Image(systemName: stateIcon(state))
                     .font(.system(size: 14))
-                    .foregroundStyle(enabled ? Color.green : Color.secondary)
+                    .foregroundStyle(stateTint(state))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("分项功耗采样（Helper）")
+                    Text("高级采样")
                         .font(.system(size: 13, weight: .semibold))
-                    Text(enabled ? "已启用 — 独立每 10 秒持续采样，用于实时读数与分钟历史" : "默认关闭 — 不运行 powermetrics")
+                    Text(stateSubtitle(state))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if isInstallingHelper {
+                if state == .starting {
                     ProgressView().controlSize(.small)
                 } else {
                     Toggle("", isOn: Binding(
                         get: { enabled },
                         set: { newValue in
-                            if newValue {
-                                isInstallingHelper = true
-                                // 安装/卸载走 Task：osascript 阻塞在后台线程执行，主线程保持响应
-                                Task { @MainActor in
-                                    await sampler.enableHelperInBackground()
-                                    isInstallingHelper = false
-                                }
-                            } else {
-                                Task { @MainActor in
-                                    await sampler.disableHelperInBackground()
-                                }
+                            Task { @MainActor in
+                                await sampler.setAdvancedSamplingEnabled(newValue)
                             }
                         }
                     ))
@@ -663,19 +658,73 @@ private struct AdvancedSamplingCard: View {
                     .controlSize(.small)
                 }
             }
-            if sampler.helperNeedsUpdate {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
-                    Text("Helper 需要更新；再次主动开启时会请求管理员授权").font(.system(size: 10))
+
+            if case .needsUpdate = state {
+                footerNote("后台服务需要更新；再次开启高级采样时会请求管理员授权", tint: .orange)
+            }
+            if case .error(let message) = state {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                    Text(message)
+                        .font(.system(size: 10))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("重试") {
+                        Task { @MainActor in
+                            await sampler.setAdvancedSamplingEnabled(true)
+                        }
+                    }
+                    .controlSize(.small)
                 }
-                .foregroundStyle(.orange)
+                .foregroundStyle(.red)
             }
-            HStack(spacing: 4) {
-                Image(systemName: "info.circle").font(.system(size: 9))
-                Text("开启需一次管理员授权，后台也会持续运行；结果适合观察本机趋势，不适合跨机型比较。关闭后零 powermetrics 调用").font(.system(size: 10))
-            }
-            .foregroundStyle(.tertiary)
+
+            footerNote("开启后增加 CPU、GPU、内存分项功耗读数，独立每 10 秒持续采样。")
+            footerNote("关闭后电池、电量、温度、历史记录与基础功率读数仍正常工作，且不再运行 powermetrics。")
+            footerNote("系统级采样可能略微增加资源消耗；实际开销取决于机型与负载，不提供未经实测支持的具体耗电数字。")
         }
         .glassCard(accent: enabled ? .bbMint : .clear)
+    }
+
+    private func footerNote(_ text: String, tint: Color = .secondary) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 9))
+                .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 10))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(tint)
+    }
+
+    private func stateIcon(_ state: HelperLifecycleState) -> String {
+        switch state {
+        case .enabled: "shield.checkered"
+        case .starting: "hourglass"
+        case .needsUpdate: "exclamationmark.triangle"
+        case .error: "xmark.octagon"
+        case .disabled: "shield.slash"
+        }
+    }
+
+    private func stateTint(_ state: HelperLifecycleState) -> Color {
+        switch state {
+        case .enabled: .green
+        case .needsUpdate: .orange
+        case .error: .red
+        case .starting, .disabled: .secondary
+        }
+    }
+
+    private func stateSubtitle(_ state: HelperLifecycleState) -> String {
+        switch state {
+        case .disabled: "默认关闭 — 零 powermetrics 调用"
+        case .starting: "正在准备后台服务…"
+        case .enabled: "已启用 — 后台服务独立每 10 秒产出分项样本"
+        case .needsUpdate: "默认关闭 — 后台服务版本过旧，开启时更新"
+        case .error: "默认关闭 — 上次启动未成功，可重试"
+        }
     }
 }

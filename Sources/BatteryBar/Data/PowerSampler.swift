@@ -85,8 +85,6 @@ final class PowerSampler {
     /// UI 只显示绝对瓦数、不再计算占比。
     private(set) var lastComponentPowerAt: Date = .distantPast
 
-    private(set) var helperNeedsUpdate: Bool = false
-
     // MARK: 续航/充电估算（RuntimeEstimator 结果；nil = 数据不足，正在校准）
     /// 离电续航 App 估算。置信度低于门槛时保持 nil。
     private(set) var dischargeEstimate: EstimationResult?
@@ -104,9 +102,13 @@ final class PowerSampler {
     private var lastEstimateRecalcAt = Date.distantPast
     private static let estimateRecalcInterval: TimeInterval = 30
 
-    /// Helper 服务开关（默认关闭，用户在 PowerTab 手动开启）
-    /// 开启后才会安装 helper 并读取 CPU/GPU 分项功耗
+    /// Helper 服务开关（默认关闭，用户在 PowerTab 手动开启；只控制分项采样是否运行）。
+    /// 开启后才会安装 Helper 并读取 CPU/GPU/内存分项功耗。
     private(set) var helperEnabled: Bool = UserDefaults.standard.object(forKey: "BatteryBarHelperEnabled") as? Bool ?? false
+    /// Helper 生命周期状态机（可注入边界；关闭高级采样绝不卸载）
+    private(set) var helperLifecycle: HelperLifecycleController
+    /// 供 UI 读取的 Helper 五态状态
+    var helperState: HelperLifecycleState { helperLifecycle.state }
 
     // 使用时间统计：按离电周期统计，充电时停止
     private var currentDischargeScreenOn: Int = 0
@@ -123,10 +125,13 @@ final class PowerSampler {
     private var areScreensSleeping: Bool = false
     private var sleepStartTime: Date?
     private var isStarted: Bool = false
+    /// 高级采样开关持久化键
+    private static let helperEnabledKey = "BatteryBarHelperEnabled"
 
     init() {
         // 循环落盘通过闭包注入，便于单元测试用 stub 收集
         self.cycleTracker = CycleTracker(onSave: { DataStore.shared.saveCycle($0) })
+        self.helperLifecycle = HelperLifecycleController(ops: SystemHelperLifecycleOps(reader: reader))
     }
 
     func start() {
@@ -194,28 +199,18 @@ final class PowerSampler {
             includeBatteryFallback: reading?.batteryInfo?.serialNumber.isEmpty ?? true
         )
 
-        // Helper 服务：启动时只做版本检查，不可因应用升级在后台突然弹管理员授权。
-        // 版本不匹配时关闭运行态开关；用户再次主动开启才执行安装/更新。
-        if helperEnabled {
-            Task { @MainActor in
-                let needsUpdate = await Task.detached(priority: .utility) {
-                    reader.needsHelperUpdate()
-                }.value
-                self.helperNeedsUpdate = needsUpdate
-                if needsUpdate {
-                    UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
-                    self.helperEnabled = false
-                    self.stopComponentPowerTimer()
-                } else {
-                    self.restartComponentPowerTimer(sampleImmediately: true)
-                }
-            }
-        } else {
-            Task { @MainActor in
-                let needsUpdate = await Task.detached(priority: .utility) {
-                    reader.dormantInstalledHelperNeedsUpdate()
-                }.value
-                self.helperNeedsUpdate = needsUpdate
+        // Helper 服务：启动时只做休眠态版本检查（不建立 XPC、不触发 launchd），
+        // 绝不自动安装/升级/弹管理员授权。版本不匹配时持久化关闭运行态开关并停止
+        // 分项采样；用户再次主动开启才会执行安装/更新。
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let state = await self.helperLifecycle.refreshAtStartup(enabled: self.helperEnabled)
+            if self.helperEnabled, state != .enabled {
+                self.persistAdvancedSamplingEnabled(false)
+                self.helperEnabled = false
+                self.stopComponentPowerTimer()
+            } else if state == .enabled {
+                self.restartComponentPowerTimer(sampleImmediately: true)
             }
         }
 
@@ -397,7 +392,12 @@ final class PowerSampler {
     }
 
     private func sampleComponentPower() {
-        guard helperEnabled, !isComponentPowerSampleInFlight else { return }
+        // 开关与生命周期双门控；关闭/未开启时绝不发起 XPC。
+        guard ComponentReadingGate.shouldApply(
+            helperEnabled: helperEnabled,
+            lifecycleState: helperLifecycle.state,
+            isStarted: isStarted
+        ), !isComponentPowerSampleInFlight else { return }
         isComponentPowerSampleInFlight = true
         let reader = reader
         Task { @MainActor in
@@ -407,7 +407,11 @@ final class PowerSampler {
             self.isComponentPowerSampleInFlight = false
 
             // 关闭开关或 sampler stop 后，迟到的 XPC 结果不得重新写回已清零状态。
-            guard self.helperEnabled, self.isStarted else { return }
+            guard ComponentReadingGate.shouldApply(
+                helperEnabled: self.helperEnabled,
+                lifecycleState: self.helperLifecycle.state,
+                isStarted: self.isStarted
+            ) else { return }
             let age = Date().timeIntervalSince(component.sampledAt)
             guard component.isAvailable, age >= 0, age < 120 else { return }
             // powermetrics 明确提供硬件采样时间，质量模型如实记录
@@ -601,10 +605,12 @@ final class PowerSampler {
         let statusChanged = previousLevel != currentLevel || previousCharging != currentIsCharging
         if statusChanged {
             NotificationCenter.default.post(name: .init("PowerSamplerDidUpdate"), object: nil)
-            NotificationManager.shared.checkLowBattery(level: currentLevel, isCharging: currentIsCharging)
-            if previousCharging && !currentIsCharging && currentLevel >= 100 {
-                NotificationManager.shared.checkFullCharge(level: currentLevel, wasCharging: true)
-            }
+            evaluateNotifications(
+                level: currentLevel,
+                externalConnected: currentInfo?.externalConnected,
+                isCharging: currentIsCharging,
+                wasCharging: previousCharging
+            )
         }
 
         // 电源状态切换（插拔/充放转换）是估算的合法重算触发
@@ -613,6 +619,36 @@ final class PowerSampler {
         } else if Date().timeIntervalSince(lastEstimateRecalcAt) >= Self.estimateRecalcInterval {
             // 兜底重算节奏：最多每 30 秒一次，绝不扫描全量历史
             recalculateEstimates()
+        }
+    }
+
+    /// 通知策略接线：触发门槛与冷却窗口由纯策略裁决；
+    /// 开关与授权状态来自 NotificationManager（持久化），启动/读取电量从不请求权限。
+    private func evaluateNotifications(level: Double, externalConnected: Bool?, isCharging: Bool, wasCharging: Bool) {
+        let notifier = NotificationManager.shared
+        let now = Date()
+        if NotificationPolicy.shouldSendLowBattery(
+            level: level,
+            externalConnected: externalConnected,
+            isCharging: isCharging,
+            lowBatteryEnabled: notifier.lowBatteryEnabled,
+            permissionValid: notifier.permissionValid,
+            lastNotificationAt: notifier.lastLowBatteryNotificationAt,
+            now: now
+        ) {
+            notifier.sendLowBattery(level: level)
+        }
+        if NotificationPolicy.shouldSendFullCharge(
+            level: level,
+            externalConnected: externalConnected,
+            wasCharging: wasCharging,
+            isCharging: isCharging,
+            fullChargeEnabled: notifier.fullChargeEnabled,
+            permissionValid: notifier.permissionValid,
+            lastNotificationAt: notifier.lastFullChargeNotificationAt,
+            now: now
+        ) {
+            notifier.sendFullCharge(level: level)
         }
     }
 
@@ -820,34 +856,55 @@ final class PowerSampler {
         }
     }
 
-    /// 用户手动开启 Helper：安装（osascript 弹一次管理员密码框）在后台线程执行，
-    /// 主线程保持响应；仅当安装成功后才写入 UserDefaults，避免密码取消/错误时开关仍显示开启。
-    func enableHelperInBackground() async {
-        let reader = reader
-        let installed = await Task.detached(priority: .userInitiated) {
-            reader.installHelperIfNeeded()
-        }.value
-        if installed {
-            UserDefaults.standard.set(true, forKey: "BatteryBarHelperEnabled")
-            helperEnabled = true
-            helperNeedsUpdate = false
-            restartComponentPowerTimer(sampleImmediately: true)
+    /// 用户开启/关闭「高级采样」。
+    ///
+    /// 开启：检查 Helper 状态，必要时安装/更新（osascript 弹一次管理员密码框在
+    /// 后台线程执行）；成功后启动 CPU/GPU/内存分项采样。安装失败或用户取消管理员
+    /// 授权时恢复真实关闭状态并保留错误原因（UI 提供重试入口），绝不假装已开启。
+    /// 关闭：只停止分项定时器与后续 XPC、持久化关闭、清空分项读数；
+    /// 绝不调用 uninstallHelper、绝不请求管理员密码。
+    func setAdvancedSamplingEnabled(_ enabled: Bool) async {
+        if enabled {
+            guard helperLifecycle.state != .starting else { return }
+            let ok = await helperLifecycle.beginEnable()
+            if ok {
+                persistAdvancedSamplingEnabled(true)
+                helperEnabled = true
+                restartComponentPowerTimer(sampleImmediately: true)
+            } else {
+                // 安装失败/授权取消/XPC 错误：恢复真实关闭状态
+                persistAdvancedSamplingEnabled(false)
+                helperEnabled = false
+                stopComponentPowerTimer()
+                clearComponentReadings()
+            }
+        } else {
+            // 只停止采样：立即停定时器、持久化关闭、清空分项读数
+            persistAdvancedSamplingEnabled(false)
+            helperEnabled = false
+            helperLifecycle.setDisabled()
+            stopComponentPowerTimer()
+            clearComponentReadings()
         }
-        helperNeedsUpdate = !installed
     }
 
-    /// 用户手动关闭 Helper：后台卸载 root 守护进程（弹一次管理员密码框），
-    /// 停止读取分项功耗并清零数据。
-    /// 用户取消密码框时 launchd job 可能保留，但 app 停止调用；helper 5.0 的
-    /// powermetrics 60s 空闲自停，Helper 进程本身也会退出。
-    func disableHelperInBackground() async {
-        stopComponentPowerTimer()
-        UserDefaults.standard.set(false, forKey: "BatteryBarHelperEnabled")
+    /// 唯一显式卸载入口（设置页「采样诊断 → 移除辅助服务…」二次确认后调用）。
+    /// 先停止采样并清零，再请求管理员授权移除 root 守护进程；卸载失败/取消时
+    /// 由 lifecycle 记录 error，采样保持关闭。
+    func removeHelperService() async {
+        persistAdvancedSamplingEnabled(false)
         helperEnabled = false
-        let reader = reader
-        await Task.detached(priority: .userInitiated) {
-            _ = reader.uninstallHelper()
-        }.value
+        stopComponentPowerTimer()
+        clearComponentReadings()
+        _ = await helperLifecycle.remove()
+    }
+
+    private func persistAdvancedSamplingEnabled(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.helperEnabledKey)
+    }
+
+    /// 清空分项读数并标记不可用：关闭高级采样后不得继续展示旧样本。
+    private func clearComponentReadings() {
         cpuPower = 0
         gpuPower = 0
         dramPower = 0

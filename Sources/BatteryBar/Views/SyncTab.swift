@@ -11,6 +11,7 @@ struct SyncTab: View {
     @State private var localSnapshotCount = 0
     @State private var localRecordCount = 0
     @State private var loginItemError: String?
+    @State private var confirmRemoveHelper = false
     // 密码防抖：用户停止输入 0.6s 后才写入 Keychain，避免每次按键都触发 SecItem 操作
     @State private var passwordDebounceTask: Task<Void, Never>?
 
@@ -25,6 +26,7 @@ struct SyncTab: View {
                     badge: config.isEnabled ? "WebDAV 已启用" : "仅本机"
                 )
                 appSettingsSection
+                notificationSection
                 autoSamplingSection
                 localDataSection
                 syncToggleCard
@@ -55,6 +57,14 @@ struct SyncTab: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .batteryCyclesDidChange)) { _ in
             reloadLocalCounts()
+        }
+        .alert("移除辅助服务", isPresented: $confirmRemoveHelper) {
+            Button("移除", role: .destructive) {
+                Task { @MainActor in await sampler.removeHelperService() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("移除辅助服务需要一次管理员授权。移除后，再次开启高级采样时需要重新安装后台服务。")
         }
     }
 
@@ -106,6 +116,118 @@ struct SyncTab: View {
         .glassCard(accent: .bbPurple)
     }
 
+    // MARK: - 通知（低电量 / 充满独立开关 + 系统授权状态）
+
+    /// 通知权限与提醒开关。语义（冻结）：
+    /// - 启动/进入本页都不请求权限；只有用户主动打开某个开关且授权为 notDetermined 时才请求；
+    /// - 授权 denied 时开关保持真实关闭并给出原因与系统设置入口；
+    /// - 授权状态与开关读取 NotificationManager（持久化），冷却时间重启后依然有效。
+    private var notificationSection: some View {
+        let notifier = NotificationManager.shared
+        return VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "通知", systemImage: "bell.badge.fill", tint: .bbAmber)
+            notificationToggle(
+                title: "低电量提醒",
+                detail: "电量 ≤ 20% 且未接电时提醒",
+                isOn: Binding(
+                    get: { notifier.lowBatteryEnabled },
+                    set: { newValue in
+                        Task { @MainActor in await notifier.setLowBatteryEnabled(newValue) }
+                    }
+                )
+            )
+            notificationToggle(
+                title: "充满提醒",
+                detail: "接电充满后停止充电时提醒",
+                isOn: Binding(
+                    get: { notifier.fullChargeEnabled },
+                    set: { newValue in
+                        Task { @MainActor in await notifier.setFullChargeEnabled(newValue) }
+                    }
+                )
+            )
+            authorizationRow
+            if let message = notifier.lastErrorMessage {
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .glassCard(accent: .bbAmber)
+        .onAppear {
+            Task { @MainActor in await notifier.refreshAuthorization() }
+        }
+    }
+
+    private func notificationToggle(title: String, detail: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 12, weight: .medium))
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+    }
+
+    /// 系统通知授权状态；denied 时提供系统设置入口（诚实打开系统「通知」页面，
+    /// 不做可能无效的 per-app 深链）。
+    private var authorizationRow: some View {
+        let notifier = NotificationManager.shared
+        return HStack(spacing: 8) {
+            Image(systemName: notifier.authorizationState == .denied ? "bell.slash.fill" : "bell.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(notifier.authorizationState == .denied ? .red : .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("系统通知授权")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(authorizationText(notifier.authorizationState))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(notifier.authorizationState == .denied ? .red : .primary)
+            }
+            Spacer()
+            if notifier.authorizationState == .denied {
+                Button("打开系统设置") { openSystemNotificationSettings() }
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func authorizationText(_ state: NotificationAuthorization) -> String {
+        switch state {
+        case .authorized: "已允许"
+        case .provisional: "已允许（临时）"
+        case .ephemeral: "已允许（一次性）"
+        case .denied: "已拒绝 — 需在系统设置中允许后才能收到提醒"
+        case .notDetermined: "尚未决定 — 开启提醒时将请求系统通知权限"
+        }
+    }
+
+    /// 诚实打开系统「通知」设置页（不带 per-app 深链）。
+    private func openSystemNotificationSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// 采样诊断里「辅助服务状态」的颜色映射（五态）
+    private var helperStateTint: Color {
+        switch sampler.helperState {
+        case .enabled: .bbMint
+        case .starting: .secondary
+        case .needsUpdate: .orange
+        case .error: .red
+        case .disabled: .secondary
+        }
+    }
+
     // MARK: - 自动采样（只读说明）
 
     /// 用户语言描述采样行为；精确秒数与最近读取时间属于排障细节，
@@ -124,7 +246,7 @@ struct SyncTab: View {
                         cadenceRow("后台保活读取", value: "每 \(Int(SamplingCadence.backgroundInterval)) 秒", tint: .secondary)
                         cadenceRow("历史记录落盘", value: "每 \(Int(SamplingCadence.historyInterval)) 秒", tint: .secondary)
                         cadenceRow(
-                            "CPU / GPU 分项",
+                            "CPU / GPU / 内存分项",
                             value: sampler.helperEnabled
                                 ? "独立每 \(Int(SamplingCadence.componentPowerInterval)) 秒"
                                 : "关闭（零采样）",
@@ -132,6 +254,21 @@ struct SyncTab: View {
                         )
                         cadenceRow("电源插拔 / 低电量模式 / 热压力", value: "系统事件立即读取", tint: .secondary)
                         PollingHeartbeat(sampler: sampler)
+                        Divider().opacity(0.4)
+                        cadenceRow("辅助服务状态", value: sampler.helperState.label, tint: helperStateTint)
+                        HStack(spacing: 8) {
+                            Image(systemName: "trash.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.red)
+                            Text("移除后需要管理员授权，再次开启高级采样时将重新安装")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer()
+                            Button("移除辅助服务…") { confirmRemoveHelper = true }
+                                .controlSize(.small)
+                                .disabled(sampler.helperState == .starting)
+                        }
                     }
                     .padding(.top, 6)
                 }
