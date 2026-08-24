@@ -568,3 +568,55 @@ Hitches trace（本页图表改动后必须取得有效 hitches trace）。本�
   行为（确认后才调用 removeHelperService），以源码路径证据 + disable 不卸载测试覆盖。
 - 待验收项：最终功能 HEAD 的 UI Profile（32701003601）交付报告输出时未完成，
   其两页 Animation Hitches traces 与 gate 结果由 assurance agent 跟进。
+
+---
+
+# 第五轮交付 — BA 图标与发布竞态收口（自执行/自验收）
+
+> 基线：`01560c9ee38138864644b7b1ce1b84a5a016e8e8`。本轮代码、测试、图标与文档合并为
+> 一个冻结批次；本节所在提交即发布候选，不在局部改动后反复触发云编译。
+
+## 二十九、通知权限异步一致性
+
+- App 激活时只读刷新真实通知授权，不请求权限；用户主动开启前也重新读取，不再被缓存的
+  denied 卡死。系统请求返回 Bool 后必须再次读取最终授权，只有 authorized/provisional/
+  ephemeral 才能把开关置为开启。
+- 首次初始化、被动刷新和两个开关的用户操作均有代际门控：迟到初始化不能覆盖用户选择，
+  连续 App 激活的旧查询不能覆盖较新查询；两个开关同时首次开启共享一次系统权限请求。
+- 任一主动读取发现 denied，两个持久化开关统一恢复真实关闭；权限有效后清除旧错误。
+- 新增反例覆盖：外部授权后直接开启、Bool=true 但最终无效、迟到首次查询、乱序被动查询、
+  首次查询被刷新淘汰后的重试、并发双开关单次请求、denied 交叉关闭。
+
+## 三十、Helper 生命周期一致性
+
+- 休眠态检查由 Bool 改为 notInstalled/current/needsUpdate，禁止 UserDefaults 残留开启值在
+  Helper 已被外部删除后冒充 enabled；启动检查仍只读磁盘，不建立 XPC、不触发 launchd。
+- 状态机增加 removing 与统一 isBusy；install/uninstall 严格互斥。用户意图代际使迟到启动
+  检查、迟到安装结果不能复活旧状态；成功安装/卸载产生的磁盘事实仍如实保留。
+- 高级采样关闭仍只停定时器、持久化关闭并清读数，绝不卸载；移除仍是唯一 uninstall 入口。
+  移除按钮只在特权操作忙碌时禁用，避免主二进制缺失但 launchd plist 残留时无法清理。
+- 新增 continuation 反例覆盖启动/开启乱序、安装中关闭、移除与安装互斥、重复移除、Helper
+  缺失；真实生产文件编译的临时 harness 验证相同四组时序，未触碰系统 Helper。
+
+## 三十一、BA Halo v2 图标与美术边界
+
+- `AppIcon.png`/`AppIcon.icns` 替换为最终 BA Halo v2：白色 macOS 圆角底，蓝色 B、深色 A、
+  A 的横画保持正常深色，保留蓝色斜线与被字形遮挡的椭圆光环；小尺寸仍能一眼识别 BA。
+- PNG SHA-256：`779534400412345a4997c370e12b270561f49ffd9a90fe8fcd850a8890ed46c2`；
+  ICNS SHA-256：`8ba122d59fec17802ad571809645fa143bf5d14b55084b5812c226db0d8672a5`。
+  `iconutil` 反解为 16/32/128/256/512 各 1x/2x 共 10 张，尺寸正确且全部含 alpha；64px
+  视读通过。Finder/Dock 用 ICNS，进程内图标继续只解码到 256px，避免常驻 1024px 物理页。
+- 四页、Popover、侧栏、关于页逐一审计后不新增插画/纹理：这些区域是高密度系统工具界面，
+  现有 SF Symbols 与数据可视化已经承担语义；额外位图只会制造视觉噪声和内存开销。
+
+## 三十二、本地 gate、安全边界与待发布项
+
+- `scripts/local-gate.sh` 全绿：全部源/测试 parse、Swift 6 非视图层 + 全部测试 typecheck、
+  WMO `-O` 编译、Helper build。`git diff --check` 通过；通知与 Helper 专项生产代码 harness
+  分别验证权限真实性/乱序淘汰和特权操作串行化。
+- 本机直接 `swift test --filter NotificationManagerTests` 仍因 CLT 缺 `SwiftUIMacros` 在未改动的
+  CycleTab/PowerChartPlot 编译阶段失败，属于既有环境限制；可执行测试必须由最终 Xcode CI
+  证明，不能把本地 typecheck 冒充测试运行。
+- 本轮未请求通知权限、未修改/安装/卸载 Helper 或 launchd、未触发管理员授权；WebDAV 未启用、
+  无真实请求；未改登录项和用户数据。当前已安装 App 保持上一绿色 artifact，待本提交一次推送
+  后 Build 与 UI Profile 均绿，再验签、比对哈希并替换安装。

@@ -217,11 +217,11 @@ struct SyncTab: View {
         NSWorkspace.shared.open(url)
     }
 
-    /// 采样诊断里「辅助服务状态」的颜色映射（五态）
+    /// 采样诊断里「辅助服务状态」的颜色映射
     private var helperStateTint: Color {
         switch sampler.helperState {
         case .enabled: .bbMint
-        case .starting: .secondary
+        case .starting, .removing: .secondary
         case .needsUpdate: .orange
         case .error: .red
         case .disabled: .secondary
@@ -267,7 +267,7 @@ struct SyncTab: View {
                             Spacer()
                             Button("移除辅助服务…") { confirmRemoveHelper = true }
                                 .controlSize(.small)
-                                .disabled(sampler.helperState == .starting)
+                                .disabled(sampler.helperState.isBusy)
                         }
                     }
                     .padding(.top, 6)

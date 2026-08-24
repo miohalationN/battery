@@ -1,10 +1,11 @@
 import Foundation
 import Observation
 
-/// 高级采样 Helper 生命周期状态（至少区分五态）。
+/// 高级采样 Helper 生命周期状态；移除单列忙碌态，避免与安装混淆。
 enum HelperLifecycleState: Equatable, Sendable {
     case disabled
     case starting
+    case removing
     case enabled
     case needsUpdate
     case error(String)
@@ -14,11 +15,28 @@ enum HelperLifecycleState: Equatable, Sendable {
         switch self {
         case .disabled: return "已关闭"
         case .starting: return "启动中"
+        case .removing: return "移除中"
         case .enabled: return "已启用"
         case .needsUpdate: return "需要更新"
         case .error: return "出错"
         }
     }
+
+    /// 安装/更新和移除都是特权操作；进行中时 UI 必须禁止重复提交或反向操作。
+    var isBusy: Bool {
+        switch self {
+        case .starting, .removing: true
+        case .disabled, .enabled, .needsUpdate, .error: false
+        }
+    }
+}
+
+/// 启动时对磁盘 Helper 的只读检查结果。缺失与版本过旧必须区分：
+/// 若 UserDefaults 残留开启但 Helper 已被外部删除，不得假装可以采样。
+enum InstalledHelperState: Equatable, Sendable {
+    case notInstalled
+    case current
+    case needsUpdate
 }
 
 /// Helper 生命周期可注入边界：生产实现包 BatteryReader（osascript / XPC / launchd），
@@ -28,8 +46,8 @@ protocol HelperLifecycleOps: Sendable {
     func installOrUpdate() async -> Bool
     /// 显式卸载 Helper（唯一允许调用 uninstallHelper 的路径）
     func uninstall() async -> Bool
-    /// 休眠态检查：已安装的 Helper 是否落后于当前构建（不建立 XPC、不触发 launchd）
-    func installedHelperNeedsUpdate() async -> Bool
+    /// 休眠态检查：区分缺失/当前/需更新（不建立 XPC、不触发 launchd）
+    func installedHelperState() async -> InstalledHelperState
 }
 
 /// 生产实现：BatteryReader 的阻塞调用在 detached 任务执行，不阻塞主线程。
@@ -44,8 +62,11 @@ struct SystemHelperLifecycleOps: HelperLifecycleOps {
         await Task.detached(priority: .userInitiated) { reader.uninstallHelper() }.value
     }
 
-    func installedHelperNeedsUpdate() async -> Bool {
-        await Task.detached(priority: .utility) { reader.dormantInstalledHelperNeedsUpdate() }.value
+    func installedHelperState() async -> InstalledHelperState {
+        await Task.detached(priority: .utility) {
+            guard reader.isHelperInstalled() else { return .notInstalled }
+            return reader.dormantInstalledHelperNeedsUpdate() ? .needsUpdate : .current
+        }.value
     }
 }
 
@@ -61,7 +82,12 @@ struct SystemHelperLifecycleOps: HelperLifecycleOps {
 final class HelperLifecycleController {
     private let ops: any HelperLifecycleOps
     private(set) var state: HelperLifecycleState = .disabled
+    private(set) var installedState: InstalledHelperState = .notInstalled
     private(set) var lastErrorMessage: String?
+    /// 每次新的用户意图都会推进代际；await 返回的旧操作只能丢弃结果。
+    private var operationGeneration: UInt64 = 0
+    /// install/uninstall 涉及同一组系统文件和 launchd job，绝不允许重叠执行。
+    private var privilegedOperationInFlight = false
 
     init(ops: any HelperLifecycleOps) {
         self.ops = ops
@@ -70,11 +96,20 @@ final class HelperLifecycleController {
     /// 启动时检查：只查询已安装 Helper 是否需要更新。不安装、不升级、绝不触发管理员授权。
     @discardableResult
     func refreshAtStartup(enabled: Bool) async -> HelperLifecycleState {
-        let needsUpdate = await ops.installedHelperNeedsUpdate()
-        if needsUpdate {
+        let generation = operationGeneration
+        let installedState = await ops.installedHelperState()
+        // 用户在检查期间执行了开启/关闭/移除：启动旧结果不得覆盖新意图。
+        guard generation == operationGeneration else { return state }
+        self.installedState = installedState
+
+        switch installedState {
+        case .needsUpdate:
             state = .needsUpdate
             lastErrorMessage = "后台服务需要更新；再次开启高级采样时会请求管理员授权"
-        } else {
+        case .notInstalled:
+            state = .disabled
+            lastErrorMessage = enabled ? "后台服务未安装；再次开启高级采样时会请求管理员授权" : nil
+        case .current:
             state = enabled ? .enabled : .disabled
             lastErrorMessage = nil
         }
@@ -84,9 +119,17 @@ final class HelperLifecycleController {
     /// 开启高级采样：安装/更新 Helper。返回 false 表示安装失败或授权被取消，
     /// 调用方必须恢复真实关闭状态（不假装高级采样已开启）。
     func beginEnable() async -> Bool {
+        guard !privilegedOperationInFlight else { return false }
+        let generation = advanceGeneration()
+        privilegedOperationInFlight = true
         state = .starting
         lastErrorMessage = nil
         let ok = await ops.installOrUpdate()
+        privilegedOperationInFlight = false
+        // 即使运行态意图已变化，成功安装的磁盘事实仍应如实保留。
+        if ok { installedState = .current }
+        // 例如安装授权期间用户已关闭：即使磁盘安装完成，也不得复活运行态。
+        guard generation == operationGeneration else { return false }
         if ok {
             state = .enabled
         } else {
@@ -98,6 +141,7 @@ final class HelperLifecycleController {
 
     /// 关闭高级采样：只停止采样并回到 disabled，绝不卸载 Helper。
     func setDisabled() {
+        _ = advanceGeneration()
         state = .disabled
         lastErrorMessage = nil
     }
@@ -105,7 +149,15 @@ final class HelperLifecycleController {
     /// 唯一显式卸载入口：只有用户确认「移除辅助服务…」后调用。
     @discardableResult
     func remove() async -> Bool {
+        guard !privilegedOperationInFlight else { return false }
+        let generation = advanceGeneration()
+        privilegedOperationInFlight = true
+        state = .removing
+        lastErrorMessage = nil
         let ok = await ops.uninstall()
+        privilegedOperationInFlight = false
+        if ok { installedState = .notInstalled }
+        guard generation == operationGeneration else { return false }
         if ok {
             state = .disabled
             lastErrorMessage = nil
@@ -114,6 +166,12 @@ final class HelperLifecycleController {
             lastErrorMessage = "移除后台服务失败，或被取消管理员授权"
         }
         return ok
+    }
+
+    @discardableResult
+    private func advanceGeneration() -> UInt64 {
+        operationGeneration &+= 1
+        return operationGeneration
     }
 }
 

@@ -162,11 +162,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             await NotificationManager.shared.start()
         }
 
-        // 应用重新激活后刷新登录项真实状态（用户可能在系统设置中手动改动）
+        // 应用重新激活后刷新系统设置中的真实状态。通知路径只查询授权，绝不请求权限。
         loginItemActivationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.loginItem.refresh() }
+            MainActor.assumeIsolated {
+                self?.loginItem.refresh()
+                Task { @MainActor in
+                    await NotificationManager.shared.refreshAuthorization()
+                }
+            }
         }
 
         // 启动时让自动同步调度器与持久化配置一致

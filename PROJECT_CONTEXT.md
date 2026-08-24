@@ -1,13 +1,13 @@
-# BatteryBar — 项目上下文
+# BatteryArchive（BA）— 项目上下文
 
 > 维护工程师入门文档。读完此文档即可理解整体架构、数据流与约束。
-> 更新日期：2026-08-23
+> 更新日期：2026-08-24。仓库、可执行文件、Bundle ID 与数据目录仍保留内部兼容名 BatteryBar。
 
 ---
 
 ## 一、项目定位
 
-**BatteryBar** 是一款 macOS 菜单栏常驻电池监控应用，将 iPhone「设置 → 电池」的核心体验搬到 Mac：自上次充电以来的使用时长、耗电曲线、电池健康、实时功耗，一目了然。
+**BatteryArchive（简称 BA，中文名“电池档案”）** 是一款 macOS 菜单栏常驻电池监控应用：记录离电时段、功耗趋势、电池健康、温度与有来源标记的实时遥测。
 
 - 形态：菜单栏常驻 + 可选主窗口
 - 最低系统：macOS 14（Package.swift 声明）
@@ -35,14 +35,17 @@ battery/
 ├── update.sh                           # 重新构建并装到 /Applications
 └── Sources/
     ├── BatteryBar/
-    │   ├── App/BatteryBarApp.swift     # @main 入口；AppDelegate；ContentView（主窗口自定义侧栏导航）
+    │   ├── App/                         # @main、集中品牌常量、自定义关于面板
     │   ├── Calc/
-    │   │   ├── DrainRateCalculator.swift # 放电/充电速率共享计算器（sysctl 机型检测）
+    │   │   ├── RuntimeEstimator.swift   # 多证据、置信度门控的续航/充电估算
     │   │   ├── ChartDownsampler.swift  # 功耗曲线时间桶保峰降采样
     │   │   └── OffPowerRecordAnalyzer.swift # 离电记录过滤与归一化趋势（纯函数）
     │   ├── Data/
     │   │   ├── BatteryReader.swift     # IOKit 读取（含系统遥测功率）+ XPC helper 客户端
-    │   │   ├── PowerSampler.swift      # @Observable：定时采样、UI 状态中枢（含 drainRate 缓存）
+    │   │   ├── PowerSampler.swift      # @Observable：事件/兜底采样、质量模型与 UI 状态中枢
+    │   │   ├── SamplingCadence.swift   # 固定 5/15/60/10 秒节奏与事件合并纯策略
+    │   │   ├── HelperLifecycle.swift   # 高级采样 Helper 生命周期与迟到结果门控
+    │   │   ├── NotificationPolicy.swift # 通知触发门槛与冷却纯策略
     │   │   ├── CycleTracker.swift      # 离电使用时段检测
     │   │   ├── DataStore.swift         # JSON/JSONL 持久化（快照为追加日志）
     │   │   ├── NotificationManager.swift # UNUserNotificationCenter 封装
@@ -51,7 +54,7 @@ battery/
     │   │   └── PopoverView.swift       # Popover 面板内容（卡片化设计，宽 340）
     │   ├── Models/
     │   │   ├── BatteryInfo.swift       # 电池实时+静态信息 struct
-    │   │   ├── BatterySnapshot.swift   # Codable 快照（v2 功率口径 + v1 兼容）
+    │   │   ├── BatterySnapshot.swift   # Codable 快照（当前 v5，v1–v4 兼容）
     │   │   ├── ChargeCycle.swift       # Codable 离电时段记录
     │   │   ├── SyncConfig.swift        # 同步配置 + 枚举
     │   │   └── TimeRange.swift         # 时间范围枚举
@@ -67,8 +70,8 @@ battery/
     │       ├── PowerChartPlot.swift    # 系统负载历史曲线（Equatable 隔离）
     │       └── SyncTab.swift           # 同步设置
     │   └── Resources/
-    │       ├── AppIcon.png             # 运行时/Dock 1024px 图标
-    │       └── AppIcon.icns            # Finder/App Bundle 图标
+    │       ├── AppIcon.png             # BA 字标运行时/Dock 1024px 图标
+    │       └── AppIcon.icns            # BA 字标 Finder/App Bundle 多尺寸图标
     └── BatteryBarHelper/
         └── main.swift                  # XPC privileged helper（root，读取 powermetrics）
 ```
@@ -85,7 +88,7 @@ battery/
 | 持久化 | JSON 文件（`DataStore`） | 串行 DispatchQueue 保护 |
 | 电池数据 | IOKit (`IOPSCopyPowerSourcesInfo` + `AppleSmartBattery` registry) | 用户态，无权限；**已适配 macOS 27**（容量字段在 `BatteryData` 嵌套字典） |
 | 系统功耗 | `powermetrics` 子进程（Helper） | 仅在用户开启 Helper 时 |
-| 健康度 | `system_profiler SPPowerDataType -json` | 60s 缓存 |
+| 健康度 | `system_profiler SPPowerDataType -json` | 小时级 TTL，后台读取；容量比仅回退 |
 | 电源事件 | `NSWorkspace` 通知（`SleepWatcher`） | 补足睡眠时长 |
 | 通知 | `UserNotifications` | 低电量/充满提醒 |
 | 特权操作 | `NSXPCConnection` + `BatteryBarHelper` LaunchDaemon | 读取 CPU/GPU/DRAM 功耗 |
@@ -113,67 +116,63 @@ BatteryBarApp (@main)
   │    ├─ 开机自启动：SMAppService.mainApp register/unregister（右键菜单开关）
   │    └─ syncEngine.start(config:)（若 isEnabled && syncInterval != .manual）
   └─ WindowGroup("main") → ContentView → 固定侧栏导航（4 个功能区）
-       ├─ environmentObject(appDelegate.sampler) / environmentObject(appDelegate.syncEngine)
+       ├─ environment(appDelegate.sampler/loginItem) + environmentObject(syncEngine)
        ├─ onAppear/onDisappear 切换 Dock 图标显示（.regular/.accessory）
        └─ background(OpenWindowRelay())：右键菜单「打开主窗口」通知 → openWindow(id:"main")
 ```
 
 AppDelegate 为 @MainActor，持有唯一的 PowerSampler 和 SyncEngine 实例，主窗口通过 `appDelegate.sampler` / `appDelegate.syncEngine` 共享。`start()` 内部 `guard !isStarted` 保证幂等。SyncTab 通过 `@ObservedObject syncEngine` 实时显示同步状态（idle/syncing/success/failed）。
 
-### 4.2 采样循环（`PowerSampler`，@MainActor + @Observable）
+### 4.2 事件驱动 + 固定兜底采样（`PowerSampler`，@MainActor + @Observable）
 
 ```
 start()
- ├─ sampleUI()          // 立即一次
- ├─ sampleStorage()     // 立即一次
- ├─ DispatchSourceTimer 每 uiInterval(=1s, 可持久化配置，带 100-500ms leeway) → sampleUI()
+ ├─ readBatteryReading()/sampleStorage()          // 启动立即读取并写一个历史点
+ ├─ 任一读数界面可见：基础兜底每 5s；均不可见：每 15s（固定、不可调）
+ ├─ 主窗口/Popover 每次打开立即读取；两个界面分别登记，最后一个关闭才降频
+ ├─ IOPS 电源变化、低电量模式、热压力通知立即读取；约 180ms 合并通知风暴
  ├─ Timer(target: fireStorage) 每 60s → sampleStorage()
+ ├─ 高级采样开启时独立每 10s 读取 Helper 缓存；默认关闭
  ├─ SleepWatcher.start()（系统 willSleep/didWake + screensDidSleep/screensDidWake 四路通知；
  │   回调经 MainActor.assumeIsolated 同步直达，避免 willSleep → 入睡间 Task 排队延迟丢失统计）
- ├─ Task.detached 后台 readSystemHealthPercent()（system_profiler 1-3s，不能上主线程）
+ ├─ Task.detached 后台 readSystemHealth()（system_profiler 1-3s，不能上主线程）
  ├─ reader.prefetchStaticInfo() → 后台加载机型/序列号；无需广播，
  │   下次采样经 shouldPublishMetadata 比对后写入 currentInfo（属性级失效）
- └─ 观察刷新间隔变更通知（Task { @MainActor } 回主线程）
+ └─ Helper 只做休眠态磁盘版本检查；不自动安装、不建立 XPC、不请求管理员授权
 
-sampleUI():
- ├─ reader.readPowerSource()         // IOPS
- ├─ reader.readBatteryInfo()         // IORegistry（读缓存，不再每秒 spawn system_profiler）
+sampleUI()/applyBaseReading():
+ ├─ reader.readBatteryReading()      // 同一轮 IOPS + IORegistry，失败则保留旧状态并形成缺口
  ├─ 按值变化门控写 @Observable 属性：Observation 属性级追踪——视图 body 读到哪个属性
- │   就只在它变化时失效；页面根视图不读瓦数等高频字段，历史 Chart 不被每秒采样重建
- ├─ NotificationCenter.post("PowerSamplerDidUpdate") → AppDelegate 刷新状态栏文字
- ├─ NotificationManager.checkLowBattery(level, isCharging:)（充电时不触发低电量）
+ │   就只在它变化时失效；页面根视图不读瓦数等高频字段，历史 Chart 不被采样 tick 带着重建
+ ├─ TelemetrySample 更新 availability/source/isEstimated/readAt/changedAt/stableFor
+ ├─ WindowTelemetryAggregator 按真实覆盖时长累计 Wh、温度、亮屏/低电量模式/热状态份额
+ ├─ 电量/充电态变化时按 NotificationPolicy 评估提醒，权限未知或电源来源未知不投递
  ├─ 插拔检测（拔电立即重置统计，30 秒内重插拔平滑过渡）
- ├─ 每 15s readComponentPower（仅 helperEnabled；按墙上时间、防任务重叠、Task.detached 出主线程；
- │   成功样本更新 lastComponentPowerAt，超过 ~30s 视为陈旧，UI 停止显示占比）
- └─ 每 30s 重算 cachedDrainRate / cachedChargeRate
-     （DrainRateCalculator 纯函数：历史速率用离电快照的 batteryPower，接电快照整体排除）
+ └─ 电源切换或最多每 30s 用有界输入重算 RuntimeEstimator；证据不足显示“正在校准”
 
 sampleStorage():
- ├─ 构造 BatterySnapshot（wattage=系统负载、batteryPower=电池功率、screenOn=亮屏且未休眠）
+ ├─ 构造 BatterySnapshot v5（wattage=系统负载、batteryPower=电池功率、screenOn=亮屏且未休眠）
  │   → DataStore.saveSnapshot → 追加一行 jsonl，落盘后发 batterySnapshotsDidChange
  ├─ 离电时按 isSleeping || screensSleeping 计入「屏幕关闭/休眠」，否则计入亮屏
- ├─ CycleTracker.update(isCharging, level, batteryPower)（时钟与落盘 init 注入，可测试）
+ ├─ CycleTracker.update(isPluggedIn, level, batteryPower)（只按明确插拔分段）
  └─ 每 5 分钟持久化 UsageState
 ```
 
-### 4.3 循环检测（`CycleTracker`）
+### 4.3 离电时段检测（`CycleTracker`）
 
-- 维护 `wasCharging` 前一状态
-- `充电 → 放电`：新循环开始（放电阶段，记录 startLevel、startDate）
-- `放电 → 充电`：循环结束（`duration > 300s` 才保存）
-- `accumulatedDischarge` 累加 `max(0, cycleStartLevel - level)`
-- `cycleWattageSamples` 记录放电期间功率采样，用于计算 `averageWattage`
-- 相位已修正：cycle 表示放电阶段（拔电→插电），原实现错位导致 averageWattage 永远为 0
+- 状态机只接受明确 `isPluggedIn`，禁止用 `!isCharging` 推断离电。
+- `接电 → 离电` 开始记录；`离电 → 接电` 结束。满电保持、优化充电暂停和 80% 上限
+  都是接电态，不产生伪离电记录。
+- `OffPowerRecordAnalyzer` 仅让下降 ≥5% 且持续 ≥15 分钟的记录参与归一化趋势；
+  列表仍可显示其他有效记录，证据不足明确显示“数据不足”。
 
-### 4.3.1 放电/充电速率计算（`DrainRateCalculator`）
+### 4.3.1 续航/充电估算（`RuntimeEstimator`）
 
-- 统一算法（抽取自 UsageTab 和 PopoverView 的重复实现）：历史放电段速率 0.6 权重 + 当前功率 0.4 权重融合
-- 纯函数：快照数组与 `now` 由参数注入，不读 DataStore / 系统时钟；配套单测 `DrainRateCalculatorTests`
-- 机型基准：优先「机型典型功耗 ÷ 实测电池能量（满充容量 × 电压）」；容量未知才退回固定速率表 × 健康度因子
-  （注意：不能用 hw.model 的 "m1"/"m2" 子串判断芯片代次——Apple Silicon 的 hw.model 是
-  "Mac14,2" 平台键或 "MacBookAir10,1"，子串永远匹配不到，2026-08-22 修复）
-- 拔电初期（前 120s）优先历史数据，无历史用机型基准
-- PowerSampler 每 30 秒取 recentSnapshots(1440) 调用一次，缓存到 `@Published cachedDrainRate / cachedChargeRate`
+- 离电证据：历史电量 Theil–Sen 鲁棒斜率、最近 15 分钟可信电池放电 Wh、系统剩余时间；
+  系统值独立展示，不与 App 证据静默混算。
+- 充电估算只接受正斜率且净增长 ≥1%；暂停、涓流或坏容量/电压输入拒绝。
+- 两路 App 证据按置信度融合；相差 >2 倍时降置信并扩大区间；最终置信度 <0.40 返回 nil。
+- 输入有界：最多 120 个快照 + 120 个分钟点；只在新分钟、电源切换或最多 30 秒重算。
 
 ### 4.4 持久化（`DataStore`）
 
@@ -184,13 +183,14 @@ sampleStorage():
   - 保留窗口：按 **timestamp** 裁剪 24 小时（`retainedSnapshots`，容忍 ±5min 时钟偏差，
     拒绝 >5min 的未来点），另有 1500 条硬上限防御脏数据。
   - 末尾半行/单行损坏只跳过该行，不影响其余历史加载。
-  - `cycles.json` / `sync-config.json` / `usage-state.json` / `refresh-interval.json`
+  - `cycles.json` / `sync-config.json` / `usage-state.json`；旧 `refresh-interval.json`
+    仅兼容保留，运行时不再读取也不删除
 - 串行 `DispatchQueue(label: "com.batterybar.store", qos: .utility)`
 - 对外访问全部通过 `queue.sync` 包装的访问器：`allSnapshots()` / `recentSnapshots(_:)` / `allCycles()` / `currentConfig()` / `updateConfig(_:)`
 - **解码失败兜底**：load() 中 snapshots/cycles/config 解码失败时先把原文件移为 `*.bak`（覆盖旧备份）再从空数据重建，os.Logger 记录；写盘失败同样记日志，不再静默吞错
 - **可测试性**：`DataStore(directory:)` 可注入目录（单测用临时目录隔离），`flushPendingWritesForTesting()` 等待队列排空；配套 `DataStoreJournalTests`
 
-### 4.5 Privileged Helper（可选，默认关闭，当前版本 4.1）
+### 4.5 Privileged Helper（可选，默认关闭，当前版本 5.0）
 
 ```
 App 端                                  Helper（root LaunchDaemon，队列收敛在 powerQueue）
@@ -206,12 +206,12 @@ shouldAcceptNewConnection → pid → SecCode 校验（签名有效 + bundle id 
 - 安装：`osascript ... with administrator privileges` 拷贝 + bootstrap；「高级采样」开关关闭
   **绝不卸载**（只停止分项采样并清空读数）；只有「采样诊断 → 移除辅助服务…」显式二次确认
   后才调用 `uninstallHelper()`（bootout + 删除二进制与 plist，弹一次管理员密码框）
-- 版本升级：`requiredHelperVersion` 不匹配时自动重装（会弹密码框）。4.1 = 流式 powermetrics + 未授权连接直接拒绝
+- 版本升级：启动只做磁盘 CDHash 休眠态检查；发现缺失/旧版时关闭运行态并提示，只有用户再次主动开启才安装或更新（会弹密码框）。5.0 还把安装时主程序 CDHash 写入 launchd 环境，Helper 同时校验 bundle id 与该 CDHash
 - **流式模式**：v3 的「每次调用 spawn powermetrics + 5s 超时保护 + replyOnce」已移除，XPC 调用直接回缓存，无阻塞无超时问题；mW/uW/W 三单位解析保留
 - **采样器版本兼容**：macOS 27 起移除 `dram` 采样器（`--samplers` 带无效名会整体失败，分项功耗全 0——这是 v3 在 macOS 27 上的隐性回归，4.0 修复）；helper 按 `ProcessInfo.operatingSystemVersion` 门控，<27 才附带 dram，DRAM 功耗在 27 上为 0（UI 已按 0 隐藏）
 - **启动失败退避**：powermetrics 存活 <10s 视为启动失败，连续 3 次进入 60s 冷却，防止重启风暴
-- **调用方校验**：`processIdentifier` → `SecCodeCopyGuestWithAttributes` → `SecCodeCheckValidity`（代码未被篡改）+ bundle id 匹配；4.1 起校验失败直接从 listener 返回 false。局限：ad-hoc 签名无 TeamID，无法做同开发者强校验；Developer ID 后应改为硬编码 designated requirement
-- **App 热路径缓存**：helper 安装/版本状态缓存 5 分钟；组件功耗按墙上时间 15s 采样且禁止并发重叠，正常采样只做一次取数 XPC
+- **调用方校验**：`processIdentifier` → `SecCodeCopyGuestWithAttributes` → `SecCodeCheckValidity`（代码未被篡改）+ bundle id；5.0 再与安装时绑定的客户端 CDHash 比对，失败直接拒绝连接。局限：ad-hoc 签名无 TeamID；正式 Developer ID 后仍宜改为硬编码 designated requirement
+- **App 热路径**：高级采样独立每 10s 读取一次缓存且禁止并发重叠；关闭、stop 或生命周期非 enabled 时不发 XPC，迟到结果由 `ComponentReadingGate` 丢弃
 - **Helper 并发模型**：`@unchecked Sendable` + 队列收敛（所有可变状态只在 powerQueue 串行队列访问）；`getComponentPower` 的 reply 闭包在协议中标注 `@Sendable`
 - **主程序端超时**：`readComponentPower` 3s semaphore，`needsHelperUpdate` 2s semaphore（保留，兼容异常场景）
 - **HelperProtocol 双定义**：主程序端 `@objc optional`（兼容旧 helper），Helper 端必选。未抽取 shared target 是有意设计
@@ -269,8 +269,8 @@ SyncEngine.sync(config:)
               └────────┬────────┘
                        │
                        ▼
-              ┌─────────────────┐    每 1s UI / 每 60s 存储
-              │ PowerSampler    │  (@Observable, @MainActor, 属性级失效)
+              ┌─────────────────┐    事件 + 5/15s UI 兜底 / 每 60s 存储
+              │ PowerSampler    │  (@Observable, @MainActor, 事件 + 5/15s 兜底、60s 落盘)
               └─────┬──────┬────┘
                     │      │
        ┌────────────┘      └─────────────┐
@@ -303,7 +303,7 @@ SyncEngine.sync(config:)
 3. **IOKit 读取必须用户态**，不要求额外权限
 4. **Helper 默认关闭**，用户手动开启时才安装；未开启时不显示 CPU/GPU/内存功耗
 5. **电池使用时间统计**：拔电立即重置，30 秒内重插拔平滑过渡，仅离电时累加
-6. **drain rate 计算**：由 `DrainRateCalculator` 统一实现（历史 0.6 + 功率 0.4 权重），纯函数——快照数组与时间由参数注入，不直接读 DataStore / 系统时钟；PowerSampler 每 30 个 tick 取 recentSnapshots(1440) 调用并缓存到 `@Published cachedDrainRate`；禁止在 View body 里全量扫描 DataStore
+6. **续航/充电估算**：只用 `RuntimeEstimator` 的历史 Theil–Sen 斜率、15 分钟电池放电功率与系统剩余时间三类独立证据；输入各有 120 条硬上限，总置信度 <0.40 必须返回 nil，不得恢复固定机型功耗表、默认 11.1V 或“证据不足仍给数字”的路径；禁止在 View body 扫描 DataStore
 7. **本地优先**：所有数据先写本地，同步是可选功能
 8. **状态栏只显示纯百分比**：`XX%` 格式，跟随系统逻辑，充电时不显示预估时间；≤20% 且未充电时 attributedTitle 变红（`.systemRed`，`.labelColor` 为动态色自动跟随深浅模式）。宽度控制：`button.attributedTitle` + 固定 `statusItem.length`（`NSAttributedString.size()` 测宽 + `ceil` + 2pt 余量）。**禁止把 NSTextField 嵌入 NSStatusBarButton**——macOS 27 实测会触发 AppKit 布局引擎持续重排，空转约 37% CPU（T-30，2026-08-22 用 20 行最小复现定位）
 9. **状态栏深色/浅色模式自动跟随**：`attributedTitle` 使用动态 `.labelColor`（低电量时 `.systemRed`），无需手动监听外观切换
@@ -313,12 +313,12 @@ SyncEngine.sync(config:)
 13. **Popover 卡片化设计**：分区用紧凑圆角卡片与淡彩边缘，禁用 Divider；充电/已插电未充电/放电三种状态统一结构且均带电量进度条；电压/电流只能作为次要小字展示
 14. **并发隔离**：`PowerSampler` 与 `AppDelegate` 均为 `@MainActor`，可观察状态一律 `private(set)`；阻塞调用（system_profiler / XPC helper）必须经 `Task.detached` 出主线程；休眠回调用 `MainActor.assumeIsolated`（SleepWatcher 通知在主线程派发）
 15. **主窗口走 SwiftUI WindowGroup**：由 `WindowGroup(id: "main")` 保留系统窗口材质与生命周期；ContentView 使用自定义侧栏导航，不恢复系统 TabView 顶栏
-16. **CycleTracker / DrainRateCalculator / OffPowerRecordAnalyzer 可测试性**：时钟与落盘经 init/参数注入，配套单测在 `Tests/BatteryBarTests/`；修改算法必须同步更新测试
-17. **SwiftUI 失效边界（2026-08-23 起）**：`PowerSampler` 为 `@Observable`（Observation 属性级追踪，替代旧 objectWillChange 全树广播）。页面根视图只读低频字段并持有历史状态；每秒变化的瓦数/组件读数拆进独立小视图；历史分析模型只在快照通知或范围切换时重算；禁止在 View body 里做全量排序、多个 filter/map/reduce、寻找时段或生成分析模型。Chart 一律包成输入 Equatable 的隔离子树（`.equatable()`）。滚动内容用 LazyVStack
-18. **可观察属性必须值变才写**：每秒无条件写会让读取该属性的视图逐秒重算（objectWillChange 时代曾烧约 40% CPU）；`sampleUI` 对 level/isCharging/wattage(0.05W 阈值)/温度/电压/电流/BatteryInfo(需 Equatable) 全部门控
+16. **CycleTracker / RuntimeEstimator / OffPowerRecordAnalyzer / WindowTelemetryAggregator 可测试性**：时间、输入与落盘边界均可注入，配套反例在 `Tests/BatteryBarTests/`；修改算法必须同步更新测试
+17. **SwiftUI 失效边界（2026-08-23 起）**：`PowerSampler` 为 `@Observable`（Observation 属性级追踪，替代旧 objectWillChange 全树广播）。页面根视图只读低频字段并持有历史状态；高频瓦数/组件读数拆进独立小视图；历史分析模型只在快照通知或范围切换时重算；禁止在 View body 里做全量排序、多个 filter/map/reduce、寻找时段或生成分析模型。Chart 一律包成输入 Equatable 的隔离子树（`.equatable()`）。滚动内容用 LazyVStack
+18. **可观察属性必须值变才写**：每个采样 tick 无条件写会让读取该属性的视图反复重算（objectWillChange 时代曾烧约 40% CPU）；`sampleUI` 对 level/isCharging/wattage(0.05W 阈值)/温度/电压/电流/BatteryInfo(需 Equatable) 全部门控
 19. **分发必须 release 构建**：Swift 6 debug 构建的运行时在本机实测空转约 38% CPU（release 同代码为 0，T-29）；`build-app.sh`/`build.sh`/`build-dmg.sh`/`update.sh`/CI 均已 `-c release`
 20. **状态栏刷新门控保留**：refreshTitle 文字/低电量态未变时跳过 title/length 赋值；宽度用 `button.attributedTitle` + `NSAttributedString.size()` 测宽 + 固定 length（禁止 NSTextField 子视图，见 T-30）
-21. **功率双口径与电源语义（2026-08-23 第二轮修正）**：`wattage` 一律指**系统负载**；电池包功率单独用 `batteryPower` 表达。`isCharging` 只表示电池包正在充入——满电保持、优化充电暂停、80% 上限都是 externalConnected=true 且 isCharging=false，**禁止把 !isCharging 当作离电**。快照 v3 起持久化 `externalConnected`（键缺失=来源未知，不得推断）。读取优先级：PowerTelemetryData.SystemLoad → BatteryData.SystemPower → 明确离电时的电池放电功率（估算）→ 接电无遥测时不可用。`trustedSystemLoad`：实测遥测始终保留；估算负载仅 externalConnected==false 时可信——来源未知的估算点（含已迁移的历史污染点）保守排除出系统负载统计、DrainRate 与离电时段。CycleTracker/UsageSessionModel 分段只认插拔状态
+21. **功率双口径与电源语义（2026-08-23 第二轮修正）**：`wattage` 一律指**系统负载**；电池包功率单独用 `batteryPower` 表达。`isCharging` 只表示电池包正在充入——满电保持、优化充电暂停、80% 上限都是 externalConnected=true 且 isCharging=false，**禁止把 !isCharging 当作离电**。快照 v3 起持久化 `externalConnected`（键缺失=来源未知，不得推断）。读取优先级：PowerTelemetryData.SystemLoad → BatteryData.SystemPower → 明确离电时的电池放电功率（估算）→ 接电无遥测时不可用。`trustedSystemLoad`：实测遥测始终保留；估算负载仅 externalConnected==false 时可信——来源未知的估算点（含已迁移的历史污染点）保守排除出系统负载统计、续航估算与离电时段。CycleTracker/UsageSessionModel 分段只认插拔状态
 22. **屏幕状态统计**：`screenOn` 表示屏幕亮着（`!isSleeping && !areScreensSleeping`），监听 NSWorkspace screensDidSleep/screensDidWake；显示器关闭但机器醒着的分钟计入「屏幕关闭/休眠」，不得计入亮屏。UI 文案无法严格区分显示器关闭与系统睡眠时统一写「屏幕关闭/休眠」
 23. **快照存储为追加日志**：每分钟只追加一行 `snapshots.jsonl`，禁止恢复每分钟全量重写；过期行（被 24h 窗口挤出）在内存立即收敛、文件侧延迟清理，累计 ≥60 条（约 1 小时量，稳态实测每分钟一条会恰好触发边界）才做一次原子 compact；mark synced / 远端合并即时 compact；迁移必须保留旧 `snapshots.json` 作回退；dirty 同步语义不得为写优化让步
 24. **离电记录 ≠ Apple 循环次数**：记录页展示的是本 app 检测的离电使用时段（内部类型 ChargeCycle）；趋势只用归一化指标（折算满电续航/每小时耗电百分比），且仅纳入下降 ≥5% 且持续 ≥15 分钟的记录，样本不足显示「数据不足」；Apple 的 CycleCount 一律叫「循环次数」。「上次充电摘要」需正电量变化 ≥1% 且时长 ≥5 分钟，否则显示暂无有效记录
@@ -329,8 +329,8 @@ SyncEngine.sync(config:)
 ## 七、维护工程师上手清单
 
 1. 通读本文档与 `MAINTENANCE_PLAN.md`
-2. `swift build` 确认能编译
-3. `bash build-app.sh && open .build/debug/BatteryBar.app` 跑起来
+2. 本机运行 `bash scripts/local-gate.sh`（CLT 无 SwiftUIMacros 时，直接 `swift test` 失败属于已知环境限制）
+3. 功能冻结后只推送一次，等待 GitHub Build + UI Profile 绿，再安装该 Build 的 release artifact
 4. 验证状态栏显示 `XX%`
 5. 点击状态栏文字打开 popover，验证数据显示
 6. 打开主窗口，切换 4 个 Tab 验证图表

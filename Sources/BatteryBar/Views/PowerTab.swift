@@ -622,7 +622,7 @@ private struct PowerDiagnosticsSection: View {
 /// 开关开启：检查 Helper 状态，必要时安装/更新，成功后启动 CPU/GPU/内存分项采样；
 /// 开关关闭：只停止分项采样并清空读数，绝不卸载 Helper、绝不请求管理员密码；
 /// 移除后台服务是「采样诊断」里的独立显式操作（二次确认 + 管理员授权 + 需重装说明）。
-/// 状态五态均由 HelperLifecycleState.label 映射，失败保留原因并提供重试。
+/// 状态均由 HelperLifecycleState.label 映射，失败保留原因并提供重试。
 private struct AdvancedSamplingCard: View {
     let sampler: PowerSampler
 
@@ -642,7 +642,7 @@ private struct AdvancedSamplingCard: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if state == .starting {
+                if state.isBusy {
                     ProgressView().controlSize(.small)
                 } else {
                     Toggle("", isOn: Binding(
@@ -703,6 +703,7 @@ private struct AdvancedSamplingCard: View {
         switch state {
         case .enabled: "shield.checkered"
         case .starting: "hourglass"
+        case .removing: "trash"
         case .needsUpdate: "exclamationmark.triangle"
         case .error: "xmark.octagon"
         case .disabled: "shield.slash"
@@ -714,7 +715,7 @@ private struct AdvancedSamplingCard: View {
         case .enabled: .green
         case .needsUpdate: .orange
         case .error: .red
-        case .starting, .disabled: .secondary
+        case .starting, .removing, .disabled: .secondary
         }
     }
 
@@ -722,6 +723,7 @@ private struct AdvancedSamplingCard: View {
         switch state {
         case .disabled: "默认关闭 — 零 powermetrics 调用"
         case .starting: "正在准备后台服务…"
+        case .removing: "正在移除后台服务…"
         case .enabled: "已启用 — 后台服务独立每 10 秒产出分项样本"
         case .needsUpdate: "默认关闭 — 后台服务版本过旧，开启时更新"
         case .error: "默认关闭 — 上次启动未成功，可重试"

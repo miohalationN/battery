@@ -107,7 +107,7 @@ final class PowerSampler {
     private(set) var helperEnabled: Bool = UserDefaults.standard.object(forKey: "BatteryBarHelperEnabled") as? Bool ?? false
     /// Helper 生命周期状态机（可注入边界；关闭高级采样绝不卸载）
     private(set) var helperLifecycle: HelperLifecycleController
-    /// 供 UI 读取的 Helper 五态状态
+    /// 供 UI 读取的 Helper 生命周期状态
     var helperState: HelperLifecycleState { helperLifecycle.state }
 
     // 使用时间统计：按离电周期统计，充电时停止
@@ -205,6 +205,7 @@ final class PowerSampler {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let state = await self.helperLifecycle.refreshAtStartup(enabled: self.helperEnabled)
+            guard self.isStarted else { return }
             if self.helperEnabled, state != .enabled {
                 self.persistAdvancedSamplingEnabled(false)
                 self.helperEnabled = false
@@ -865,7 +866,7 @@ final class PowerSampler {
     /// 绝不调用 uninstallHelper、绝不请求管理员密码。
     func setAdvancedSamplingEnabled(_ enabled: Bool) async {
         if enabled {
-            guard helperLifecycle.state != .starting else { return }
+            guard !helperLifecycle.state.isBusy else { return }
             let ok = await helperLifecycle.beginEnable()
             if ok {
                 persistAdvancedSamplingEnabled(true)
@@ -892,6 +893,7 @@ final class PowerSampler {
     /// 先停止采样并清零，再请求管理员授权移除 root 守护进程；卸载失败/取消时
     /// 由 lifecycle 记录 error，采样保持关闭。
     func removeHelperService() async {
+        guard !helperLifecycle.state.isBusy else { return }
         persistAdvancedSamplingEnabled(false)
         helperEnabled = false
         stopComponentPowerTimer()
