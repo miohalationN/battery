@@ -364,3 +364,96 @@ Hitches trace（本页图表改动后必须取得有效 hitches trace）。本�
 有效。digest 与原始 trace 已上传为 artifact `ui-profile`（ID 9505291304）。
 未以 schema 数宣称零 hitch，hitches 表内容以 artifact 为准供独立复核。
 
+
+---
+
+## 十九、第三轮 assurance 返工交付摘要（功能基线 103b333，HEAD 91aa14c）
+
+本轮四项验收修复 + 实测验证，功能提交 `86b9c1d`：
+
+### 目标一（P1）电池功率来源选择纯逻辑
+- 新增 `Calc/BatteryPowerSelection.swift`：按既定优先级取「第一个存在且合法的
+  直接值」；合法值含原始 0，0 立即胜出（available=true/value=0），禁止被低优先级
+  节点或电压×电流乘积覆盖；缺失/越界坏值才允许继续；全部直接来源无合法值时，
+  才允许乘积>0 的 V×I 回退（estimated）。`BatteryReader` 改为调用该纯函数，
+  删除原内联 `sawZeroTelemetry` 逻辑（旧逻辑会让低优先级正值覆盖高优先级 0，
+  与冻结规则冲突）。
+- 反例（`BatteryPowerSelectionTests` 6 条）：高优先级 0 vs 低优先级正值→0；
+  raw=0 vs V×I>0→0 且非 estimated；高优先级坏值→低优先级正值；全缺+V×I>0→
+  乘积回退；全缺且乘积 0→unavailable；低优先级坏值不污染高优先级正值。
+
+### 目标二（P2）远端 v5 aggWin 清洗修复
+- 修复 `from(remoteJSON:)` 无合法 aggWin 后 tMax/tCov 被重新赋值的问题：
+  `temperatureMaximum`/`temperatureCoverage` 改为 var，随其余聚合字段一并置 nil
+  （原实现把 nil 清空又用局部常量覆盖回去）。
+- 重写 `missingWindowClearsAllAggregateFields` 使用真实协议键
+  `batDisWh`/`tMax`/`tCov`；新增 `illegalAggWinClearsAllAggregateFields` 覆盖
+  越界数值（1e300）、非数值（字符串）、负值——均等价于缺失，全部聚合字段为 nil。
+- 亮度点读数独立保留沿既有设计，不扩大范围。
+
+### 目标三（P1）开机自启动 .notFound 不再视为永久不可用
+- 实机确认 `SMAppService.mainApp.status == .notFound`（BTM record not found）。
+- `LoginItemState.statusSubtitle` 的 .notFound 从「当前环境不可用」改为
+  「关闭（尚未注册）」；SyncTab Toggle 移除 `.disabled(status == .notFound)`，
+  首次无记录也可操作；用户开启调用 register，失败刷新真实状态并返回可理解错误。
+- `SystemLoginItemController.openApprovalSettings()` 改用官方
+  `SMAppService.openSystemSettingsLoginItems()`。
+- 新增反例：.notFound→setEnabled(true) 成功转 enabled；.notFound 注册失败恢复
+  真实状态；requiresApproval 语义不变；openApprovalSettings 转发。
+
+### 目标四（P2）接电时段展示语义
+- `currentCharge` 卡片改称「本次接电」（不再无条件称「本次充电」/「已充入」）。
+- 新增纯函数 `UsageSessionModel.chargeDeltaDisplay(deltaPercent:)`：
+  正增长→「电量增加 +N%」可高亮；零/负增长→中性「电量变化 0%/-N%」不绿不高亮。
+- UsageTab 摘要行与图例按该模型渲染，100→97（ext=true）反例验证为「电量变化 -3%」，
+  不出现「已充入 -N%」；lastCharge ≥1% 且 ≥5min 门槛不变。
+
+## 二十、本轮验证
+
+- 纯逻辑反例：新增 20 条全 PASS（/tmp/bb_pure2）；上一轮 24 条对更新后源码
+  重跑仍全 PASS（/tmp/bb_pure，无 Swift 6 严格并发模式）。
+- `scripts/local-gate.sh` 三步全绿（parse / Swift6 typecheck+WMO -O / Helper build）。
+- CI Build `32692948908` **success**：182 tests / 27 suites 全过（上轮 167/26）。
+- UI Profile `32692948912` **success**（概览页与功耗页 hitches trace 有效，Gate 通过）。
+
+## 二十一、artifact 与安装身份
+
+- artifact：`BatteryBar.zip`（Build 32692948908 产出）。
+- 主程序 SHA-256：`a21d33d8…c4d9dc8`（下载与已安装副本一致）。
+- Helper SHA-256：`24e04864…f70b8`（下载与已安装副本一致）。
+- codesign：`--verify --deep --strict` 主程序与 Helper 均通过。
+- 安装：`/Users/mio/Applications/BatteryBar.app`；旧 App 移入
+  `~/.Trash/BatteryBar-pre-round3-*.app`；数据备份
+  `~/Library/Application Support/BatteryBar-backup-pre-round3-20260824`。
+
+## 二十二、实机运行证据
+
+- 进程 pid 20983：CPU 0.0%，RSS ~13.8MB，零 TCP 连接。
+- 概览页 OCR：健康度 98%（来源：系统最大容量）；接电时段卡片标题「本次接电」，
+  负增长显示「-5%」中性（无绿色「已充入」）。
+- 设置页 OCR：开机自启动行显示「关闭（尚未注册）」（非「当前环境不可用」），
+  Toggle 可操作（按要求未替用户开启）；「采样诊断」默认折叠；自动采样三行
+  用户语言文案正确。
+- journal `snapshots.jsonl`：inode 稳定、按 60s 节奏追加，v5 字段
+  （aggregateWindowStart/systemCoverage/temperatureMaximum/temperatureCoverage/
+  maximumThermalState）完整，方向字段 ext=true、charging=true 正确。
+- `SMAppService.mainApp.status` 保持 .notFound：未替用户注册登录项。
+- 旧 refresh-interval.json 原样保留；Helper/launchd 未安装/卸载/修改；
+  管理员授权全程未请求。
+
+## 二十三、本轮遗留限制
+
+1. 实机无法自然观测「接电未充电」运行期窗口（本机始终插电充电），该方向
+   unknown 不累计由 CI 测试与纯反例证明，非运行期观测。
+2. 登录项 .notFound 的注册成功路径仅以 stub 反例与文案验证，未实机点击开启
+  （任务约束：不替用户开启）。
+3. 接电时段负增长（100→97）以纯反例 + 测试证明展示语义，实机当前为充电正增长。
+4. 上轮限制沿用：历史 batteryChargeWh（e3997af 规则产物）不可信、无迁移；
+   Helper 仍绑定旧 App CDHash；requiresApproval 需用户手动允许。
+
+## 二十四、外部系统触碰状态（第三轮）
+
+- WebDAV：未启用、无真实请求。Helper/launchd：未安装/卸载/修改。
+- 管理员授权：全程未请求。用户数据：journal 只追加、未删除/改写任何历史；
+  备份完整可恢复。
+- git：普通 push，无 force push、无历史改写；最终 HEAD 与 origin/main 同步。
