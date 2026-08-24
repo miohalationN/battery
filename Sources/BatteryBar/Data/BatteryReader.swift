@@ -916,10 +916,21 @@ final class BatteryReader: @unchecked Sendable {
         return SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess
     }
 
-    private func currentExecutableCDHash() -> String? {
-        guard let executableURL = Bundle.main.executableURL else { return nil }
+    /// Helper 关闭时只比较磁盘代码签名哈希，不建立 XPC 连接、不触发 launchd。
+    /// 用于提示遗留版本需要更新，同时保持“默认关闭 = 零 Helper 调用”。
+    func dormantInstalledHelperNeedsUpdate() -> Bool {
+        let installedURL = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/com.batterybar.helper")
+        guard FileManager.default.fileExists(atPath: installedURL.path) else { return false }
+        guard let bundledPath = validatedBundledHelperPath(),
+              let installedHash = staticCodeCDHash(at: installedURL),
+              let bundledHash = staticCodeCDHash(at: URL(fileURLWithPath: bundledPath))
+        else { return true }
+        return installedHash.caseInsensitiveCompare(bundledHash) != .orderedSame
+    }
+
+    private func staticCodeCDHash(at url: URL) -> String? {
         var code: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &code) == errSecSuccess,
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
               let code else { return nil }
         var infoCF: CFDictionary?
         guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &infoCF) == errSecSuccess,
@@ -927,6 +938,11 @@ final class BatteryReader: @unchecked Sendable {
               let hash = info[kSecCodeInfoUnique as String] as? Data,
               !hash.isEmpty else { return nil }
         return hash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func currentExecutableCDHash() -> String? {
+        guard let executableURL = Bundle.main.executableURL else { return nil }
+        return staticCodeCDHash(at: executableURL)
     }
 
     /// 执行安装

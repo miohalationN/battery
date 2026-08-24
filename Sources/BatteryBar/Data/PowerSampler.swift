@@ -199,6 +199,13 @@ final class PowerSampler {
                     self.restartComponentPowerTimer(sampleImmediately: true)
                 }
             }
+        } else {
+            Task { @MainActor in
+                let needsUpdate = await Task.detached(priority: .utility) {
+                    reader.dormantInstalledHelperNeedsUpdate()
+                }.value
+                self.helperNeedsUpdate = needsUpdate
+            }
         }
 
         // 存储定时器（Timer + target/selector 在主 RunLoop 触发，无隔离问题）
