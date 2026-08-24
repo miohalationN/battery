@@ -1,14 +1,100 @@
-# IMPLEMENTATION_HANDOFF — 事件驱动采样、数据质量模型、分钟聚合与可信续航估算
+# IMPLEMENTATION_HANDOFF — 事件驱动采样、质量模型、分钟聚合、可信估算 与 assurance 返工
 
 > 执行 Agent 移交文档，供 assurance/review agent 独立验证。
-> 本轮基线：`664c9fe48408a93940e20843149cd5acd14a0459`（origin/main 同步且 clean）。
-> 功能提交：A=`2d386b4`（采样/聚合/v5 schema），B=`43bb2eb`（估算器/UI/下游），
-> 修复=`e3997af`（Release 独占访问 + 本地门禁 WMO 步）。最终 HEAD 与 origin/main 同步。
-> 上一轮移交见 git 历史。
+> 上一轮功能基线：`664c9fe`（A=`2d386b4`、B=`43bb2eb`、修复=`e3997af`，最终 `3782360`）。
+> 本轮 assurance 返工基线：`37823602905a70e83321a93878d7074bb628373b`（clean 且与 origin 同步）。
+> 返工提交链：主体 `7856729` → `4e82875`（LoginItemState 补 openApprovalSettings 转发）
+> → `765c2e2`（矛盾用例窗口修正）→ `bbf7014`（用例自诊断化）→ `103b333`
+> （根因修复：矛盾用例补容量/电压输入；LoginItemState 初始刷新真实状态）。
+> 最终功能源码 HEAD=`103b333`；此后仅文档提交。不 force push，未改写任何已有提交。
 
 ---
 
-## 一、交付范围与角色边界遵守情况
+## 〇、本轮 assurance 返工交付摘要
+
+### 目标一：电池功率可用性与方向（冻结）
+
+- `BatteryInfo` 新增 `batteryPowerAvailable`：区分「可信的有效 0W」与「没有读到功率」。
+  遥测节点原始值恰为 0 → 可信零瓦（available=true, value=0）；归一化越界坏数据 → 不可用；
+  电压×电流兜底仅在乘积 >0 时可用。兼容哨兵 0 只留在 BatterySnapshot 兼容字段，
+  不进入质量模型（`batteryPowerMetric`：可信零瓦 = available+some(0)，不可读 = unavailable+nil）
+  与分钟积分。
+- `BatteryReading.batteryChannel` 冻结规则：① 接电+充电+功率可用 → charge；
+  ② 明确离电+未充电+功率可用 → discharge；③ 接电未充电 / 矛盾状态（离电却在充电）/
+  来源未知 / 功率不可用 → unknown；④ unknown 不累计任何一侧 seconds/Wh。
+- **旧数据限制（明确记录）**：e3997af 期间按旧规则把「接电未充电」也计入
+  batteryChargeWh，这些历史值不适合作为将来可信充电能量来源；本修复不做无法
+  可靠推导的迁移，仅从新快照起按冻结规则记账。用户历史与 journal 未被删除或改写。
+- 反例：BatteryChannelTests（六种状态映射）、聚合器 unknown 零累计（Wh 与 seconds
+  双零）、有效 0W 放电计覆盖 Wh=0、质量模型 trustedZero vs sentinel。
+
+### 目标二：估算展示门槛（强制执行）
+
+- `RuntimeEstimator.dischargeEstimate` 单路/融合出口与 `chargeEstimate` 出口统一经
+  `gated()`：最终 confidence < 0.40 一律返回 nil；内部证据可低置信存在
+  （`historicalSlopeEvidence`/`batteryPowerEvidence` 不降级）。
+- 测试修正：20 分钟降 2%（conf≈0.333）证据成立但 dischargeEstimate nil；
+  充电 5 分钟 +1%（conf≈0.15）nil；涓流（0.54→0.324）nil；200%/h 拒绝。
+  新增高置信矛盾用例（60 分钟降 5% 斜率 conf=1 + 功率 50%/h conf=0.66 →
+  融合 conf≈0.498 ≥0.4 可展示、failureReason 标注差异、区间扩大）；
+  低置信矛盾（≈0.298）→ nil。
+
+### 目标三：分钟聚合与范围覆盖率（修正）
+
+- `maximumThermalState` 每自然分钟重置（`beginWindow` 清零）；持续热状态由新分钟
+  首次 setState/observe 重新登记。反例：第一分钟严重、第二分钟正常不继承。
+- `BatterySnapshot.apply`：temperatureCoverage<0.5 仅置 temperatureAverage=nil，
+  该分钟确实观察到温度时 maximum 保留并附覆盖率（反例 cov=0.3/max=40）。
+- 新增纯函数 `RangeStatistics`（无 SwiftUI 依赖）：总覆盖率分母 = 所选范围墙钟时长，
+  完全缺失的分钟计未覆盖，按 aggregateWindowStart 去重并限窗，coverage 裁 0...1；
+  能耗仅累加覆盖达标（≥0.8）的 systemEnergyWh。反例：6 小时 1 完整分钟 ≈1/360、
+  1 小时 60 完整分钟 =100%、中间缺口降低覆盖率、窗口外/重复窗口排除。
+  PowerTab 改用该纯函数。
+
+### 目标四：质量与同步安全边界
+
+- `readAt` 在 IOPS+IORegistry 本轮读取全部完成后取得，文案仍解释为 App 完成读取时间。
+- `PowerSampler.stop()` 先关闭 `isStarted` 门控再撤销各事件源/定时器/迟到 Task；
+  `sampleUI`/`sampleStorage`/`fireStorage` 统一阻止 stop 后写状态或 journal。
+- `BatterySnapshot.from(remoteJSON:)` 对 v5 可选字段保守校验：
+  coverage/fraction/brightness 限 0...1；功率 0...500、能量 0...20、温度 -20...100、
+  时间戳 0...2100 年，全部要求 finite；thermalPeak 白名单（正常/偏高/较高/严重/未知）
+  且 ≤16 字符；sysCov<0.8 清除 sysEWh/sysPAvg/sysPPeak；tCov<0.5 清 tAvg 但保留合法
+  tMax；无合法 aggWin 时清空全部聚合字段。畸形可选字段降级为 nil，不因一个附加字段
+  破坏整条旧格式兼容记录。反例：巨大数值/负能量/越界覆盖率/门控不一致/无 aggWin/
+  非法 thermal 标签/合法 v5 行不受影响。
+
+### 增量一：电池健康口径
+
+- 首选 macOS system_profiler 报告值（本机 98%），不再因 IORegistry 容量比 >0 而跳过；
+  容量比（FCC÷DC，本机 96.3%）仅作回退并标注「容量比估算（非系统健康度）」；
+  全部缺失显示不可用，不默认 100；不使用 StateOfCharge。
+- 后台低频：启动一次 + 小时级 TTL（`BatteryHealthMetric.shouldRefresh` 纯函数）+ 唤醒后；
+  60 秒进程内缓存防重复 spawn；绝不进入 5/15 秒采样路径，不阻塞主线程。
+- Popover 与主窗口消费同一 `healthMetric` 模型，带来源/读取时间/估算标注。
+- 反例：fixture "98%" 解析、系统值优先于容量比、回退标估算、全缺不可用、TTL 节流。
+
+### 增量二：开机自启动入口
+
+- `LoginItemState`（@MainActor @Observable）+ `LoginItemControlling` 可注入协议 +
+  `SystemLoginItemController` 包装 SMAppService；init 即读取系统真实状态。
+- 右键菜单与「数据与设置」页「应用设置」卡片 Toggle 共用同一实例，禁止两套逻辑漂移；
+  requiresApproval 不假装已开启并显示「需要在系统设置中允许」+ 打开系统设置按钮；
+  register/unregister 失败刷新真实状态并返回可理解错误；onAppear/应用激活刷新。
+- 反例：开启/关闭/需批准/注册失败/注销失败/refresh 感知外部改动（LoginItemStateTests，
+  stub 注入）。
+
+### 增量三：采样文案
+
+- 移除 Popover 顶部「5 秒兜底轮询/15 秒保活轮询」徽标；底层 5/15/60/10 策略不变。
+- 「自动采样」主卡改为用户语言（界面打开提高频率/后台降低占用、功率温度取决于
+  macOS 驱动、历史每分钟记录）；精确秒数与最近读取时间收进默认折叠的「采样诊断」
+  DisclosureGroup（PollingHeartbeat 独立小视图，不引发整页周期重绘）。
+- 页面标题改为「数据与设置」。
+
+---
+
+## 一、交付范围与角色边界遵守情况（沿用）
 
 算法/口径/不变量按任务书冻结实现，未改成普通算术平均、瞬时值×整段时间、缺口插值
 或固定机型经验值。IORegistry 无硬件时间戳的字段一律保持 nil（`sourceSampleAt`
@@ -216,7 +302,59 @@ CDHash 不同，XPC 版本校验失败 → App 自动关闭运行态开关（Use
   数据与旧版 App 均有可恢复备份（见 §十一）。
 - git：普通 push 到 main，无 force push，无历史改写。
 
-## 十四、UI Profile 取证
+## 十四、UI Profile 取证（返工轮）
+
+返工轮 run `32689383898`（commit 103b333）**success**：usage/power 两页的
+Animation Hitches trace 与 SwiftUI trace 均一次录制即被接受（trace accepted），
+「Gate required traces」校验非空通过。未以 schema 数宣称零 hitch，hitches 表
+内容以 artifact 为准供独立复核。（上一轮 32683610852 的取证结论同样有效。）
+
+## 十五、返工轮 CI 失败记录（透明披露）
+
+- 7856729（主体）：SyncTab 调用 `loginItem.openApprovalSettings` 但模型未转发
+  → 4e82875 补转发。
+- 765c2e2：`highConfidenceContradictionStaysObservable` 在 CI 上返回单路
+  historicalSlope——自诊断消息（#require 携带完整 Inputs 现场，15 个窗口
+  1800002760…1800003600 全部在界内）定位到根因：该用例漏设
+  `fullChargeCapacityMah`/`voltageMV`，功率证据被正确拒绝；另 `LoginItemState`
+  init 未读取系统真实状态导致三项状态测试失败。103b333 一并修复。
+- 最终代码 run `32689383815` 全绿：**167 tests / 26 suites passed**，完整
+  SwiftUI build、Release App/Helper、严格签名检查、artifact 上传均通过。
+
+## 十六、返工轮 artifact、安装与运行时证据
+
+- 只从绿色 run 32689383815（HEAD=103b3333e5c438832aae6dcd4978efd766825344）下载：
+  - `Contents/MacOS/BatteryBar` SHA-256 =
+    `fdede122071ddc426130fdb165f2a84cc951e3dd91f5eebc8f72d91a5de9713c`
+  - `Contents/Resources/BatteryBarHelper` SHA-256 =
+    `e491185a5540798fd5d34c406ec4258f03e9c57c98e736aa67b75e72bea71e94`
+  - `codesign --verify --deep --strict`（app/helper 分别）通过；无调试入口字符串。
+- 安装前备份：数据 `~/Library/Application Support/BatteryBar-backup-pre-fix-20260824`；
+  旧 App `~/.Trash/BatteryBar-pre-fix-*.app`。ditto 安装后哈希逐一比对一致。
+- journal：inode `21822045` 不变，行数 1374→持续追加；最新行 v5 字段语义正确。
+- 运行时边界：App CPU 0.0%、RSS≈14.9MB（启动瞬态后回落），零 TCP 连接，
+  WebDAV 从未启用无请求；helper/powermetrics 无进程。
+- 「接电未充电不累计充电能量」的运行期验证说明：本机自安装起持续处于**活跃充电**
+  （isCharging=true，用户插电使用中），无法自然进入「接电未充电」观察窗口；
+  活跃充电期 batteryChargeWh 正常累计（规则①正确方向），反向证明方向门控在
+  实机生效。接电未充电→unknown→双侧零累计由本地可执行纯逻辑 harness（24 项
+  反例全 PASS，含 unknown 零累计、有效 0W 计覆盖）与 CI 167 项测试
+  （BatteryChannelTests / 聚合器 unknown seconds 双零）证明，不依赖等待系统
+  状态变化。
+
+## 十七、返工轮遗留限制
+
+1. 历史 batteryChargeWh（e3997af 规则产物）不可作为可信充电能量来源，已声明
+   （见§〇目标一），无迁移。
+2. 系统 Helper 仍绑定旧 App CDHash：本返工轮未触碰 Helper/launchd，未请求
+   管理员授权；用户下次主动开启分项采样时需一次授权更新（沿用§十二说明）。
+3. 开机自启动 requiresApproval 路径需用户在系统设置手动允许，应用只能引导。
+
+## 十八、外部系统触碰状态（返工轮）
+
+- WebDAV：未启用、无真实请求。系统 Helper/launchd：未安装/卸载/修改。
+- 管理员授权：全程未请求。用户数据：journal 只追加；备份完整可恢复。
+- git：普通 push 至 main，无 force push，无历史改写；最终 HEAD 与 origin/main 同步。
 
 `.github/workflows/ui-profile.yml` 对概览页与功耗页录制 SwiftUI 求值与 Animation
 Hitches trace（本页图表改动后必须取得有效 hitches trace）。本轮 run
@@ -226,11 +364,3 @@ Hitches trace（本页图表改动后必须取得有效 hitches trace）。本�
 有效。digest 与原始 trace 已上传为 artifact `ui-profile`（ID 9505291304）。
 未以 schema 数宣称零 hitch，hitches 表内容以 artifact 为准供独立复核。
 
-## 十五、遗留限制
-
-1. Helper 更新需要用户一次主动开启 + 管理员授权（§十二），在此之前 CPU/GPU 分项
-   读数为 0（明确缺口而非伪造值），v5 快照的 cpuPower/gpuPower/dramPower 相应为 0。
-2. 主显示器亮度接口在本机不可读取（`brightnessAvailable=false`），属设备事实而非缺陷；
-   UI 如实显示“不可读取”。
-3. 估算冷启动：重启后分钟聚合缓冲从零积累，功率证据路径需 ≥10 分钟有效时长，
-   期间 UI 显示“正在校准/系统估算”，符合设计。
