@@ -1093,7 +1093,7 @@ final class BatteryReader: @unchecked Sendable {
             installPath,
             plistPath,
             plistContent,
-            "\(AppBrand.displayName)需要安装后台服务以读取 CPU/GPU 分项功耗",
+            "\(AppBrand.localizedName)需要安装后台服务以读取 CPU/GPU 分项功耗",
         ]
         let pipe = Pipe()
         task.standardOutput = pipe
@@ -1131,7 +1131,7 @@ final class BatteryReader: @unchecked Sendable {
         }
 
         let script = """
-        do shell script "(launchctl bootout system/\(Self.helperIdentifier) 2>/dev/null || true) && rm -f '\(installPath)' '\(plistPath)'" with administrator privileges with prompt "\(AppBrand.displayName)需要移除后台服务"
+        do shell script "(launchctl bootout system/\(Self.helperIdentifier) 2>/dev/null || true) && rm -f '\(installPath)' '\(plistPath)'" with administrator privileges with prompt "\(AppBrand.localizedName)需要移除后台服务"
         """
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")

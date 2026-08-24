@@ -140,6 +140,7 @@ struct BatteryBarApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var aboutWindow: NSWindow?
     private var observer: NSObjectProtocol?
     private var loginItemActivationObserver: NSObjectProtocol?
     // refreshTitle 门控：文字与低电量态都没变时跳过（title/length 赋值会触发菜单栏重排）
@@ -154,6 +155,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         sampler.start()
         loginItem.refresh()
+
+        // 通知设置初始化：只查询授权状态、绝不请求权限（策略见 NotificationManager）
+        Task { @MainActor in
+            await NotificationManager.shared.start()
+        }
 
         // 应用重新激活后刷新登录项真实状态（用户可能在系统设置中手动改动）
         loginItemActivationObserver = NotificationCenter.default.addObserver(
@@ -249,13 +255,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let settingsItem = menu.addItem(withTitle: "电池设置…", action: #selector(openBatterySettingsFromMenu(_:)), keyEquivalent: "")
         settingsItem.target = self
 
-        let aboutItem = menu.addItem(withTitle: "关于 \(AppBrand.displayName)", action: #selector(showAbout(_:)), keyEquivalent: "")
+        let aboutItem = menu.addItem(withTitle: "关于 \(AppBrand.shortName)", action: #selector(showAbout(_:)), keyEquivalent: "")
         aboutItem.target = self
 
         menu.addItem(.separator())
 
         // target 为 nil 走响应链，最终由 NSApplication 处理 terminate
-        menu.addItem(withTitle: "退出 \(AppBrand.displayName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(withTitle: "退出 \(AppBrand.shortName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         return menu
     }
 
@@ -269,7 +275,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func showAbout(_ sender: Any?) {
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.orderFrontStandardAboutPanel(nil)
+        if aboutWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "关于 \(AppBrand.shortName)"
+            window.isReleasedWhenClosed = false
+            window.contentViewController = NSHostingController(rootView: AboutPanelView())
+            aboutWindow = window
+        }
+        aboutWindow?.center()
+        aboutWindow?.makeKeyAndOrderFront(nil)
     }
 
     // MARK: - 开机自启动（与设置页共用 LoginItemState）
@@ -279,7 +298,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let message = loginItem.setEnabled(!loginItem.isOn) {
             let alert = NSAlert()
             alert.messageText = "开机自启动设置失败"
-            alert.informativeText = "\(message)\n若系统要求批准，请在「系统设置 → 通用 → 登录项」中允许\(AppBrand.displayName)。"
+            alert.informativeText = "\(message)\n若系统要求批准，请在「系统设置 → 通用 → 登录项」中允许\(AppBrand.localizedName)。"
             alert.alertStyle = .warning
             alert.runModal()
         }

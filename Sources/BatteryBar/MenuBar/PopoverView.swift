@@ -44,7 +44,7 @@ struct PopoverView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(AppBrand.displayName)
                     .font(.system(size: 12, weight: .bold, design: .rounded))
-                Text("电池与能耗监控")
+                Text(AppBrand.tagline)
                     .font(.system(size: 8))
                     .foregroundStyle(.tertiary)
             }

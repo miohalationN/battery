@@ -6,9 +6,9 @@ set -e
 # Info.plist 不再包含 SMPrivilegedExecutables / SMAuthorizedClients。
 
 APP_NAME="BatteryBar"
-PRODUCT_NAME="电池监测"
-APP_VERSION="1.4.0"
-APP_BUILD="5"
+PRODUCT_NAME="电池档案"
+APP_VERSION="1.5.0"
+APP_BUILD="6"
 HELPER_NAME="BatteryBarHelper"
 # 分发用 release 构建：debug 构建的 Swift 6 运行时在实测中空转约 40% CPU
 # （2026-08-22 排查，详见 MAINTENANCE_PLAN T-29），release 构建空闲为 0
