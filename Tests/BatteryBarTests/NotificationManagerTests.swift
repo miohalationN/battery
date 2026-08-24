@@ -45,10 +45,15 @@ import Testing
     private func makeManager(
         suite: String = "bb-notif-test-\(UUID().uuidString)",
         status: NotificationAuthorization = .notDetermined,
-        granted: Bool = true
+        granted: Bool = true,
+        reset: Bool = true
     ) -> (NotificationManager, StubAuthorizer) {
         let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
+        if reset {
+            // 只有创建全新持久化域时才清空；模拟 BA 重启重建管理器时
+            // 必须保留上一次写入的用户选择与冷却时间戳
+            defaults.removePersistentDomain(forName: suite)
+        }
         let authorizer = StubAuthorizer()
         authorizer.status = status
         authorizer.grantedResult = granted
@@ -152,8 +157,8 @@ import Testing
         await manager.start()
         manager.recordLowBatteryNotificationSent(at: now)
 
-        // 模拟 BA 重启：用同一持久化域重建管理器
-        let (rebuilt, _) = makeManager(suite: suite, status: .authorized)
+        // 模拟 BA 重启：用同一持久化域重建管理器（不重置域，保留冷却时间戳）
+        let (rebuilt, _) = makeManager(suite: suite, status: .authorized, reset: false)
         await rebuilt.start()
         #expect(rebuilt.lastLowBatteryNotificationAt != nil)
         #expect(NotificationPolicy.shouldSendLowBattery(
@@ -187,7 +192,7 @@ import Testing
 
         // 重启后系统授权仍为 authorized，但用户已显式关闭充满提醒：
         // 不得按旧行为重新推导为开启
-        let (rebuilt, _) = makeManager(suite: suite, status: .authorized)
+        let (rebuilt, _) = makeManager(suite: suite, status: .authorized, reset: false)
         await rebuilt.start()
         #expect(!rebuilt.fullChargeEnabled)
         #expect(rebuilt.lowBatteryEnabled)
