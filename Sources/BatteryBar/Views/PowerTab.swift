@@ -9,7 +9,7 @@ private struct PowerRangeStats {
     var coverage: TimeInterval = 0
 }
 
-/// 功耗页信息架构：当前负载 → 构成 → 历史趋势 → 数据来源 → 高级采样。
+/// 功耗页信息架构：当前负载 → 构成 → 历史趋势（能耗/温度）→ 数据来源 → 高级采样。
 ///
 /// 失效边界：页面根视图只持有历史状态（快照、时间范围、Helper 开关等低频字段），
 /// 每秒变化的系统负载/电池功率/组件读数全部收进独立小视图，历史 Chart 经
@@ -17,8 +17,15 @@ private struct PowerRangeStats {
 struct PowerTab: View {
     @Environment(PowerSampler.self) private var sampler
     @State private var snapshots: [BatterySnapshot] = []
-    @State private var chartSnapshots: [BatterySnapshot] = []
+    /// v5 聚合驱动的趋势点；覆盖率不达标的分钟留缺口
+    @State private var loadPoints: [TrendPoint] = []
+    @State private var temperaturePoints: [TrendPoint] = []
+    /// 无聚合可用的旧数据兜底曲线（瞬时 trustedSystemLoad）
+    @State private var legacyLoadSnapshots: [BatterySnapshot] = []
     @State private var rangeStats = PowerRangeStats()
+    /// 所选范围内可信且覆盖达标的能耗合计与总覆盖率
+    @State private var rangeEnergyWh: Double = 0
+    @State private var rangeOverallCoverage: Double = 0
     @State private var timeRange: TimeRange = .hour1
     // Helper 安装中状态
     @State private var isInstallingHelper = false
@@ -37,6 +44,7 @@ struct PowerTab: View {
                     PowerLoadHero(sampler: sampler)
                     ComponentBreakdownCard(sampler: sampler)
                     historyCard
+                    temperatureCard
                     PowerDiagnosticsSection(sampler: sampler)
                     dataSourceFootnote
                     AdvancedSamplingCard(sampler: sampler, isInstallingHelper: $isInstallingHelper)
@@ -65,19 +73,129 @@ struct PowerTab: View {
         rebuildRangeData(from: loaded)
     }
 
-    /// 只在快照真正变化或用户切换范围时做 O(n) 过滤/统计/降采样。
-    /// 系统负载统计与曲线只使用 `trustedSystemLoad` 非空的快照：
-    /// - 实测遥测（estimated=false）无论电源状态都保留；
-    /// - 估算负载只在明确离电（externalConnected == false）时保留；
-    /// - 来源未知（v1/v2 旧数据）的估算点——包括历史上"接电未充电被误标
-    ///   为可用离电负载"的污染点——保守排除，不再拉低平均/制造假谷底。
+    // MARK: - 范围数据重建
+
+    /// 只在快照真正变化或用户切换范围时做 O(n) 过滤/统计。
+    ///
+    /// 曲线优先使用 v5 分钟聚合：
+    /// - 系统负载用 systemPowerAverage，仅 coverage ≥ 0.8 的分钟成点，缺口断线；
+    /// - 温度用 temperatureAverage（时长加权均值），coverage ≥ 0.5 成点，
+    ///   tooltip 附最大值与覆盖率；
+    /// - 能耗只累加可信且覆盖达标的 systemEnergyWh，同时显示总覆盖率。
+    /// 无任何聚合点的旧范围回退瞬时 trustedSystemLoad 曲线（口径不变）。
     private func rebuildRangeData(from source: [BatterySnapshot]) {
         let cutoff = Date().addingTimeInterval(-timeRange.hours * 3600)
+        let inRange = source
+            .filter { $0.timestamp >= cutoff && $0.aggregateWindowStart != nil }
+            .sorted { $0.timestamp < $1.timestamp }
+
+        loadPoints = Self.trendPoints(
+            from: inRange,
+            value: { $0.systemPowerAverage },
+            coverageGate: { ($0.systemCoverage ?? 0) >= 0.8 },
+            maximum: { _ in nil },
+            coverage: { $0.systemCoverage }
+        )
+        temperaturePoints = Self.trendPoints(
+            from: inRange,
+            value: { $0.temperatureAverage },
+            coverageGate: { ($0.temperatureCoverage ?? 0) >= 0.5 },
+            maximum: { $0.temperatureMaximum },
+            coverage: { $0.temperatureCoverage }
+        )
+
+        // 能耗与总覆盖率：只累计覆盖达标分钟的能量
+        var energy = 0.0
+        var coveredMinutes = 0.0
+        for snap in inRange where snap.systemCoverage != nil {
+            coveredMinutes += snap.systemCoverage ?? 0
+            if let wh = snap.systemEnergyWh { energy += wh }     // v5 已按 0.8 门控写入
+        }
+        rangeEnergyWh = energy
+        rangeOverallCoverage = inRange.isEmpty ? 0 : min(1, coveredMinutes / Double(inRange.count))
+
+        rebuildLegacyStats(from: source, cutoff: cutoff)
+        rebuildAggregateStats(from: inRange)
+    }
+
+    /// 由 v5 快照序列构建趋势点：缺口（>90s 或覆盖率门控失败）标记 breakBefore
+    private static func trendPoints(
+        from snaps: [BatterySnapshot],
+        value: (BatterySnapshot) -> Double?,
+        coverageGate: (BatterySnapshot) -> Bool,
+        maximum: (BatterySnapshot) -> Double?,
+        coverage: (BatterySnapshot) -> Double?
+    ) -> [TrendPoint] {
+        var points: [TrendPoint] = []
+        var previousTime: Date?
+        for snap in snaps {
+            guard let v = value(snap), coverageGate(snap) else { continue }
+            let time = snap.aggregateWindowStart ?? snap.timestamp
+            let isGap = previousTime.map { time.timeIntervalSince($0) > 90 } ?? false
+            points.append(TrendPoint(
+                time: time,
+                value: v,
+                maximum: maximum(snap),
+                coverage: coverage(snap),
+                breakBefore: isGap
+            ))
+            previousTime = time
+        }
+        // 与旧瞬时曲线相同的 marks 预算上限（240 点），防止长范围图表退化
+        return points.count > 240 ? Array(points.suffix(240)) : points
+    }
+
+    /// 聚合可用时的范围统计：平均 = Σ能量 ÷ Σ有效时长；峰值 = max(systemPowerPeak)
+    private func rebuildAggregateStats(from inRange: [BatterySnapshot]) {
+        let usable = inRange.filter { ($0.systemCoverage ?? 0) >= 0.8 && $0.systemPowerAverage != nil }
+        guard !usable.isEmpty else { return }
+
+        let totalEnergy = usable.reduce(0) { $0 + ($1.systemEnergyWh ?? 0) }
+        let effectiveHours = usable.reduce(0) { $0 + (($1.systemCoverage ?? 0) * 60 / 3600) }
+        guard effectiveHours > 0 else { return }
+        let average = totalEnergy / effectiveHours
+        let peak = usable.compactMap(\.systemPowerPeak).max() ?? 0
+        let low = usable.compactMap(\.systemPowerAverage).min() ?? 0
+
+        rangeStats = PowerRangeStats(
+            average: average,
+            peak: max(peak, average),
+            low: low,
+            sampleCount: usable.count,
+            coverage: TimeInterval(usable.count * 60)
+        )
+    }
+
+    /// 旧瞬时快照转趋势点：相邻间隔 >90s 视为缺口断线，口径与聚合曲线一致
+    private static func legacyPoints(_ snaps: [BatterySnapshot]) -> [TrendPoint] {
+        var points: [TrendPoint] = []
+        var previousTime: Date?
+        for snap in snaps {
+            let isGap = previousTime.map { snap.timestamp.timeIntervalSince($0) > 90 } ?? false
+            points.append(TrendPoint(time: snap.timestamp, value: snap.wattage, breakBefore: isGap))
+            previousTime = snap.timestamp
+        }
+        return points
+    }
+
+    /// 旧数据兜底：无任何聚合点的范围沿用瞬时 trustedSystemLoad 统计与曲线
+    private func rebuildLegacyStats(from source: [BatterySnapshot], cutoff: Date) {
+        let hasAggregates = source.contains { $0.timestamp >= cutoff && $0.aggregateWindowStart != nil }
+        if hasAggregates {
+            legacyLoadSnapshots = []
+            // 有聚合但覆盖全不达标：统计归零，不得沿用旧口径数字冒充
+            if !source.contains(where: {
+                $0.timestamp >= cutoff && ($0.systemCoverage ?? 0) >= 0.8 && $0.systemPowerAverage != nil
+            }) {
+                rangeStats = PowerRangeStats()
+            }
+            return
+        }
         let filtered = source
             .filter { $0.timestamp >= cutoff }
             .filter { $0.trustedSystemLoad != nil }
             .sorted { $0.timestamp < $1.timestamp }
-        chartSnapshots = ChartDownsampler.powerSnapshots(filtered, maxPoints: 240)
+        legacyLoadSnapshots = ChartDownsampler.powerSnapshots(filtered, maxPoints: 240)
 
         var count = 0
         var sum = 0.0
@@ -115,14 +233,14 @@ struct PowerTab: View {
             HStack(spacing: BBDesign.itemSpacing) {
                 StatTile(icon: "chart.bar.fill", tint: .bbBlue, value: String(format: "%.1f", rangeStats.average), unit: "W", label: "平均负载")
                 StatTile(icon: "arrow.up.circle.fill", tint: .red, value: String(format: "%.1f", rangeStats.peak), unit: "W", label: "峰值")
-                StatTile(icon: "arrow.down.circle.fill", tint: .green, value: String(format: "%.1f", rangeStats.low), unit: "W", label: "最低")
+                StatTile(icon: "bolt.slash.fill", tint: .bbMint, value: String(format: "%.2f", rangeEnergyWh), unit: "Wh", label: "能耗")
             }
 
             HStack(spacing: 13) {
                 ChartLegendItem(
                     label: "系统负载",
                     color: .bbAmber,
-                    value: chartSnapshots.last.map { String(format: "%.1fW", $0.wattage) }
+                    value: currentLoadText
                 )
                 Spacer()
                 Text(coverageText)
@@ -130,21 +248,64 @@ struct PowerTab: View {
                     .foregroundStyle(.secondary)
             }
 
-            if chartSnapshots.isEmpty {
+            if loadPoints.isEmpty && legacyLoadSnapshots.isEmpty {
                 EmptyChartState(
                     title: "正在建立系统负载趋势",
                     detail: "有可用负载数据后这里会持续更新",
                     systemImage: "bolt.slash"
                 )
-            } else {
-                PowerChartPlot(snapshots: chartSnapshots, timeRange: timeRange)
+            } else if !loadPoints.isEmpty {
+                TrendChartPlot(points: loadPoints, timeRange: timeRange, unit: "W", tintColor: .bbAmber)
                     .equatable()
+            } else {
+                TrendChartPlot(
+                    points: Self.legacyPoints(legacyLoadSnapshots),
+                    timeRange: timeRange,
+                    unit: "W",
+                    tintColor: .bbAmber
+                )
+                .equatable()
             }
         }
         .glassCard(accent: .bbAmber)
     }
 
+    private var currentLoadText: String? {
+        if let last = loadPoints.last {
+            return String(format: "%.1fW", last.value)
+        }
+        return legacyLoadSnapshots.last.map { String(format: "%.1fW", $0.wattage) }
+    }
+
+    /// 温度趋势：v5 时长加权平均，tooltip 显示窗口最大值与覆盖率
+    private var temperatureCard: some View {
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "电池温度趋势", systemImage: "thermometer.medium", tint: .orange)
+            if temperaturePoints.isEmpty {
+                EmptyChartState(
+                    title: "正在建立温度趋势",
+                    detail: "需要几分钟的分钟级聚合数据（覆盖率 ≥50% 才连线）",
+                    systemImage: "thermometer"
+                )
+            } else {
+                TrendChartPlot(
+                    points: temperaturePoints,
+                    timeRange: timeRange,
+                    unit: "°C",
+                    tintColor: .orange,
+                    isTemperature: true
+                )
+                .equatable()
+            }
+        }
+        .glassCard(accent: .orange)
+    }
+
     private var coverageText: String {
+        if !loadPoints.isEmpty || rangeEnergyWh > 0 {
+            let percent = Int((rangeOverallCoverage * 100).rounded())
+            return "总覆盖率 \(percent)% · 能耗仅累计覆盖达标分钟"
+        }
         guard rangeStats.sampleCount > 1 else {
             return rangeStats.sampleCount == 1 ? "1 个有效点 · 正在采集" : "尚无有效点"
         }
@@ -431,7 +592,8 @@ private struct PowerDiagnosticsSection: View {
         guard metric.readAt != .distantPast else { return "" }
         let stableSeconds = Int(metric.stableFor(asOf: Date()))
         let stable = stableSeconds < 60 ? "\(stableSeconds)s" : "\(stableSeconds / 60)m"
-        return "读取于 \(metric.readAt, format: .dateTime.hour().minute().second()) · 持续 \(stable)"
+        let readTime = metric.readAt.formatted(.dateTime.hour().minute().second())
+        return "读取于 \(readTime) · 持续 \(stable)"
     }
 
     private var adapterWattsText: String {

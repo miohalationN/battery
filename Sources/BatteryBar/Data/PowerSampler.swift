@@ -81,11 +81,22 @@ final class PowerSampler {
 
     private(set) var helperNeedsUpdate: Bool = false
 
-    // 放电/充电速率缓存：每 30 个 UI tick 重算一次，避免 View body 每 tick 全量扫描 DataStore
-    private(set) var cachedDrainRate: Double = 0
-    private(set) var cachedChargeRate: Double = 0
-    private var lastRateCalculationAt = Date.distantPast
-    private let rateCacheInterval: TimeInterval = 30
+    // MARK: 续航/充电估算（RuntimeEstimator 结果；nil = 数据不足，正在校准）
+    /// 离电续航 App 估算。置信度低于门槛时保持 nil。
+    private(set) var dischargeEstimate: EstimationResult?
+    /// 充电剩余时间 App 估算（按当前充电速度）。
+    private(set) var chargeEstimate: EstimationResult?
+    /// IOPowerSources 的系统剩余时间（独立证据，永不与 App 证据静默混算）
+    private(set) var systemReportedEstimate: EstimationResult?
+
+    /// 最近完成的分钟聚合环形缓冲（估算器输入，硬上限）
+    private var recentAggregates: [MinuteAggregate] = []
+    private static let recentAggregatesLimit = 120
+    /// 上一轮读取的 IOPS 系统剩余时间（分钟）
+    private var lastSystemReportedMinutes: Int = -1
+    /// 估算重算节流：除分钟快照/电源切换外最多每 30 秒一次
+    private var lastEstimateRecalcAt = Date.distantPast
+    private static let estimateRecalcInterval: TimeInterval = 30
 
     /// Helper 服务开关（默认关闭，用户在 PowerTab 手动开启）
     /// 开启后才会安装 helper 并读取 CPU/GPU 分项功耗
@@ -468,13 +479,6 @@ final class PowerSampler {
         // 失败合成为 0%/离电并污染插拔状态机。
         guard let reading = reader.readBatteryReading() else { return }
         applyBaseReading(reading)
-
-        // 速率缓存按墙上时间更新，避免前后台间隔变化把计算周期成倍拉长。
-        let now = Date()
-        if now.timeIntervalSince(lastRateCalculationAt) >= rateCacheInterval {
-            lastRateCalculationAt = now
-            recalcRates(isPluggedIn: reading.powerSource.isPluggedIn)
-        }
     }
 
     /// 应用一轮成功的基础读取：发布可观察状态、更新质量样本、喂入聚合器。
@@ -485,6 +489,7 @@ final class PowerSampler {
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
         let previousLevel = currentLevel
         let previousCharging = currentIsCharging
+        let previousExternalConnected = currentExternalConnected
 
         // 插拔检测（立即响应，不等 sampleStorage 的每分钟检查）
         if wasExternalConnected && !isPluggedIn {
@@ -548,6 +553,9 @@ final class PowerSampler {
         updateQualityMetrics(reading)
         feedAggregator(reading)
 
+        // IOPS 系统剩余时间作为独立证据保留（不透明值，不与 App 证据混算）
+        lastSystemReportedMinutes = ps.timeRemaining
+
         // 状态栏只关心电量与充电态；相同数据不再每个轮询 tick 发通知。
         let statusChanged = previousLevel != currentLevel || previousCharging != currentIsCharging
         if statusChanged {
@@ -556,6 +564,14 @@ final class PowerSampler {
             if previousCharging && !currentIsCharging && currentLevel >= 100 {
                 NotificationManager.shared.checkFullCharge(level: currentLevel, wasCharging: true)
             }
+        }
+
+        // 电源状态切换（插拔/充放转换）是估算的合法重算触发
+        if isPluggedIn != previousExternalConnected || previousCharging != currentIsCharging {
+            recalculateEstimates()
+        } else if Date().timeIntervalSince(lastEstimateRecalcAt) >= Self.estimateRecalcInterval {
+            // 兜底重算节奏：最多每 30 秒一次，绝不扫描全量历史
+            recalculateEstimates()
         }
     }
 
@@ -616,21 +632,24 @@ final class PowerSampler {
         ))
     }
 
-    private func recalcRates(isPluggedIn: Bool) {
-        let snapshots = DataStore.shared.recentSnapshots(1440)
-        // 放电速率只在明确离电时有意义：接电（含满电保持/优化充电暂停）
-        // 返回 0，UI 不显示续航预估；历史过滤同样只认 externalConnected == false。
-        cachedDrainRate = DrainRateCalculator.drainRate(
-            level: currentLevel,
-            isOnBattery: !isPluggedIn,
-            batteryPower: currentBatteryPower,
-            voltage: currentVoltage,
-            maxCapacity: currentInfo?.maxCapacity ?? 0,
-            healthPercent: systemHealthPercent,
-            dischargeStart: dischargeStartTime,
-            snapshots: snapshots
-        )
-        cachedChargeRate = Self.smoothRate(old: cachedChargeRate, measured: DrainRateCalculator.chargeRate(snapshots: snapshots))
+    /// 估算器重算：输入有界（最近 120 快照 + 最近 120 分钟聚合），
+    /// 只在新分钟快照、电源状态切换或最多每 30 秒触发。
+    private func recalculateEstimates() {
+        lastEstimateRecalcAt = Date()
+        var input = RuntimeEstimator.Inputs()
+        input.now = Date()
+        input.currentLevel = currentLevel
+        input.isCharging = currentIsCharging
+        input.externalConnected = currentInfo?.externalConnected ?? currentExternalConnected
+        input.snapshots = DataStore.shared.recentSnapshots(120)
+        input.minuteAggregates = recentAggregates
+        input.fullChargeCapacityMah = currentInfo?.maxCapacity ?? 0
+        input.voltageMV = currentVoltage
+        input.systemReportedMinutes = lastSystemReportedMinutes
+
+        dischargeEstimate = RuntimeEstimator.dischargeEstimate(input)
+        chargeEstimate = RuntimeEstimator.chargeEstimate(input)
+        systemReportedEstimate = RuntimeEstimator.systemReportedEstimate(input)
     }
 
     @objc private func fireStorage() {
@@ -653,12 +672,8 @@ final class PowerSampler {
             || info.adapterProtocol != currentInfo.adapterProtocol
     }
 
-    /// 速率 EMA 平滑：旧值 0.6 + 新测量 0.4；测量为 0（样本不足）时保持旧值，避免预估时间瞬间变「计算中」或跳变
-    private static func smoothRate(old: Double, measured: Double) -> Double {
-        guard measured > 0 else { return old }
-        guard old > 0 else { return measured }
-        return old * 0.6 + measured * 0.4
-    }
+    /// 速率 EMA 平滑已随旧 DrainRateCalculator 路径移除：
+    /// 估算证据不足时必须显示「正在校准」，不得用平滑值填补。
 
     private func sampleStorage() {
         // 采集失败时跳过这一分钟；伪造 0% 快照比一个明确的数据缺口更有害。
@@ -699,8 +714,16 @@ final class PowerSampler {
                 brightnessAvailable: brightReadable,
                 brightnessReadAt: brightReadable ? brightness.readAt : nil
             )
+            // 估算器输入环形缓冲：只保留最近 N 个完成窗口，硬上限防膨胀
+            recentAggregates.append(aggregate)
+            if recentAggregates.count > Self.recentAggregatesLimit {
+                recentAggregates.removeFirst(recentAggregates.count - Self.recentAggregatesLimit)
+            }
         }
         DataStore.shared.saveSnapshot(snapshot)
+
+        // 新分钟快照是估算的合法重算触发
+        recalculateEstimates()
 
         // 只在离电时累加使用时间
         // awake 计入屏幕亮起；睡眠期间 Timer 不触发，实际睡眠时长由 onWake 补足

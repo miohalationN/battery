@@ -173,7 +173,7 @@ private struct StatusHero: View {
         }
     }
 
-    // 正在充电
+    // 正在充电：时间标注「按当前充电速度」；证据不足（暂停/满电保持/无正增长）不显示
     private var chargingHero: some View {
         HStack(spacing: 16) {
             ZStack {
@@ -182,11 +182,14 @@ private struct StatusHero: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text("充电中").font(.system(size: 20, weight: .bold)).foregroundStyle(.green)
-                if remainingToFull > 0 {
-                    Text("预计 \(hoursText(remainingToFull)) 后充满")
+                if let estimate = sampler.chargeEstimate {
+                    Text("预计 \(hoursText(estimate.valueHours * 3600)) 后充满")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("按当前充电速度 · 置信度\(estimate.band.displayName)")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
                 } else {
-                    Text("计算中…")
+                    Text("暂无法估算充满时间")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 if sampler.currentLevel >= 80 {
@@ -216,7 +219,8 @@ private struct StatusHero: View {
         }
     }
 
-    // 明确离电：才显示续航预估
+    // 明确离电：才显示续航预估。结果必须标注来源（系统估算/历史趋势/功率估算/融合）
+    // 与置信度；App 证据不足时回退系统估算并标来源，两者皆无则明确“正在校准”。
     private var dischargingHero: some View {
         HStack(spacing: 16) {
             ZStack {
@@ -227,15 +231,25 @@ private struct StatusHero: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text("预估续航").font(.system(size: 11)).foregroundStyle(.secondary)
-                if sampler.cachedDrainRate > 0 {
-                    // 考虑5%放电截止保护：实际可用电量为 level - 5
-                    let remaining = max(0, sampler.currentLevel - 5) / sampler.cachedDrainRate
-                    Text("\(hoursText(remaining))")
+                if let estimate = sampler.dischargeEstimate {
+                    Text(hoursText(estimate.valueHours * 3600))
                         .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
+                    Text("\(estimate.basisDisplayName) · 置信度\(estimate.band.displayName)")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                } else if let system = sampler.systemReportedEstimate {
+                    Text(hoursText(system.valueHours * 3600))
+                        .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Text("系统估算 · App 证据收集中")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.orange)
                 } else {
-                    Text("计算中…")
+                    Text("正在校准")
                         .font(.system(size: 22, weight: .bold, design: .rounded))
                         .foregroundStyle(.secondary)
+                    Text("数据不足：需要离电使用几分钟后重试")
+                        .font(.system(size: 9)).foregroundStyle(.tertiary)
                 }
             }
             Spacer()
@@ -249,12 +263,6 @@ private struct StatusHero: View {
                 .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
             Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
         }
-    }
-
-    private var remainingToFull: TimeInterval {
-        let rate = sampler.cachedChargeRate
-        guard rate > 0 else { return 0 }
-        return (100 - sampler.currentLevel) / rate * 3600
     }
 
     private func hoursText(_ seconds: TimeInterval) -> String {

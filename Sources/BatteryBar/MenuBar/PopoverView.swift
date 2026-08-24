@@ -369,21 +369,26 @@ struct PopoverView: View {
     }
 
     private var chargeHeadline: String {
-        let rate = sampler.cachedChargeRate
-        guard rate > 0 else { return "充电中" }
-        let timeToFull = (100 - sampler.currentLevel) / rate
-        let h = Int(timeToFull); let m = Int((timeToFull - Double(h)) * 60)
+        // 充电时间按当前充电速度估算；证据不足（暂停/满电保持）不显示数字
+        guard let estimate = sampler.chargeEstimate else { return "充电中" }
+        let hours = estimate.valueHours
+        let h = Int(hours); let m = Int((hours - Double(h)) * 60)
         return "预计 \(h)h \(m)m 后充满"
     }
 
     private var drainHeadline: String {
-        let rate = sampler.cachedDrainRate
-        guard rate > 0 else { return "放电中" }
-        // 考虑 5% 放电截止保护
-        let usableLevel = max(0, sampler.currentLevel - 5)
-        let remaining = usableLevel / rate
-        let h = Int(remaining); let m = Int((remaining - Double(h)) * 60)
-        return "剩余约 \(h)h \(m)m"
+        // 续航必须带来源与置信度；证据不足显示校准态，系统剩余时间作为标注回退
+        if let estimate = sampler.dischargeEstimate {
+            let hours = estimate.valueHours
+            let h = Int(hours); let m = Int((hours - Double(h)) * 60)
+            return "\(estimate.basisDisplayName)·置信度\(estimate.band.displayName) · 剩余约 \(h)h \(m)m"
+        }
+        if let system = sampler.systemReportedEstimate {
+            let hours = system.valueHours
+            let h = Int(hours); let m = Int((hours - Double(h)) * 60)
+            return "系统估算剩余约 \(h)h \(m)m"
+        }
+        return "放电中 · 正在校准"
     }
 
     private var drainColor: Color {

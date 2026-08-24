@@ -83,7 +83,7 @@ struct CycleTab: View {
                 ChartLegendItem(label: "折算满电续航", color: .bbBlue, value: avgFullChargeHours.map { "平均 \(fmtHours($0 * 3600))" })
             }
             HStack {
-                Text("仅含下降 ≥5% 且持续 ≥15 分钟的记录；折算满电续航 = 时长 ÷ 下降幅度 × 100，不同电量降幅可比较")
+                Text("仅含下降 ≥5% 且持续 ≥15 分钟的记录；折算满电续航按该离电时段速率折算（时长 ÷ 下降幅度 × 100），不是整机保证续航")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                 Spacer()
