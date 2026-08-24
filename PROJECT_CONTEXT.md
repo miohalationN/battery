@@ -203,7 +203,9 @@ shouldAcceptNewConnection → pid → SecCode 校验（签名有效 + bundle id 
 ```
 
 - **默认关闭**：用户在 PowerTab 手动开启 Toggle 后才安装
-- 安装：`osascript ... with administrator privileges` 拷贝 + bootstrap；关闭开关时调用 `uninstallHelper()`（bootout + 删除二进制与 plist，弹一次管理员密码框）真正卸载
+- 安装：`osascript ... with administrator privileges` 拷贝 + bootstrap；「高级采样」开关关闭
+  **绝不卸载**（只停止分项采样并清空读数）；只有「采样诊断 → 移除辅助服务…」显式二次确认
+  后才调用 `uninstallHelper()`（bootout + 删除二进制与 plist，弹一次管理员密码框）
 - 版本升级：`requiredHelperVersion` 不匹配时自动重装（会弹密码框）。4.1 = 流式 powermetrics + 未授权连接直接拒绝
 - **流式模式**：v3 的「每次调用 spawn powermetrics + 5s 超时保护 + replyOnce」已移除，XPC 调用直接回缓存，无阻塞无超时问题；mW/uW/W 三单位解析保留
 - **采样器版本兼容**：macOS 27 起移除 `dram` 采样器（`--samplers` 带无效名会整体失败，分项功耗全 0——这是 v3 在 macOS 27 上的隐性回归，4.0 修复）；helper 按 `ProcessInfo.operatingSystemVersion` 门控，<27 才附带 dram，DRAM 功耗在 27 上为 0（UI 已按 0 隐藏）
@@ -239,12 +241,18 @@ SyncEngine.sync(config:)
 - 本地优先，`dirty` 标记；`ChargeCycle.init(from:)` 自定义解码让远程 dirty 默认 false
 - Keychain 用 `kSecAttrAccessibleAfterFirstUnlock`，锁屏时仍可访问（适合后台同步）
 
-### 4.7 通知（`NotificationManager`）
+### 4.7 通知（`NotificationManager` + `NotificationPolicy` 纯策略）
 
-- 低电量 ≤20%，30 分钟冷却，**充电时不触发**（`checkLowBattery(level:isCharging:)`）
-- 充满 ≥100% 且 `previousCharging && !currentIsCharging`，60 分钟冷却
-- `lastLowBatteryNotification` / `lastFullChargeNotification` 用 NSLock 保护（completion handler 在后台队列）
-- 启动即请求权限
+- 低电量提醒门槛（纯策略 `NotificationPolicy.shouldSendLowBattery`）：外接电源必须明确
+  == false（true/nil 禁止）、当前未充电、开关开启、权限有效、电量 ≤20%、30 分钟冷却
+- 充满提醒门槛（`shouldSendFullCharge`）：外接电源 == true、前一状态明确充电、当前停止
+  充电、电量 ≥100%、开关开启、权限有效、60 分钟冷却
+- 冷却时间戳持久化到 UserDefaults（`BatteryBarLastLowBatteryNotifAt` /
+  `BatteryBarLastFullChargeNotifAt`），BA 重启后仍遵守冷却窗口
+- 启动/创建管理器/读取电量都不请求权限；只有用户在设置页主动开启某个提醒开关且授权
+  为 notDetermined 时才请求；denied 时开关恢复真实关闭并给出系统设置入口
+- 首次初始化按授权状态推导：authorized/provisional 视为旧用户两开关默认开启、
+  notDetermined/denied 默认关闭；写入版本化 initialized 标记后不覆盖用户选择
 
 ---
 
