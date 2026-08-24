@@ -375,9 +375,11 @@ gate 为真实校验（红色必然代表必需取证不可读）。Build workfl
 - 新 launchd job 只有 MachServices，不含 RunAtLoad/KeepAlive；powermetrics 空闲 60 秒停止，
   Helper 自身空闲 120 秒退出并由下次 XPC 按需拉起。关闭高级采样时仅比较系统/内嵌 Helper
   的签名 CDHash 来显示过期提示，不连接 XPC、不启动服务。
-- 当前系统仍保留旧 4.2 Helper 与旧 KeepAlive job（PID 824，CPU 0.0%），本轮没有管理员授权，
-  因而未擅自替换或卸载；高级采样开关保持 false、零 powermetrics。用户在功耗页再次主动
-  开启并完成一次管理员授权后，才会安全替换为 5.0。这是当前唯一需用户参与的安全收尾。
+- 初次安装 App 时未主动弹管理员授权；随后用户在功耗页主动开启高级采样并完成授权，系统
+  Helper 已从 4.2 安全替换为 5.0。系统 Helper CDHash 与 bundle 内版本一致，launchd 环境
+  绑定的客户端 CDHash `ed4541c6a4b53ef130d61959f02db27f8e3086a5` 与当前主程序一致，
+  plist 已确认无 RunAtLoad/KeepAlive。开启状态下 Helper/powermetrics CPU 均为 0.0%，关闭
+  开关后将按 60s/120s 空闲策略停止。
 
 ### 14.4 Gate、安装与外部状态
 
@@ -392,7 +394,9 @@ gate 为真实校验（红色必然代表必需取证不可读）。Build workfl
   均与 artifact 一致且严格验签。原 1.3.0 位于
   `/Users/mio/.Trash/BatteryBar-pre-1.4.0-d6793c.app`；安装前数据备份位于
   `/Users/mio/Library/Application Support/BatteryBar-backup-pre-1.4.0-20260824`。
-- 新快照实机写入 temperature 33.09°C、system load 13.715W、battery power 1.712W、
-  externalConnected=true、lowPowerMode=false、thermal=正常；一分钟窗口 journal inode
-  `21822045` 不变且行数 1185→1186，保持纯追加。未启用 WebDAV、未发真实同步请求、未修改
-  历史内容；除 GitHub Actions、App 替换与上述可恢复备份外未触碰外部/生产系统。
+- 新快照实机写入 temperature 34.19°C、system load 9.531W、battery power 0W、
+  externalConnected=true、lowPowerMode=false、thermal=正常；用户开启高级采样后的同点另含
+  CPU 1.225W、GPU 0.593W。一分钟窗口 journal inode `21822045` 不变且行数 1185→1186，
+  保持纯追加。Helper 开启后的 10 秒 sample 主线程仍有 8319/8354（99.58%）处于事件等待，
+  App/Helper/powermetrics CPU 均为 0.0%。未启用 WebDAV、未发真实同步请求、未修改历史内容；
+  除用户明确完成的 Helper 授权、GitHub Actions、App 替换与可恢复备份外未触碰外部系统。
