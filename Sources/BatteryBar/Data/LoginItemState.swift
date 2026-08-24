@@ -79,6 +79,11 @@ final class LoginItemState {
         status = controller.currentStatus()
     }
 
+    /// 打开系统设置的登录项面板（requiresApproval 时引导用户允许）
+    func openApprovalSettings() {
+        controller.openApprovalSettings()
+    }
+
     /// 开关动作封装。register/unregister 失败时刷新为真实系统状态并返回
     /// 可理解的错误文案；成功返回 nil。
     @discardableResult
