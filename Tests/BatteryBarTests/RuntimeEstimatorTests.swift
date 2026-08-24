@@ -212,11 +212,12 @@ import Testing
         input.snapshots = (0...60).map { minute in
             snapshot(TimeInterval(minute * 60), 80 - Double(minute) * (5.0 / 60.0))
         }
-        // 功率路径 50%/h（>2×5），confidence 0.66
+        // 功率路径 50%/h（>2×5），confidence 0.66；15 个窗口必须全部落在
+        // 最近 15 分钟内，否则功率证据因有效时长不足而缺席
         var longAggregates: [MinuteAggregate] = []
         for minute in 0..<15 {
             longAggregates.append(MinuteAggregate(
-                windowStart: t0.addingTimeInterval(TimeInterval(2100 + minute * 60)),
+                windowStart: t0.addingTimeInterval(TimeInterval(2760 + minute * 60)),
                 systemEnergyWh: 0.5,
                 systemPowerAverage: 30,
                 systemPowerPeak: 32,
