@@ -157,6 +157,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         loginItem.refresh()
 
         // 通知设置初始化：只查询授权状态、绝不请求权限（策略见 NotificationManager）
+        NotificationManager.shared.attachSystemPresentationDelegate()
         Task { @MainActor in
             await NotificationManager.shared.start()
         }

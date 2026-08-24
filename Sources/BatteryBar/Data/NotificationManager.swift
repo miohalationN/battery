@@ -52,6 +52,19 @@ struct SystemNotificationAuthorizer: NotificationAuthorizing {
     }
 }
 
+/// 通知投递展示策略（独立 NSObject 承担 UNUserNotificationCenterDelegate）。
+/// 与 @Observable 模型分离：NotificationManager 保持纯 Swift 类，
+/// 避免 NSObject runtime 与 Observation registrar 相互干扰。
+private final class SystemNotificationCenterDelegate: NSObject, UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+}
+
 /// 通知管理器。
 ///
 /// 权限与触发策略冻结语义：
@@ -64,7 +77,7 @@ struct SystemNotificationAuthorizer: NotificationAuthorizing {
 ///   冷却时间戳持久化到 UserDefaults，BA 重启后依然有效。
 @MainActor
 @Observable
-final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+final class NotificationManager {
     static let shared = NotificationManager()
 
     private enum Key {
@@ -81,6 +94,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     private let authorizer: any NotificationAuthorizing
     private let defaults: UserDefaults
+    /// 独立的通知展示 delegate；本身不持有可变状态
+    private let presentationDelegate = SystemNotificationCenterDelegate()
 
     private(set) var authorizationState: NotificationAuthorization = .notDetermined
 
@@ -114,14 +129,22 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     ) {
         self.authorizer = authorizer
         self.defaults = defaults
-        super.init()
-        UNUserNotificationCenter.current().delegate = self
+        // 注意：这里绝不动 UNUserNotificationCenter——测试进程没有 app bundle，
+        // 调用 UNUserNotificationCenter.current() 会触发 NSInternalInconsistencyException。
+        // 系统 delegate 由生产入口显式调用 attachSystemPresentationDelegate() 附加。
 
         // 已初始化的用户：读取持久化的用户选择，绝不主动请求权限
         if defaults.object(forKey: Key.initialized) != nil {
             lowBatteryEnabled = defaults.bool(forKey: Key.lowBattery)
             fullChargeEnabled = defaults.bool(forKey: Key.fullCharge)
         }
+    }
+
+    /// 生产环境专用：把通知展示策略附加到系统通知中心。
+    /// 只能在拥有合法 app bundle 的进程中调用（AppDelegate 启动入口）；
+    /// 测试环境调用会崩溃，因此测试绝不触碰本方法。
+    func attachSystemPresentationDelegate() {
+        UNUserNotificationCenter.current().delegate = presentationDelegate
     }
 
     /// 启动时调用：只查询授权状态，绝不请求权限。
@@ -257,15 +280,5 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     /// 记录并持久化充满冷却时间。
     func recordFullChargeNotificationSent(at date: Date) {
         defaults.set(date, forKey: Key.lastFullCharge)
-    }
-
-    // MARK: - UNUserNotificationCenterDelegate
-
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification,
-        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
-    ) {
-        completionHandler([.banner, .sound])
     }
 }
