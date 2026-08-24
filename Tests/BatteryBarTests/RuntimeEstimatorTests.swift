@@ -237,14 +237,26 @@ import Testing
         }
         input.minuteAggregates = longAggregates
 
+        // 自诊断：先确认两路内部证据都在（若缺席，消息携带现场数据）
+        let power = try #require(
+            RuntimeEstimator.batteryPowerEvidence(input),
+            "power evidence missing: aggregates=\(input.minuteAggregates.count) windows=\(input.minuteAggregates.map { $0.windowStart.timeIntervalSince1970 })"
+        )
+        #expect(power.confidence >= 0.6)
+        #expect(RuntimeEstimator.historicalSlopeEvidence(input) != nil)
+
         let fused = try #require(RuntimeEstimator.dischargeEstimate(input))
         #expect(fused.basis == .fused)
         // (1 + 0.66)/2 × 0.6 ≈ 0.498 ≥ 0.40 → 可展示但降置信
         #expect(fused.confidence >= RuntimeEstimator.minimumDisplayConfidence)
         #expect(fused.failureReason?.contains("差异") == true)
         // 矛盾扩大区间
-        let spread = (fused.upperHours! - fused.lowerHours!) / fused.valueHours
-        #expect(spread > 0.5)
+        if let lower = fused.lowerHours, let upper = fused.upperHours {
+            let spread = (upper - lower) / fused.valueHours
+            #expect(spread > 0.5)
+        } else {
+            Issue.record("fused result missing interval bounds")
+        }
     }
 
     /// 一致证据的融合置信度高于矛盾场景
