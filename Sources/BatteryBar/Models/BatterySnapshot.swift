@@ -15,6 +15,11 @@ import Foundation
 /// - v3：+ `externalConnected`。**字段存在与否即可靠区分新旧格式**；
 ///   nil 表示旧数据来源未知，不得推断。
 /// - v4：+ `lowPowerModeEnabled` / `thermalState`；均为可选解释字段，不改变旧点可信度。
+/// - v5：+ 分钟聚合与亮度观测，全部可选、`encodeIfPresent`：
+///   自然分钟窗口的能量/平均/峰值/覆盖率、充放分开的电池能量、
+///   时长加权温度均值与最大值、离散状态份额、窗口最高热压力，
+///   以及显示器原始亮度（不再制造显示器瓦数）。
+///   旧端缺键保持 nil，不推导伪数据。
 struct BatterySnapshot: Codable, Identifiable, Equatable {
     var id: UUID
     var timestamp: Date
@@ -35,6 +40,27 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
     /// 公开 Foundation 状态，用来解释同负载下的性能/功耗变化；nil 表示旧 schema 未记录。
     var lowPowerModeEnabled: Bool?
     var thermalState: String?
+    // MARK: v5 分钟聚合（全部可选；nil = 无达标聚合或旧格式数据）
+    /// 聚合所属自然分钟窗口起点
+    var aggregateWindowStart: Date?
+    var systemEnergyWh: Double?
+    var systemPowerAverage: Double?
+    var systemPowerPeak: Double?
+    var systemCoverage: Double?
+    var batteryChargeWh: Double?
+    var batteryDischargeWh: Double?
+    /// 按有效时长加权的温度均值（非样本算术平均）
+    var temperatureAverage: Double?
+    var temperatureMaximum: Double?
+    var temperatureCoverage: Double?
+    var screenOnFraction: Double?
+    var lowPowerModeFraction: Double?
+    /// 窗口内观察到的最高热压力等级标签
+    var maximumThermalState: String?
+    /// 显示器原始亮度 0...1；nil = 不可读取或旧格式
+    var displayBrightness: Double?
+    var brightnessAvailable: Bool?
+    var brightnessReadAt: Date?
     var dirty: Bool            // 待同步
 
     init(timestamp: Date, level: Double, isCharging: Bool, wattage: Double, temperature: Double, screenOn: Bool,
@@ -80,6 +106,22 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         dramPower = try c.decodeIfPresent(Double.self, forKey: .dramPower) ?? 0
         lowPowerModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .lowPowerModeEnabled)
         thermalState = try c.decodeIfPresent(String.self, forKey: .thermalState)
+        aggregateWindowStart = try c.decodeIfPresent(Date.self, forKey: .aggregateWindowStart)
+        systemEnergyWh = try c.decodeIfPresent(Double.self, forKey: .systemEnergyWh)
+        systemPowerAverage = try c.decodeIfPresent(Double.self, forKey: .systemPowerAverage)
+        systemPowerPeak = try c.decodeIfPresent(Double.self, forKey: .systemPowerPeak)
+        systemCoverage = try c.decodeIfPresent(Double.self, forKey: .systemCoverage)
+        batteryChargeWh = try c.decodeIfPresent(Double.self, forKey: .batteryChargeWh)
+        batteryDischargeWh = try c.decodeIfPresent(Double.self, forKey: .batteryDischargeWh)
+        temperatureAverage = try c.decodeIfPresent(Double.self, forKey: .temperatureAverage)
+        temperatureMaximum = try c.decodeIfPresent(Double.self, forKey: .temperatureMaximum)
+        temperatureCoverage = try c.decodeIfPresent(Double.self, forKey: .temperatureCoverage)
+        screenOnFraction = try c.decodeIfPresent(Double.self, forKey: .screenOnFraction)
+        lowPowerModeFraction = try c.decodeIfPresent(Double.self, forKey: .lowPowerModeFraction)
+        maximumThermalState = try c.decodeIfPresent(String.self, forKey: .maximumThermalState)
+        displayBrightness = try c.decodeIfPresent(Double.self, forKey: .displayBrightness)
+        brightnessAvailable = try c.decodeIfPresent(Bool.self, forKey: .brightnessAvailable)
+        brightnessReadAt = try c.decodeIfPresent(Date.self, forKey: .brightnessReadAt)
         dirty = try c.decodeIfPresent(Bool.self, forKey: .dirty) ?? true
     }
 
@@ -103,6 +145,22 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         try c.encode(dramPower, forKey: .dramPower)
         try c.encodeIfPresent(lowPowerModeEnabled, forKey: .lowPowerModeEnabled)
         try c.encodeIfPresent(thermalState, forKey: .thermalState)
+        try c.encodeIfPresent(aggregateWindowStart, forKey: .aggregateWindowStart)
+        try c.encodeIfPresent(systemEnergyWh, forKey: .systemEnergyWh)
+        try c.encodeIfPresent(systemPowerAverage, forKey: .systemPowerAverage)
+        try c.encodeIfPresent(systemPowerPeak, forKey: .systemPowerPeak)
+        try c.encodeIfPresent(systemCoverage, forKey: .systemCoverage)
+        try c.encodeIfPresent(batteryChargeWh, forKey: .batteryChargeWh)
+        try c.encodeIfPresent(batteryDischargeWh, forKey: .batteryDischargeWh)
+        try c.encodeIfPresent(temperatureAverage, forKey: .temperatureAverage)
+        try c.encodeIfPresent(temperatureMaximum, forKey: .temperatureMaximum)
+        try c.encodeIfPresent(temperatureCoverage, forKey: .temperatureCoverage)
+        try c.encodeIfPresent(screenOnFraction, forKey: .screenOnFraction)
+        try c.encodeIfPresent(lowPowerModeFraction, forKey: .lowPowerModeFraction)
+        try c.encodeIfPresent(maximumThermalState, forKey: .maximumThermalState)
+        try c.encodeIfPresent(displayBrightness, forKey: .displayBrightness)
+        try c.encodeIfPresent(brightnessAvailable, forKey: .brightnessAvailable)
+        try c.encodeIfPresent(brightnessReadAt, forKey: .brightnessReadAt)
         try c.encode(dirty, forKey: .dirty)
     }
 
@@ -111,6 +169,11 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         case systemPowerAvailable, systemPowerIsEstimated, externalConnected
         case temperature, screenOn, cpuPower, gpuPower, displayPower, dramPower
         case lowPowerModeEnabled, thermalState, dirty
+        case aggregateWindowStart, systemEnergyWh, systemPowerAverage, systemPowerPeak
+        case systemCoverage, batteryChargeWh, batteryDischargeWh
+        case temperatureAverage, temperatureMaximum, temperatureCoverage
+        case screenOnFraction, lowPowerModeFraction, maximumThermalState
+        case displayBrightness, brightnessAvailable, brightnessReadAt
     }
 
     /// 可信的系统负载。
@@ -125,6 +188,39 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
 
     /// 明确离电（externalConnected 显式 false）。旧数据一律不算离电。
     var isDefinitelyOnBattery: Bool { externalConnected == false }
+
+    /// 把一个已完成分钟窗口的聚合写入 v5 字段。
+    /// 覆盖率未达标的量保持 nil（不伪造完整分钟指标）；
+    /// 温度最大值在覆盖率不足时仍保留，由 temperatureCoverage 附带说明。
+    mutating func apply(
+        minuteAggregate aggregate: MinuteAggregate,
+        displayBrightness brightness: Double?,
+        brightnessAvailable: Bool,
+        brightnessReadAt: Date?
+    ) {
+        aggregateWindowStart = aggregate.windowStart
+        systemEnergyWh = aggregate.hasFullSystemMetric ? aggregate.systemEnergyWh : nil
+        systemPowerAverage = aggregate.hasFullSystemMetric ? aggregate.systemPowerAverage : nil
+        systemPowerPeak = aggregate.hasFullSystemMetric ? aggregate.systemPowerPeak : nil
+        systemCoverage = aggregate.systemCoverage
+        batteryChargeWh = aggregate.batteryChargeWh
+        batteryDischargeWh = aggregate.batteryDischargeWh
+        // 温度均值/最大值跟随趋势可用性（coverage ≥ 0.5）；覆盖率始终如实记录
+        if aggregate.hasUsableTemperatureTrend {
+            temperatureAverage = aggregate.temperatureAverage
+            temperatureMaximum = aggregate.temperatureMaximum
+        } else {
+            temperatureAverage = nil
+            temperatureMaximum = nil
+        }
+        temperatureCoverage = aggregate.temperatureCoverage
+        screenOnFraction = aggregate.screenOnFraction
+        lowPowerModeFraction = aggregate.lowPowerModeFraction
+        maximumThermalState = aggregate.maximumThermalStateLabel
+        self.displayBrightness = brightness
+        self.brightnessAvailable = brightnessAvailable
+        self.brightnessReadAt = brightnessReadAt
+    }
 
     /// WebDAV JSONL 行格式（扁平字典）。`ext` 仅在已知时写出，
     /// 缺失即代表旧格式，下载端不得推断。
@@ -150,6 +246,23 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         }
         if let lowPowerModeEnabled { json["lpm"] = lowPowerModeEnabled }
         if let thermalState { json["thermal"] = thermalState }
+        // v5 聚合：仅在已知时写出，缺键即旧格式
+        if let aggregateWindowStart { json["aggWin"] = aggregateWindowStart.timeIntervalSince1970 }
+        if let systemEnergyWh { json["sysEWh"] = systemEnergyWh }
+        if let systemPowerAverage { json["sysPAvg"] = systemPowerAverage }
+        if let systemPowerPeak { json["sysPPeak"] = systemPowerPeak }
+        if let systemCoverage { json["sysCov"] = systemCoverage }
+        if let batteryChargeWh { json["batChgWh"] = batteryChargeWh }
+        if let batteryDischargeWh { json["batDisWh"] = batteryDischargeWh }
+        if let temperatureAverage { json["tAvg"] = temperatureAverage }
+        if let temperatureMaximum { json["tMax"] = temperatureMaximum }
+        if let temperatureCoverage { json["tCov"] = temperatureCoverage }
+        if let screenOnFraction { json["screenFrac"] = screenOnFraction }
+        if let lowPowerModeFraction { json["lpmFrac"] = lowPowerModeFraction }
+        if let maximumThermalState { json["thermalPeak"] = maximumThermalState }
+        if let displayBrightness { json["bright"] = displayBrightness }
+        if let brightnessAvailable { json["brightOK"] = brightnessAvailable }
+        if let brightnessReadAt { json["brightAt"] = brightnessReadAt.timeIntervalSince1970 }
         return json
     }
 
@@ -180,6 +293,23 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
             thermalState: dict["thermal"] as? String
         )
         snap.id = id
+        // v5 聚合字段：远端缺键保持 nil，不推导伪数据
+        if let aggWin = dict["aggWin"] as? Double { snap.aggregateWindowStart = Date(timeIntervalSince1970: aggWin) }
+        snap.systemEnergyWh = dict["sysEWh"] as? Double
+        snap.systemPowerAverage = dict["sysPAvg"] as? Double
+        snap.systemPowerPeak = dict["sysPPeak"] as? Double
+        snap.systemCoverage = dict["sysCov"] as? Double
+        snap.batteryChargeWh = dict["batChgWh"] as? Double
+        snap.batteryDischargeWh = dict["batDisWh"] as? Double
+        snap.temperatureAverage = dict["tAvg"] as? Double
+        snap.temperatureMaximum = dict["tMax"] as? Double
+        snap.temperatureCoverage = dict["tCov"] as? Double
+        snap.screenOnFraction = dict["screenFrac"] as? Double
+        snap.lowPowerModeFraction = dict["lpmFrac"] as? Double
+        snap.maximumThermalState = dict["thermalPeak"] as? String
+        snap.displayBrightness = dict["bright"] as? Double
+        snap.brightnessAvailable = dict["brightOK"] as? Bool
+        if let brightAt = dict["brightAt"] as? Double { snap.brightnessReadAt = Date(timeIntervalSince1970: brightAt) }
         snap.dirty = false
         return snap
     }

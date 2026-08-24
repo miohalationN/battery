@@ -55,8 +55,9 @@ struct PopoverView: View {
     }
 
     private var foregroundPollingText: String {
-        let seconds = Int(sampler.uiInterval.rounded())
-        return "\(seconds) 秒轮询"
+        sampler.isForegroundReadingActive
+            ? "\(Int(SamplingCadence.foregroundInterval)) 秒兜底轮询"
+            : "\(Int(SamplingCadence.backgroundInterval)) 秒保活轮询"
     }
 
     // MARK: - 顶部：电量 + 状态
@@ -196,9 +197,13 @@ struct PopoverView: View {
                     powerRow("内存", value: String(format: "%.1f W", sampler.dramPower), icon: "memorychip", color: .teal)
                 }
             }
-            if sampler.displayPower > 0 {
-                powerRow("显示器（估算）", value: String(format: "%.1f W", sampler.displayPower), icon: "display", color: .yellow)
-            }
+            // 显示器不制造瓦数：只展示可核对的原始亮度
+            powerRow(
+                "亮度",
+                value: brightnessText,
+                icon: "display",
+                color: .yellow
+            )
             // 原始电学量降级为次要信息
             if sampler.currentVoltage > 0 {
                 HStack(spacing: 4) {
@@ -215,6 +220,13 @@ struct PopoverView: View {
     /// 系统负载标注数据来源；接电无遥测时明确不可用，不用充电功率冒充
     private var loadValueText: String {
         sampler.currentPowerAvailable ? String(format: "%.1f W", sampler.currentWattage) : "—"
+    }
+
+    private var brightnessText: String {
+        guard sampler.brightnessMetric.availability == .available, let value = sampler.brightnessMetric.value else {
+            return "不可读取"
+        }
+        return String(format: "%.0f%%", value * 100)
     }
 
     private var loadSourceText: String {

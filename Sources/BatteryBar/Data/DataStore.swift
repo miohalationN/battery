@@ -20,7 +20,6 @@ final class DataStore: @unchecked Sendable {
     private let cyclesFile: URL
     private let configFile: URL
     private let usageStateFile: URL
-    private let refreshIntervalFile: URL
     private let queue = DispatchQueue(label: "com.batterybar.store", qos: .utility)
 
     private var snapshots: [BatterySnapshot] = []
@@ -36,7 +35,6 @@ final class DataStore: @unchecked Sendable {
     private var cycles: [ChargeCycle] = []
     private var syncConfig: SyncConfig = .default
     private var usageState: UsageState = UsageState()
-    private var storedRefreshInterval: Double = 1
 
     /// 生产环境使用 shared（默认 Application Support 目录）；
     /// 测试可注入临时目录隔离读写。
@@ -48,15 +46,10 @@ final class DataStore: @unchecked Sendable {
         cyclesFile = baseDir.appendingPathComponent("cycles.json")
         configFile = baseDir.appendingPathComponent("sync-config.json")
         usageStateFile = baseDir.appendingPathComponent("usage-state.json")
-        refreshIntervalFile = baseDir.appendingPathComponent("refresh-interval.json")
 
         try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
         load()
         usageState = loadJSON(from: usageStateFile) ?? UsageState()
-        if let data = try? Data(contentsOf: refreshIntervalFile),
-           let v = try? JSONDecoder().decode(Double.self, from: data) {
-            storedRefreshInterval = v
-        }
     }
 
     func load() {
@@ -363,21 +356,11 @@ final class DataStore: @unchecked Sendable {
         }
     }
 
-    // MARK: - Refresh Interval（前台读数轮询间隔持久化）
+    // MARK: - Refresh Interval（已废弃）
 
-    func currentRefreshInterval() -> Double {
-        queue.sync { SamplingCadence.sanitizedForegroundInterval(storedRefreshInterval) }
-    }
-
-    func updateRefreshInterval(_ interval: Double) {
-        queue.async { [self] in
-            let sanitized = SamplingCadence.sanitizedForegroundInterval(interval)
-            storedRefreshInterval = sanitized
-            if let data = try? JSONEncoder().encode(sanitized) {
-                try? data.write(to: refreshIntervalFile, options: .atomic)
-            }
-        }
-    }
+    /// 用户可调刷新频率功能已移除：采样节奏由固定策略决定
+    /// （见 SamplingCadence）。旧 refresh-interval.json 保留在用户目录但被忽略，
+    /// 运行时不再读取，也不删除用户文件。
 }
 
 // MARK: - UsageState

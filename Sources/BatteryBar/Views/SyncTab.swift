@@ -7,7 +7,6 @@ struct SyncTab: View {
     @State private var testing = false
     @State private var testResult: String?
     @State private var password = ""
-    @State private var refreshInterval: Int = 1
     @State private var localSnapshotCount = 0
     @State private var localRecordCount = 0
     // 密码防抖：用户停止输入 0.6s 后才写入 Keychain，避免每次按键都触发 SecItem 操作
@@ -18,12 +17,12 @@ struct SyncTab: View {
             VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
                 PageHeader(
                     title: "数据与同步",
-                    subtitle: "管理采样节奏，并安全备份历史记录",
+                    subtitle: "自动采样节奏与安全备份",
                     systemImage: "arrow.triangle.branch",
                     tint: .bbPurple,
                     badge: config.isEnabled ? "WebDAV 已启用" : "仅本机"
                 )
-                refreshSection
+                autoSamplingSection
                 localDataSection
                 syncToggleCard
                 if config.isEnabled {
@@ -39,8 +38,6 @@ struct SyncTab: View {
             .padding(.bottom, BBDesign.pagePadding)
         }
         .onAppear {
-            // 从 DataStore 恢复用户上次设置的刷新间隔
-            refreshInterval = Int(DataStore.shared.currentRefreshInterval())
             reloadLocalCounts()
             // 预填密码（用于测试连接 / 同步），从 Keychain 读取
             password = KeychainHelper.getPassword(
@@ -57,50 +54,19 @@ struct SyncTab: View {
         }
     }
 
-    // MARK: - 刷新频率
+    // MARK: - 自动采样（只读说明）
 
-    private var refreshSection: some View {
+    /// 采样节奏由固定策略决定，不再提供用户可调刷新频率：
+    /// IORegistry 功率/温度没有可靠逐字段通知，5/15 秒是兜底读取；
+    /// 系统驱动可能数秒至十余秒才发布新值，相邻读数可能相同。
+    private var autoSamplingSection: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
-            SectionHeader(title: "实时读数", systemImage: "arrow.clockwise.circle.fill", tint: .bbBlue)
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("前台轮询间隔").font(.system(size: 11, weight: .medium))
-                    Text("主窗口或菜单栏弹窗打开时生效")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                HStack(spacing: 0) {
-                    Button { if refreshInterval > 1 { refreshInterval -= 1; applyRefreshInterval() } } label: {
-                        Image(systemName: "minus")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 26, height: 26)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-
-                    Text("\(refreshInterval)")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded).monospacedDigit())
-                        .frame(width: 34)
-
-                    Button { if refreshInterval < 30 { refreshInterval += 1; applyRefreshInterval() } } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 26, height: 26)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-                Text("秒").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-
-            Divider().opacity(0.45)
-
+            SectionHeader(title: "自动采样", systemImage: "arrow.clockwise.circle.fill", tint: .bbBlue)
             VStack(spacing: 7) {
                 cadenceRow(
                     "当前模式",
                     value: sampler.isForegroundReadingActive
-                        ? "前台 · \(Int(sampler.activeRefreshInterval.rounded())) 秒"
+                        ? "前台 · \(Int(SamplingCadence.foregroundInterval)) 秒"
                         : "后台 · \(Int(SamplingCadence.backgroundInterval)) 秒",
                     tint: sampler.isForegroundReadingActive ? .bbMint : .secondary
                 )
@@ -112,14 +78,17 @@ struct SyncTab: View {
                         : "关闭（零采样）",
                     tint: sampler.helperEnabled ? .bbAmber : .secondary
                 )
+                cadenceRow("电源插拔 / 低电量模式 / 热压力", value: "系统事件立即读取", tint: .bbBlue)
                 PollingHeartbeat(sampler: sampler)
             }
+
+            Divider().opacity(0.45)
 
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "info.circle")
                     .font(.system(size: 10))
                     .padding(.top, 1)
-                Text("这里设置的是应用向系统发起读取的频率，不是传感器的出数频率。macOS 电池驱动常会隔数秒到十余秒批量发布功率、温度等数据；选择 1 秒能更快接住新值，但相邻读数可能相同。")
+                Text("采样节奏由系统事件与固定兜底策略决定，不能手动调节。macOS 电池驱动常会隔数秒到十余秒批量发布功率、温度等数据；相邻读数相同代表驱动尚未发布新值，不是应用停止工作。")
                     .font(.system(size: 10))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -152,11 +121,6 @@ struct SyncTab: View {
             }
         }
         .glassCard(accent: config.isEnabled ? .bbMint : .clear)
-    }
-
-    private func applyRefreshInterval() {
-        DataStore.shared.updateRefreshInterval(Double(refreshInterval))
-        NotificationCenter.default.post(name: .init("RefreshIntervalChanged"), object: Double(refreshInterval))
     }
 
     private var localDataSection: some View {

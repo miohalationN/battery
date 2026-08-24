@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import IOKit.ps
 
 /// 采样与 UI 状态中枢。
 ///
@@ -10,6 +11,15 @@ import Observation
 /// 高频采样带着重建。阻塞调用（system_profiler 健康度、XPC helper、powermetrics）
 /// 通过 Task.detached 移出主线程，结果回写主线程；休眠回调用 MainActor.assumeIsolated
 /// 同步执行，避免 willSleep 到系统入睡之间 Task 排队延迟导致睡眠统计丢失。
+///
+/// 采样节奏（冻结策略，无用户可调刷新频率）：
+/// - 任一读数界面可见：基础兜底读取每 5 秒；都不可见：每 15 秒；
+/// - 每次界面打开立即读取一次；
+/// - IOPowerSources 变化（电源增删/插拔）经 IOPSNotificationCreateRunLoopSource
+///   立即读取；低电量模式与热压力走 ProcessInfo 系统通知立即更新；
+/// - 通知风暴按约 180ms 合并；stop 之后的事件回调不得写状态；
+///   基础读取全部在主线程同步执行，天然串行、不可能重叠。
+/// IORegistry 功率/温度没有可靠公开逐字段通知，因此保留兜底轮询。
 @MainActor
 @Observable
 final class PowerSampler {
@@ -19,8 +29,14 @@ final class PowerSampler {
     private var dispatchTimer: DispatchSourceTimer?
     private var componentPowerTimer: DispatchSourceTimer?
     private var storageTimer: Timer?
-    private var refreshObserver: NSObjectProtocol?
     private var liveReadingDemand = LiveReadingDemand()
+
+    // MARK: 系统事件源
+    private var powerSourceRunLoopSource: CFRunLoopSource?
+    private var iopsContextBox: WeakSamplerBox?
+    private var systemEventObservers: [NSObjectProtocol] = []
+    private var baseReadingCoalescer = NotificationCoalescer()
+    private var pendingEventReadTask: Task<Void, Never>?
 
     private(set) var currentLevel: Double = 0
     private(set) var currentIsCharging: Bool = false
@@ -43,13 +59,21 @@ final class PowerSampler {
     private(set) var systemHealthPercent: Double = 0
     /// 最近一次基础读数轮询成功的时刻。只有明确读取它的小视图会跟随失效。
     private(set) var lastUpdateTime: Date = Date()
-    /// 当前基础读数的实际轮询间隔：有界面可见时跟随用户设置，否则固定低频。
+    /// 当前基础读数的实际轮询间隔：界面可见 5 秒，否则 15 秒保活。
     private(set) var activeRefreshInterval: TimeInterval = SamplingCadence.backgroundInterval
     private(set) var isForegroundReadingActive = false
 
+    // MARK: 数据质量语义（功耗诊断区消费）
+    private(set) var loadMetric = TelemetrySample<Double>.initial(nil, source: .unavailable, at: .distantPast)
+    private(set) var batteryPowerMetric = TelemetrySample<Double>.initial(nil, source: .unavailable, at: .distantPast)
+    private(set) var temperatureMetric = TelemetrySample<Double>.initial(nil, source: .unavailable, at: .distantPast)
+    private(set) var brightnessMetric = TelemetrySample<Double>.initial(nil, source: .unavailable, at: .distantPast)
+
+    // MARK: 分钟聚合
+    private var aggregator = WindowTelemetryAggregator()
+
     private(set) var cpuPower: Double = 0
     private(set) var gpuPower: Double = 0
-    private(set) var displayPower: Double = 0
     private(set) var dramPower: Double = 0
     /// 最近一次成功的分项功耗采样时刻。超过约 30s 未更新视为陈旧，
     /// UI 只显示绝对瓦数、不再计算占比。
@@ -82,8 +106,6 @@ final class PowerSampler {
     private var areScreensSleeping: Bool = false
     private var sleepStartTime: Date?
     private var isStarted: Bool = false
-    /// 用户设置的前台轮询间隔；后台节奏不受它影响。
-    private(set) var uiInterval: TimeInterval = 1
 
     init() {
         // 循环落盘通过闭包注入，便于单元测试用 stub 收集
@@ -99,11 +121,6 @@ final class PowerSampler {
         lastDischargeScreenOn = usage.lastDischargeScreenOn
         lastDischargeSleep = usage.lastDischargeSleep
         lastPlugInTime = usage.lastPlugInTime
-
-        // 从 DataStore 恢复用户自定义的 UI 刷新间隔（重启后不丢失）
-        uiInterval = SamplingCadence.sanitizedForegroundInterval(
-            DataStore.shared.currentRefreshInterval()
-        )
 
         // 启动时读取当前电源状态
         let reading = reader.readBatteryReading()
@@ -124,8 +141,8 @@ final class PowerSampler {
             dischargeStartTime = Date()
         }
 
-        // 接线 SleepWatcher：通过系统休眠/唤醒事件维护 isSleeping 与睡眠时长
-        // NSWorkspace 通知在主线程派发（SleepWatcher 内 queue: .main），assumeIsolated 安全
+        // 接线 SleepWatcher：通过系统休眠/唤醒事件维护 isSleeping 与睡眠时长，
+        // 并在睡眠开始立即截断聚合器连续量
         sleepWatcher.onSleep = { [weak self] in
             MainActor.assumeIsolated { self?.handleSleep() }
         }
@@ -133,32 +150,18 @@ final class PowerSampler {
             MainActor.assumeIsolated { self?.handleWake() }
         }
         sleepWatcher.onScreensSleep = { [weak self] in
-            MainActor.assumeIsolated { self?.areScreensSleeping = true }
+            MainActor.assumeIsolated { self?.handleScreensSleep() }
         }
         sleepWatcher.onScreensWake = { [weak self] in
-            MainActor.assumeIsolated { self?.areScreensSleeping = false }
+            MainActor.assumeIsolated { self?.handleScreensWake() }
         }
         sleepWatcher.start()
 
-        // 观察刷新间隔变更通知（object 为 Double）
-        refreshObserver = NotificationCenter.default.addObserver(
-            forName: .init("RefreshIntervalChanged"),
-            object: nil,
-            queue: .main
-        ) { [weak self] note in
-            let interval = note.object as? Double
-            Task { @MainActor [weak self] in
-                guard let interval else { return }
-                guard let self else { return }
-                self.uiInterval = SamplingCadence.sanitizedForegroundInterval(interval)
-                // 后台固定使用低频间隔；用户设置只在读数界面可见时重排定时器。
-                if self.isForegroundReadingActive {
-                    self.restartTimer(sampleImmediately: true)
-                }
-            }
-        }
+        registerSystemEventSources()
 
-        sampleUI()
+        if let reading {
+            applyBaseReading(reading)
+        }
         sampleStorage()
 
         // 优先使用同一轮 IORegistry 的实际/设计容量，避免启动时额外再跑一份
@@ -209,11 +212,11 @@ final class PowerSampler {
         }
 
         // 存储定时器（Timer + target/selector 在主 RunLoop 触发，无隔离问题）
-        let st = Timer(timeInterval: 60, target: self, selector: #selector(fireStorage), userInfo: nil, repeats: true)
+        let st = Timer(timeInterval: SamplingCadence.historyInterval, target: self, selector: #selector(fireStorage), userInfo: nil, repeats: true)
         RunLoop.main.add(st, forMode: .common)
         storageTimer = st
 
-        // UI 定时器
+        // 基础读数定时器
         restartTimer()
     }
 
@@ -224,19 +227,87 @@ final class PowerSampler {
         storageTimer?.invalidate()
         storageTimer = nil
         sleepWatcher.stop()
-        if let obs = refreshObserver {
-            NotificationCenter.default.removeObserver(obs)
-            refreshObserver = nil
-        }
+        unregisterSystemEventSources()
+        pendingEventReadTask?.cancel()
+        pendingEventReadTask = nil
         persistUsageState()
         isStarted = false
     }
 
-    @objc private func fireStorage() {
-        sampleStorage()
+    // MARK: - 系统事件（IOPS / 低电量模式 / 热压力）
+
+    /// 注册事件源：IOPS 电源变化用专用 RunLoop source；低电量模式与热压力用
+    /// Foundation 系统通知。回调统一进入合并窗口后触发立即读取。
+    private func registerSystemEventSources() {
+        // IOPS 回调是 C 函数指针，不能捕获 Swift 上下文；通过 context 指针
+        // 传回弱引用盒子。source 只挂在主 RunLoop 上，注销在主线程同步完成，
+        // 回调内 assumeIsolated 安全且不会在 stop 后再触发。
+        let box = WeakSamplerBox(self)
+        iopsContextBox = box
+        let context = Unmanaged.passUnretained(box).toOpaque()
+        let callback: IOPowerSourceCallbackType = { rawContext in
+            guard let rawContext else { return }
+            let box = Unmanaged<WeakSamplerBox>.fromOpaque(rawContext).takeUnretainedValue()
+            guard let sampler = box.sampler as? PowerSampler else { return }
+            MainActor.assumeIsolated { sampler.handleSystemEvent() }
+        }
+        if let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            powerSourceRunLoopSource = source
+        }
+
+        let center = NotificationCenter.default
+        systemEventObservers.append(center.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleSystemEvent() }
+        })
+        systemEventObservers.append(center.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleSystemEvent() }
+        })
     }
 
-    /// 登记主窗口 / 菜单弹窗的可见性。任一界面打开即立即采样并切到用户频率；
+    private func unregisterSystemEventSources() {
+        if let source = powerSourceRunLoopSource {
+            CFRunLoopSourceInvalidate(source)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            powerSourceRunLoopSource = nil
+        }
+        iopsContextBox = nil
+        for observer in systemEventObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        systemEventObservers.removeAll()
+    }
+
+    /// 事件入口：合并窗口内的重复通知只产生一次读取。
+    private func handleSystemEvent() {
+        guard isStarted else { return }
+        switch baseReadingCoalescer.eventReceived(now: Date()) {
+        case .fireNow:
+            sampleUI()
+        case .delay(let delay):
+            scheduleDelayedEventRead(after: delay)
+        case .mergeIntoPending:
+            break
+        }
+    }
+
+    private func scheduleDelayedEventRead(after delay: TimeInterval) {
+        pendingEventReadTask?.cancel()
+        pendingEventReadTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+            guard !Task.isCancelled, let self, self.isStarted else { return }
+            self.baseReadingCoalescer.fireCompleted(at: Date())
+            self.sampleUI()
+        }
+    }
+
+    // MARK: - 界面可见性
+
+    /// 登记主窗口 / 菜单栏弹窗的可见性。任一界面打开即立即采样并切到前台节奏；
     /// 只有最后一个界面关闭后才回到后台低频，避免两个界面互相覆盖生命周期。
     func setReadingSurface(_ surface: LiveReadingSurface, visible: Bool) {
         let oldInterval = effectiveRefreshInterval
@@ -261,14 +332,11 @@ final class PowerSampler {
     }
 
     private var effectiveRefreshInterval: TimeInterval {
-        SamplingCadence.effectiveInterval(
-            foregroundInterval: uiInterval,
-            hasVisibleSurface: liveReadingDemand.hasVisibleSurface
-        )
+        SamplingCadence.effectiveInterval(hasVisibleSurface: liveReadingDemand.hasVisibleSurface)
     }
 
-    /// 重启基础读数定时器。前台按用户设置轮询，后台固定 15 秒并给系统更大的
-    /// 合并唤醒空间；间隔是读取尝试频率，不代表电池驱动每轮都会发布新值。
+    /// 重启基础读数定时器。前台 5 秒、后台 15 秒；间隔是兜底读取尝试频率，
+    /// 不代表电池驱动每轮都会发布新值（驱动可能数秒至十余秒才批量发布）。
     private func restartTimer(sampleImmediately: Bool = false) {
         dispatchTimer?.cancel()
         let interval = effectiveRefreshInterval
@@ -276,9 +344,7 @@ final class PowerSampler {
         if sampleImmediately { sampleUI() }
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        let leewayMilliseconds = isForegroundReadingActive
-            ? Int(max(100, min(500, interval * 100)))
-            : 2_000
+        let leewayMilliseconds = isForegroundReadingActive ? 500 : 2_000
         timer.schedule(
             deadline: .now() + interval,
             repeating: interval,
@@ -324,10 +390,9 @@ final class PowerSampler {
         guard helperEnabled, !isComponentPowerSampleInFlight else { return }
         isComponentPowerSampleInFlight = true
         let reader = reader
-        let screenOn = !isSleeping && !areScreensSleeping
         Task { @MainActor in
-            let (component, display) = await Task.detached(priority: .utility) { () -> (ComponentPower, Double) in
-                (reader.readComponentPower(), reader.estimateDisplayPower(screenOn: screenOn))
+            let component = await Task.detached(priority: .utility) {
+                reader.readComponentPower()
             }.value
             self.isComponentPowerSampleInFlight = false
 
@@ -335,10 +400,10 @@ final class PowerSampler {
             guard self.helperEnabled, self.isStarted else { return }
             let age = Date().timeIntervalSince(component.sampledAt)
             guard component.isAvailable, age >= 0, age < 120 else { return }
+            // powermetrics 明确提供硬件采样时间，质量模型如实记录
             self.lastComponentPowerAt = component.sampledAt
             if abs(self.cpuPower - component.cpu) > 0.02 { self.cpuPower = component.cpu }
             if abs(self.gpuPower - component.gpu) > 0.02 { self.gpuPower = component.gpu }
-            if abs(self.displayPower - display) > 0.02 { self.displayPower = display }
             if abs(self.dramPower - component.dram) > 0.02 { self.dramPower = component.dram }
         }
     }
@@ -349,6 +414,21 @@ final class PowerSampler {
         isSleeping = true
         areScreensSleeping = true
         sleepStartTime = Date()
+        let now = Date()
+        // 睡眠期间屏幕必然熄灭；连续量立即截断，不得把睡前功率延伸进睡眠窗口
+        aggregator.setState(screenOn: false, at: now)
+        aggregator.truncateContinuity(at: now)
+    }
+
+    private func handleScreensSleep() {
+        areScreensSleeping = true
+        aggregator.setState(screenOn: false, at: Date())
+    }
+
+    private func handleScreensWake() {
+        guard !isSleeping else { return }
+        areScreensSleeping = false
+        aggregator.setState(screenOn: true, at: Date())
     }
 
     private func handleWake() {
@@ -364,6 +444,8 @@ final class PowerSampler {
         isSleeping = false
         areScreensSleeping = false
         persistUsageState()
+        // 唤醒后立即重新读取，不等下一个兜底 deadline
+        if isStarted { sampleUI() }
     }
 
     // MARK: - Usage state persistence
@@ -379,24 +461,35 @@ final class PowerSampler {
         DataStore.shared.saveUsageState(state)
     }
 
+    // MARK: - 基础读取
+
     private func sampleUI() {
         // IOPS 在睡眠切换/驱动重载时可能瞬时失败。此时保留上次 UI 状态，不能把
         // 失败合成为 0%/离电并污染插拔状态机。
         guard let reading = reader.readBatteryReading() else { return }
+        applyBaseReading(reading)
+
+        // 速率缓存按墙上时间更新，避免前后台间隔变化把计算周期成倍拉长。
+        let now = Date()
+        if now.timeIntervalSince(lastRateCalculationAt) >= rateCacheInterval {
+            lastRateCalculationAt = now
+            recalcRates(isPluggedIn: reading.powerSource.isPluggedIn)
+        }
+    }
+
+    /// 应用一轮成功的基础读取：发布可观察状态、更新质量样本、喂入聚合器。
+    private func applyBaseReading(_ reading: BatteryReader.BatteryReading) {
         let ps = reading.powerSource
         let info = reading.batteryInfo
-
+        let readAt = reading.readAt
+        let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
         let previousLevel = currentLevel
         let previousCharging = currentIsCharging
-        let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
-        let processInfo = ProcessInfo.processInfo
-        let lowPowerModeEnabled = processInfo.isLowPowerModeEnabled
-        let thermalState = Self.thermalStateLabel(processInfo.thermalState)
 
-        // 插拔检测（每秒检查，立即响应，不等 sampleStorage 的每分钟检查）
+        // 插拔检测（立即响应，不等 sampleStorage 的每分钟检查）
         if wasExternalConnected && !isPluggedIn {
             // 拔电
-            let plugDuration = lastPlugInTime.map { Date().timeIntervalSince($0) } ?? .infinity
+            let plugDuration = lastPlugInTime.map { readAt.timeIntervalSince($0) } ?? .infinity
             if plugDuration < shortPlugThreshold {
                 // 短暂插电（< 30秒）：继续累计统计，不重置
                 // dischargeStartTime 保持 nil（功率不需要重新稳定，插电时间极短）
@@ -404,7 +497,7 @@ final class PowerSampler {
                 // 正常拔电：清零当前离电统计
                 currentDischargeScreenOn = 0
                 currentDischargeSleep = 0
-                dischargeStartTime = Date()
+                dischargeStartTime = readAt
             }
         } else if !wasExternalConnected && isPluggedIn {
             // 插电：把当前统计保存为"上次使用"
@@ -413,12 +506,12 @@ final class PowerSampler {
                 lastDischargeSleep = currentDischargeSleep
             }
             dischargeStartTime = nil
-            lastPlugInTime = Date()
+            lastPlugInTime = readAt
         }
         wasExternalConnected = isPluggedIn
 
         // 只在值真正变化时写 @Observable 属性：Observation 虽是属性级失效，
-        // 每秒无条件写仍会让读取该属性的视图（状态栏数字、英雄卡）逐秒重算。
+        // 无条件写仍会让读取该属性的视图逐 tick 重算。
         // 0.05W 阈值滤掉遥测抖动；level/isCharging/温度等低频字段按相等门控。
         let wattage = info?.systemPower ?? info?.wattage ?? 0
         if ps.level != currentLevel { currentLevel = ps.level }
@@ -440,15 +533,20 @@ final class PowerSampler {
         if abs((info?.adapterInputPower ?? 0) - currentAdapterInputPower) > 0.05 {
             currentAdapterInputPower = info?.adapterInputPower ?? 0
         }
-        if lowPowerModeEnabled != currentLowPowerModeEnabled {
-            currentLowPowerModeEnabled = lowPowerModeEnabled
+        let processInfo = ProcessInfo.processInfo
+        if processInfo.isLowPowerModeEnabled != currentLowPowerModeEnabled {
+            currentLowPowerModeEnabled = processInfo.isLowPowerModeEnabled
         }
+        let thermalState = Self.thermalStateLabel(processInfo.thermalState)
         if thermalState != currentThermalState { currentThermalState = thermalState }
         // currentInfo 只承载界面使用的元数据。电压、电流、温度和功率已有独立
         // 可观察字段；若把这些高频值也纳入 BatteryInfo 等值比较，会平白多触发
         // 一次读取该属性的视图更新。
         if shouldPublishMetadata(info) { currentInfo = info }
-        lastUpdateTime = Date()
+        lastUpdateTime = readAt
+
+        updateQualityMetrics(reading)
+        feedAggregator(reading)
 
         // 状态栏只关心电量与充电态；相同数据不再每个轮询 tick 发通知。
         let statusChanged = previousLevel != currentLevel || previousCharging != currentIsCharging
@@ -459,26 +557,84 @@ final class PowerSampler {
                 NotificationManager.shared.checkFullCharge(level: currentLevel, wasCharging: true)
             }
         }
+    }
 
-        // 速率缓存按墙上时间更新，避免前后台间隔变化把计算周期成倍拉长。
-        let now = Date()
-        if now.timeIntervalSince(lastRateCalculationAt) >= rateCacheInterval {
-            lastRateCalculationAt = now
-            let snapshots = DataStore.shared.recentSnapshots(1440)
-            // 放电速率只在明确离电时有意义：接电（含满电保持/优化充电暂停）
-            // 返回 0，UI 不显示续航预估；历史过滤同样只认 externalConnected == false。
-            cachedDrainRate = DrainRateCalculator.drainRate(
-                level: currentLevel,
-                isOnBattery: !isPluggedIn,
-                batteryPower: currentBatteryPower,
-                voltage: currentVoltage,
-                maxCapacity: currentInfo?.maxCapacity ?? 0,
-                healthPercent: systemHealthPercent,
-                dischargeStart: dischargeStartTime,
-                snapshots: snapshots
-            )
-            cachedChargeRate = Self.smoothRate(old: cachedChargeRate, measured: DrainRateCalculator.chargeRate(snapshots: snapshots))
-        }
+    /// 更新数据质量样本。同值重复读取只推进 readAt；来源/估算标记来自本轮 provenance。
+    private func updateQualityMetrics(_ reading: BatteryReader.BatteryReading) {
+        let info = reading.batteryInfo
+        let provenance = reading.provenance
+        let readAt = reading.readAt
+
+        loadMetric.observe(
+            reading.trustedSystemLoad,
+            source: provenance.systemLoadSource == .unavailable && reading.trustedSystemLoad == nil
+                ? .unavailable : provenance.systemLoadSource,
+            isEstimated: provenance.systemLoadIsEstimated,
+            readAt: readAt
+        )
+        let batteryPower = info?.batteryPower
+        batteryPowerMetric.observe(
+            batteryPower,
+            source: batteryPower == nil ? .unavailable : provenance.batteryPowerSource,
+            isEstimated: provenance.batteryPowerSource == .voltageCurrentDerived,
+            readAt: readAt
+        )
+        let temperature = info?.temperature ?? 0
+        temperatureMetric.observe(
+            temperature > 0.25 ? temperature : nil,
+            source: provenance.temperatureSource ?? .unavailable,
+            readAt: readAt
+        )
+        let brightness = reader.readDisplayBrightness()
+        brightnessMetric.observe(
+            brightness.brightness,
+            source: brightness.brightness == nil ? .unavailable : .displayIOKit,
+            readAt: brightness.readAt
+        )
+    }
+
+    /// 把本轮可信观测喂入分钟聚合器；离散状态先按当前真实值登记，
+    /// 使切换时刻尽量贴近通知时刻。
+    private func feedAggregator(_ reading: BatteryReader.BatteryReading) {
+        let info = reading.batteryInfo
+        let readAt = reading.readAt
+        let processInfo = ProcessInfo.processInfo
+        aggregator.setState(
+            screenOn: !isSleeping && !areScreensSleeping,
+            lowPowerMode: processInfo.isLowPowerModeEnabled,
+            thermalStateOrdinal: thermalOrdinal(processInfo.thermalState),
+            thermalStateLabel: Self.thermalStateLabel(processInfo.thermalState),
+            at: readAt
+        )
+        let temperature = info?.temperature ?? 0
+        aggregator.observe(WindowTelemetryAggregator.Observation(
+            date: readAt,
+            trustedSystemLoad: reading.trustedSystemLoad,
+            batteryChannel: reading.batteryChannel,
+            temperatureCelsius: temperature > 0.25 ? temperature : nil,
+            expectedInterval: effectiveRefreshInterval
+        ))
+    }
+
+    private func recalcRates(isPluggedIn: Bool) {
+        let snapshots = DataStore.shared.recentSnapshots(1440)
+        // 放电速率只在明确离电时有意义：接电（含满电保持/优化充电暂停）
+        // 返回 0，UI 不显示续航预估；历史过滤同样只认 externalConnected == false。
+        cachedDrainRate = DrainRateCalculator.drainRate(
+            level: currentLevel,
+            isOnBattery: !isPluggedIn,
+            batteryPower: currentBatteryPower,
+            voltage: currentVoltage,
+            maxCapacity: currentInfo?.maxCapacity ?? 0,
+            healthPercent: systemHealthPercent,
+            dischargeStart: dischargeStartTime,
+            snapshots: snapshots
+        )
+        cachedChargeRate = Self.smoothRate(old: cachedChargeRate, measured: DrainRateCalculator.chargeRate(snapshots: snapshots))
+    }
+
+    @objc private func fireStorage() {
+        sampleStorage()
     }
 
     private func shouldPublishMetadata(_ info: BatteryInfo?) -> Bool {
@@ -507,14 +663,15 @@ final class PowerSampler {
     private func sampleStorage() {
         // 采集失败时跳过这一分钟；伪造 0% 快照比一个明确的数据缺口更有害。
         guard let reading = reader.readBatteryReading() else { return }
+        applyBaseReading(reading)
         let ps = reading.powerSource
         let info = reading.batteryInfo
         let isPluggedIn = info?.externalConnected ?? ps.isPluggedIn
 
         let componentAge = Date().timeIntervalSince(lastComponentPowerAt)
         let hasFreshComponents = helperEnabled && componentAge >= 0 && componentAge <= 30
-        let snapshot = BatterySnapshot(
-            timestamp: Date(),
+        var snapshot = BatterySnapshot(
+            timestamp: reading.readAt,
             level: ps.level,
             isCharging: ps.isCharging,
             wattage: info?.systemPower ?? info?.wattage ?? 0,
@@ -524,14 +681,25 @@ final class PowerSampler {
             systemPowerAvailable: info?.systemPowerAvailable ?? false,
             systemPowerIsEstimated: info?.systemPowerIsEstimated ?? false,
             // Helper 失败或样本过期时写明确缺口（0），绝不把旧分项值无限复制进历史。
+            // 显示器瓦数不再伪造：displayPower 恒为 0，亮度以 v5 字段单独记录。
             cpuPower: hasFreshComponents ? cpuPower : 0,
             gpuPower: hasFreshComponents ? gpuPower : 0,
-            displayPower: hasFreshComponents ? displayPower : 0,
+            displayPower: 0,
             dramPower: hasFreshComponents ? dramPower : 0,
             externalConnected: isPluggedIn,
             lowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
             thermalState: Self.thermalStateLabel(ProcessInfo.processInfo.thermalState)
         )
+        if let aggregate = aggregator.takeCompletedAggregate() {
+            let brightness = brightnessMetric
+            let brightReadable = brightness.availability == .available
+            snapshot.apply(
+                minuteAggregate: aggregate,
+                displayBrightness: brightReadable ? brightness.value : nil,
+                brightnessAvailable: brightReadable,
+                brightnessReadAt: brightReadable ? brightness.readAt : nil
+            )
+        }
         DataStore.shared.saveSnapshot(snapshot)
 
         // 只在离电时累加使用时间
@@ -556,6 +724,16 @@ final class PowerSampler {
 
     func openBatterySettings() {
         reader.openBatterySettings()
+    }
+
+    private func thermalOrdinal(_ state: ProcessInfo.ThermalState) -> Int {
+        switch state {
+        case .nominal: return 0
+        case .fair: return 1
+        case .serious: return 2
+        case .critical: return 3
+        @unknown default: return 0
+        }
     }
 
     private static func thermalStateLabel(_ state: ProcessInfo.ThermalState) -> String {
@@ -598,7 +776,6 @@ final class PowerSampler {
         }.value
         cpuPower = 0
         gpuPower = 0
-        displayPower = 0
         dramPower = 0
         lastComponentPowerAt = .distantPast
     }
@@ -617,5 +794,13 @@ final class PowerSampler {
     /// 满电保持、优化充电暂停、80% 上限都是 onPowerNotCharging。
     var powerSourceState: PowerSourceState {
         PowerSourceState(externalConnected: currentExternalConnected, isCharging: currentIsCharging)
+    }
+
+    /// IOPS C 回调与 MainActor 采样器之间的弱引用桥。
+    /// 生命周期完全由 PowerSampler 在主线程管理：注册时创建、注销时置空，
+    /// 因此回调触发时盒子必然存活，不存在跨线程释放竞争。
+    private final class WeakSamplerBox {
+        weak var sampler: AnyObject?
+        init(_ sampler: AnyObject) { self.sampler = sampler }
     }
 }

@@ -227,10 +227,158 @@ import Foundation
     }
 }
 
-/// 快照保留窗口：24 小时裁剪、未来异常点拒绝、硬上限。
-@Suite struct RetentionPolicyTests {
+/// BatterySnapshot v5：分钟聚合字段、显示器亮度观测与 v1–v4 兼容。
+@Suite struct SnapshotV5CompatTests {
 
-    private func makeSnaps(_ agesHours: [Double], now: Date) -> [BatterySnapshot] {
+    private let base = Date(timeIntervalSince1970: 1_720_780_800)
+    private let windowStart = Date(timeIntervalSince1970: 1_800_000_000)
+
+    /// 旧 v4 JSON（无任何 v5 键）必须无损解码，v5 字段全部为 nil
+    @Test func v4JSONDecodesWithAllV5FieldsNil() throws {
+        let json = """
+        {"id":"\(UUID().uuidString)","timestamp":1720780800.0,"level":80,"isCharging":false,
+         "wattage":9.5,"temperature":31.0,"screenOn":true,"externalConnected":false,
+         "lowPowerModeEnabled":true,"thermalState":"正常"}
+        """.data(using: .utf8)!
+        let snap = try JSONDecoder().decode(BatterySnapshot.self, from: json)
+        #expect(snap.aggregateWindowStart == nil)
+        #expect(snap.systemEnergyWh == nil)
+        #expect(snap.systemPowerAverage == nil)
+        #expect(snap.batteryChargeWh == nil)
+        #expect(snap.temperatureAverage == nil)
+        #expect(snap.screenOnFraction == nil)
+        #expect(snap.displayBrightness == nil)
+        #expect(snap.trustedSystemLoad == 9.5)
+    }
+
+    @Test func v5CodableRoundTrip() throws {
+        var snap = BatterySnapshot(
+            timestamp: base, level: 55, isCharging: false, wattage: 11,
+            temperature: 30, screenOn: true, externalConnected: false
+        )
+        snap.apply(
+            minuteAggregate: MinuteAggregate(
+                windowStart: windowStart,
+                systemEnergyWh: 0.15,
+                systemPowerAverage: 9,
+                systemPowerPeak: 12.5,
+                systemCoverage: 1,
+                batteryChargeWh: 0,
+                batteryChargeSeconds: 0,
+                batteryDischargeWh: 0.15,
+                batteryDischargeSeconds: 60,
+                temperatureAverage: 29.5,
+                temperatureMaximum: 31,
+                temperatureCoverage: 1,
+                screenOnFraction: 1,
+                lowPowerModeFraction: 0,
+                maximumThermalStateLabel: "正常",
+                maximumThermalStateOrdinal: 0
+            ),
+            displayBrightness: 0.62,
+            brightnessAvailable: true,
+            brightnessReadAt: base
+        )
+        let decoded = try JSONDecoder().decode(BatterySnapshot.self, from: JSONEncoder().encode(snap))
+        #expect(decoded == snap)
+    }
+
+    @Test func remoteJSONV5RoundTripAndLegacyStaysNil() {
+        var snap = BatterySnapshot(
+            timestamp: base, level: 40, isCharging: false, wattage: 7,
+            temperature: 28, screenOn: true, externalConnected: false
+        )
+        snap.aggregateWindowStart = windowStart
+        snap.systemEnergyWh = 0.1
+        snap.systemCoverage = 1
+        snap.batteryDischargeWh = 0.1
+        snap.displayBrightness = nil
+        snap.brightnessAvailable = false
+
+        var dict = snap.toJSON()
+        let parsed = BatterySnapshot.from(remoteJSON: dict)!
+        #expect(parsed.aggregateWindowStart == windowStart)
+        #expect(parsed.systemEnergyWh == 0.1)
+        #expect(parsed.brightnessAvailable == false)
+
+        // 远端旧格式没有 v5 键 → 全部保持 nil，不推导
+        for key in ["aggWin", "sysEWh", "sysPAvg", "sysPPeak", "sysCov", "batChgWh",
+                    "batDisWh", "tAvg", "tMax", "tCov", "screenFrac", "lpmFrac",
+                    "thermalPeak", "bright", "brightOK", "brightAt"] {
+            dict.removeValue(forKey: key)
+        }
+        let legacy = BatterySnapshot.from(remoteJSON: dict)!
+        #expect(legacy.aggregateWindowStart == nil)
+        #expect(legacy.systemEnergyWh == nil)
+        #expect(legacy.systemCoverage == nil)
+        #expect(legacy.displayBrightness == nil)
+    }
+
+    /// 聚合写入按覆盖率门控：<0.8 不产生完整分钟指标；<0.5 温度趋势留空但覆盖率如实记录；
+    /// 显示器亮度只记录原始量，绝不制造瓦数。
+    @Test func aggregateApplyGatesByFrozenCoverageThresholds() {
+        func make(_ systemCoverage: Double, _ tempCoverage: Double) -> MinuteAggregate {
+            MinuteAggregate(
+                windowStart: windowStart,
+                systemEnergyWh: 0.1666,
+                systemPowerAverage: 10,
+                systemPowerPeak: 14,
+                systemCoverage: systemCoverage,
+                batteryChargeWh: 0.2,
+                batteryChargeSeconds: 30,
+                batteryDischargeWh: 0.05,
+                batteryDischargeSeconds: 20,
+                temperatureAverage: 30,
+                temperatureMaximum: 33,
+                temperatureCoverage: tempCoverage,
+                screenOnFraction: 1,
+                lowPowerModeFraction: 0,
+                maximumThermalStateLabel: "偏高",
+                maximumThermalStateOrdinal: 1
+            )
+        }
+
+        var sparse = BatterySnapshot(
+            timestamp: base, level: 50, isCharging: false, wattage: 3,
+            temperature: 30, screenOn: true, externalConnected: false
+        )
+        sparse.apply(
+            minuteAggregate: make(0.4, 0.3),
+            displayBrightness: nil, brightnessAvailable: false, brightnessReadAt: nil
+        )
+        #expect(sparse.systemEnergyWh == nil)
+        #expect(sparse.systemPowerAverage == nil)
+        #expect(sparse.systemPowerPeak == nil)
+        #expect(sparse.temperatureAverage == nil)
+        #expect(sparse.temperatureMaximum == nil)
+        #expect(sparse.systemCoverage == 0.4)
+        #expect(sparse.temperatureCoverage == 0.3)
+        // 能量分项（充/放）与离散份额不受系统覆盖率门控，如实记录
+        #expect(sparse.batteryChargeWh == 0.2)
+        #expect(sparse.batteryDischargeWh == 0.05)
+        #expect(sparse.screenOnFraction == 1)
+        #expect(sparse.maximumThermalState == "偏高")
+
+        var full = BatterySnapshot(
+            timestamp: base, level: 50, isCharging: false, wattage: 10,
+            temperature: 30, screenOn: true, externalConnected: false
+        )
+        full.apply(
+            minuteAggregate: make(1.0, 0.9),
+            displayBrightness: 0.5, brightnessAvailable: true, brightnessReadAt: base
+        )
+        #expect(full.systemEnergyWh == 0.1666)
+        #expect(full.systemPowerAverage == 10)
+        #expect(full.temperatureAverage == 30)
+        #expect(full.temperatureMaximum == 33)
+        #expect(full.displayBrightness == 0.5)
+        // 新快照不制造显示器瓦数
+        #expect(full.displayPower == 0)
+    }
+}
+
+/// 快照保留窗口：24 小时裁剪、未来异常点拒绝、硬上限。
+@Suite struct RetentionPolicyTests {    private func makeSnaps(_ agesHours: [Double], now: Date) -> [BatterySnapshot] {
         agesHours.map { BatterySnapshot(timestamp: now.addingTimeInterval($0 * 3600), level: 50, isCharging: false, wattage: 5, temperature: 0, screenOn: true) }
     }
 

@@ -158,7 +158,7 @@ struct PowerTab: View {
     private var dataSourceFootnote: some View {
         HStack(spacing: 4) {
             Image(systemName: "info.circle").font(.system(size: 10))
-            Text("系统负载优先来自 IORegistry 系统遥测，离电时以电池放出功率估算，接电无遥测时不显示。CPU/GPU 为 powermetrics 模型估算；显示器按亮度估算。")
+            Text("系统负载优先来自 IORegistry 系统遥测，离电时以电池放出功率估算，接电无遥测时不显示。CPU/GPU 为 powermetrics 模型估算；显示器只记录亮度，不换算瓦数。")
                 .font(.system(size: 10))
         }
         .foregroundStyle(.secondary)
@@ -250,13 +250,11 @@ private struct ComponentBreakdownCard: View {
                 if sampler.dramPower > 0 {
                     componentBar(label: "DRAM", value: sampler.dramPower, icon: "memorychip", color: .teal, measured: true)
                 }
-                if sampler.displayPower > 0 {
-                    componentBar(label: "显示器（估算）", value: sampler.displayPower, icon: "display", color: .orange, measured: false)
-                }
+                brightnessRow
                 stalenessNote
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle").font(.system(size: 9))
-                    Text("分项为模型估算，不能相加当作整机精密功率计").font(.system(size: 10))
+                    Text("分项为模型估算，不能相加当作整机精密功率计；系统总负载本身已包含显示器影响").font(.system(size: 10))
                 }
                 .foregroundStyle(.tertiary)
             } else {
@@ -274,6 +272,31 @@ private struct ComponentBreakdownCard: View {
             }
         }
         .glassCard(accent: .bbPurple)
+    }
+
+    /// 显示器只展示可核对的原始亮度，不制造瓦数：
+    /// 没有机型标定、HDR、内容与刷新率信息，亮度换算瓦数不可信。
+    private var brightnessRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "display")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.orange)
+                .frame(width: 18)
+            Text("亮度")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: 88, alignment: .leading)
+            Text(brightnessText)
+                .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
+            Spacer()
+        }
+    }
+
+    private var brightnessText: String {
+        guard sampler.brightnessMetric.availability == .available, let value = sampler.brightnessMetric.value else {
+            return "不可读取"
+        }
+        return String(format: "%.0f%%", value * 100)
     }
 
     @ViewBuilder
@@ -336,6 +359,11 @@ private struct PowerDiagnosticsSection: View {
                     diagRow("充电协议", sampler.currentInfo?.adapterProtocol ?? "—")
                     diagRow("低电量模式", sampler.currentLowPowerModeEnabled ? "已开启" : "关闭")
                     diagRow("系统热压力", sampler.currentThermalState)
+                    Divider().opacity(0.4)
+                    qualityHeader
+                    qualityRow("系统负载", metric: sampler.loadMetric, valueText: loadQualityValue)
+                    qualityRow("电池功率", metric: sampler.batteryPowerMetric, valueText: batteryPowerQualityValue)
+                    qualityRow("电池温度", metric: sampler.temperatureMetric, valueText: temperatureQualityValue)
                 }
                 .padding(.top, 6)
             } label: {
@@ -343,6 +371,67 @@ private struct PowerDiagnosticsSection: View {
             }
         }
         .glassCard(accent: .bbTeal)
+    }
+
+    // MARK: 数据质量语义（来源 / 可用性 / 是否估算 / 读取于 / 数值持续）
+
+    private var qualityHeader: some View {
+        Text("数据质量").font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+    }
+
+    private var loadQualityValue: String {
+        guard sampler.loadMetric.availability == .available, let v = sampler.loadMetric.value else { return "—" }
+        return String(format: "%.1f W", v)
+    }
+
+    private var batteryPowerQualityValue: String {
+        guard sampler.batteryPowerMetric.availability == .available, let v = sampler.batteryPowerMetric.value else { return "—" }
+        return String(format: "%.1f W", v)
+    }
+
+    private var temperatureQualityValue: String {
+        guard sampler.temperatureMetric.availability == .available, let v = sampler.temperatureMetric.value else { return "—" }
+        return String(format: "%.1f °C", v)
+    }
+
+    private func qualityRow(_ label: String, metric: TelemetrySample<Double>, valueText: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(label).font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Text(valueText)
+                    .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
+            }
+            HStack(spacing: 6) {
+                qualityTag(metric.source.displayName, tint: .bbTeal)
+                if metric.availability == .available {
+                    qualityTag(metric.isEstimated ? "估算" : "实测", tint: metric.isEstimated ? .orange : .bbMint)
+                } else {
+                    qualityTag("不可用", tint: .secondary)
+                }
+                Spacer()
+                Text(qualityTimingText(metric))
+                    .font(.system(size: 8.5, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func qualityTag(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 5).padding(.vertical, 1.5)
+            .background(tint.opacity(0.1), in: Capsule())
+    }
+
+    /// 「读取于」是 App 完成读取的时刻；「数值持续」只表示 App 观察到
+    /// 当前归一化值未再变化，不代表传感器多久没有更新。
+    private func qualityTimingText(_ metric: TelemetrySample<Double>) -> String {
+        guard metric.readAt != .distantPast else { return "" }
+        let stableSeconds = Int(metric.stableFor(asOf: Date()))
+        let stable = stableSeconds < 60 ? "\(stableSeconds)s" : "\(stableSeconds / 60)m"
+        return "读取于 \(metric.readAt, format: .dateTime.hour().minute().second()) · 持续 \(stable)"
     }
 
     private var adapterWattsText: String {

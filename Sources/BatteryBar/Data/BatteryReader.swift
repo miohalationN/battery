@@ -28,6 +28,38 @@ final class BatteryReader: @unchecked Sendable {
     struct BatteryReading {
         let powerSource: PowerSourceInfo
         let batteryInfo: BatteryInfo?
+        /// 各字段的真实来源（provenance）
+        let provenance: ReadingProvenance
+        /// App 实际完成本轮读取的时刻。IORegistry/IOPS 不提供硬件时间戳，
+        /// 这是唯一可信的「读取于」口径。
+        let readAt: Date
+
+        /// 可信系统负载（与 BatterySnapshot.trustedSystemLoad 同一冻结规则）：
+        /// 实测遥测独立可信；估算负载只在明确离电时可信。
+        var trustedSystemLoad: Double? {
+            guard let info = batteryInfo, info.systemPowerAvailable, info.systemPower > 0 else { return nil }
+            if !info.systemPowerIsEstimated { return info.systemPower }
+            return info.externalConnected == false ? info.systemPower : nil
+        }
+
+        /// 电池功率方向通道。externalConnected 在实时读取中总是已知
+        /// （IORegistry 缺失时回退 IOPS），未知仅发生在 info 整体不可用。
+        var batteryChannel: WindowTelemetryAggregator.BatteryChannel {
+            guard let info = batteryInfo else { return .unknown }
+            return info.externalConnected ? .charge(info.batteryPower) : .discharge(info.batteryPower)
+        }
+    }
+
+    /// 一轮读取中关键字段的来源标注。IORegistry 没有硬件时间戳，
+    /// 因此这里没有 sourceSampleAt 字段——App 读取时间不得冒充传感器时间。
+    struct ReadingProvenance: Equatable {
+        var systemLoadSource: TelemetrySource = .unavailable
+        var systemLoadIsEstimated: Bool = true
+        var batteryPowerSource: TelemetrySource = .unavailable
+        /// 温度来源；nil 表示本轮温度不可读
+        var temperatureSource: TelemetrySource?
+
+        static let empty = ReadingProvenance()
     }
 
     /// 静态信息缓存：机器型号、电池序列号、制造商等几乎不变的字段。
@@ -124,21 +156,28 @@ final class BatteryReader: @unchecked Sendable {
         return PowerSourceInfo(level: level, isCharging: isCharging, isPluggedIn: isPluggedIn, timeRemaining: timeRemaining, capacity: capacity)
     }
 
+    /// 返回 nil 表示本轮 IOPS 读取失败：调用方必须保留上次状态，
+    /// 不能把失败合成为 0%/离电污染插拔状态机。
     func readBatteryReading() -> BatteryReading? {
+        let readAt = Date()
         guard let powerSource = readPowerSource() else { return nil }
+        let (info, provenance) = readBatteryInfoWithProvenance(powerSource: powerSource)
         return BatteryReading(
             powerSource: powerSource,
-            batteryInfo: readBatteryInfo(powerSource: powerSource)
+            batteryInfo: info,
+            provenance: info == nil ? .empty : provenance,
+            readAt: readAt
         )
     }
 
     func readBatteryInfo() -> BatteryInfo? {
-        readBatteryInfo(powerSource: readPowerSource())
+        readBatteryInfoWithProvenance(powerSource: readPowerSource()).info
     }
 
-    private func readBatteryInfo(powerSource: PowerSourceInfo?) -> BatteryInfo? {
+    private func readBatteryInfoWithProvenance(powerSource: PowerSourceInfo?) -> (info: BatteryInfo?, provenance: ReadingProvenance) {
+        var provenance = ReadingProvenance.empty
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-        guard service != 0 else { return nil }
+        guard service != 0 else { return (nil, .empty) }
         defer { IOObjectRelease(service) }
 
         // macOS 27+：顶层 DesignCapacity 已移除，改放到 BatteryData 嵌套字典里
@@ -200,13 +239,27 @@ final class BatteryReader: @unchecked Sendable {
         let amperage = amperageCandidates.first(where: {
             $0.isFinite && abs($0) <= 30_000
         }).map(Self.normalizedBatteryCurrent) ?? 0
-        let temperature = Self.firstValidDouble([
+        // 温度来源必须如实区分 SmartBattery 与 Pack 节点；IORegistry 无硬件时间戳，
+        // sourceSampleAt 恒为 nil（质量模型层面强制）。
+        var temperature: Double = 0
+        let smartBatteryTemperatureCandidates: [Double?] = [
             readDouble(service, "Temperature"),
             dictionaryDouble(batteryData, key: "Temperature"),
-            readDouble(packService, "Temperature"),
-            dictionaryDouble(packBatteryData, key: "Temperature"),
-            dictionaryDouble(packBatteryData, key: "VirtualTemperature"),
-        ], normalize: Self.normalizedBatteryTemperature)
+        ]
+        if let value = Self.firstValidValue(smartBatteryTemperatureCandidates, normalize: Self.normalizedBatteryTemperature) {
+            temperature = value
+            provenance.temperatureSource = .smartBatteryTemperature
+        } else {
+            let packCandidates: [Double?] = [
+                readDouble(packService, "Temperature"),
+                dictionaryDouble(packBatteryData, key: "Temperature"),
+                dictionaryDouble(packBatteryData, key: "VirtualTemperature"),
+            ]
+            if let value = Self.firstValidValue(packCandidates, normalize: Self.normalizedBatteryTemperature) {
+                temperature = value
+                provenance.temperatureSource = .smartBatteryPackTemperature
+            }
+        }
         // IORegistry 顶层字段名实测：Serial / DeviceName（不是 SerialNumber / DeviceName）
         // DeviceName 是电池管理芯片型号（如 bq20z451），不是机器型号
         let batteryChipName = readString(service, "DeviceName") ?? ""
@@ -235,6 +288,7 @@ final class BatteryReader: @unchecked Sendable {
 
         // 优先使用电源遥测/电池控制器直接给出的 BatteryPower（mW）。电压×瞬时电流
         // 只作最后兜底：瞬时电流在满电维持阶段抖动明显，不能替代控制器功率口径。
+        // 来源必须如实标注，供质量模型与功耗诊断区分。
         let directBatteryPower = Self.firstValidDouble([
             dictionaryDouble(telemetryData, key: "BatteryPower"),
             dictionaryDouble(batteryData, key: "BatteryPower"),
@@ -242,6 +296,11 @@ final class BatteryReader: @unchecked Sendable {
         ], normalize: Self.normalizedBatteryPower)
         let calculatedBatteryPower = abs(voltage * amperage) / 1_000_000
         let batteryPower = directBatteryPower > 0 ? directBatteryPower : calculatedBatteryPower
+        if directBatteryPower > 0 {
+            provenance.batteryPowerSource = .batteryPowerTelemetry
+        } else if batteryPower > 0 {
+            provenance.batteryPowerSource = .voltageCurrentDerived
+        }
 
         // Apple Silicon 的 PowerTelemetryData 提供系统负载与适配器输入功率，单位 mW。
         // 旧实现把 batteryPower（充电时只是电池包净流入功率）标成“系统总功耗”，
@@ -264,44 +323,55 @@ final class BatteryReader: @unchecked Sendable {
             systemPower = telemetrySystemLoad
             systemPowerAvailable = true
             systemPowerIsEstimated = false
+            provenance.systemLoadSource = .telemetrySystemLoad
+            provenance.systemLoadIsEstimated = false
         } else if legacySystemPower > 0 {
             systemPower = legacySystemPower
             systemPowerAvailable = true
             systemPowerIsEstimated = false
+            provenance.systemLoadSource = .batteryDataSystemPower
+            provenance.systemLoadIsEstimated = false
         } else if !externalConnected {
             // 离电时，电池包输出功率可作为整机负载的近似值（含转换损耗）。
             systemPower = batteryPower
             systemPowerAvailable = batteryPower > 0
             systemPowerIsEstimated = true
+            provenance.systemLoadSource = provenance.batteryPowerSource == .voltageCurrentDerived
+                ? .voltageCurrentDerived
+                : .batteryPowerTelemetry
         } else {
             // 接电时不能用电池充电功率代替整机负载；宁可明确不可用，也不显示假精度。
             systemPower = 0
             systemPowerAvailable = false
             systemPowerIsEstimated = false
+            provenance.systemLoadSource = .unavailable
         }
 
         let adapter = cachedAdapterInfo(isConnected: externalConnected)
 
-        return BatteryInfo(
-            designCapacity: designCap,
-            maxCapacity: actualMaxCap,
-            cycleCount: cycles,
-            serialNumber: serial,
-            manufacturer: mfg,
-            voltage: voltage,
-            instantAmperage: amperage,
-            temperature: temperature,
-            isCharging: isCharging,
-            externalConnected: externalConnected,
-            systemPower: systemPower,
-            batteryPower: batteryPower,
-            adapterInputPower: telemetryInputPower,
-            systemPowerAvailable: systemPowerAvailable,
-            systemPowerIsEstimated: systemPowerIsEstimated,
-            deviceName: deviceName,
-            chemistry: "Li-ion",
-            adapterWatts: adapter.watts,
-            adapterProtocol: adapter.protocolName
+        return (
+            BatteryInfo(
+                designCapacity: designCap,
+                maxCapacity: actualMaxCap,
+                cycleCount: cycles,
+                serialNumber: serial,
+                manufacturer: mfg,
+                voltage: voltage,
+                instantAmperage: amperage,
+                temperature: temperature,
+                isCharging: isCharging,
+                externalConnected: externalConnected,
+                systemPower: systemPower,
+                batteryPower: batteryPower,
+                adapterInputPower: telemetryInputPower,
+                systemPowerAvailable: systemPowerAvailable,
+                systemPowerIsEstimated: systemPowerIsEstimated,
+                deviceName: deviceName,
+                chemistry: "Li-ion",
+                adapterWatts: adapter.watts,
+                adapterProtocol: adapter.protocolName
+            ),
+            provenance
         )
     }
 
@@ -380,6 +450,18 @@ final class BatteryReader: @unchecked Sendable {
             if value > 0 { return value }
         }
         return 0
+    }
+
+    /// 与 firstValidDouble 相同的候选顺序，但返回首个有效值本身（可能为 0 合法值由调用方处理）。
+    private static func firstValidValue(
+        _ candidates: [Double?],
+        normalize: (Double?) -> Double
+    ) -> Double? {
+        for raw in candidates {
+            let value = normalize(raw)
+            if value > 0 { return value }
+        }
+        return nil
     }
 
     // MARK: - system_profiler fallback
@@ -673,30 +755,26 @@ final class BatteryReader: @unchecked Sendable {
         return raw
     }
 
-    /// 估算屏幕功耗 (W)
-    ///
-    /// 屏幕功耗无法直接从 IORegistry 读取（需要 IOReport framework，过于复杂），
-    /// 这里采用估算方式：基础功耗 + 亮度系数。
-    /// 参考 Apple Silicon MacBook 实测：
-    ///   - MacBook Air (13"): 基础 1.5W + 亮度系数 (0-100% ≈ 0-2.5W)
-    ///   - MacBook Pro (14"): 基础 2.0W + 亮度系数 (0-100% ≈ 0-3.0W)
-    ///   - MacBook Pro (16"): 基础 2.5W + 亮度系数 (0-100% ≈ 0-4.0W)
-    /// 此处采用通用简化模型：基础 1.5W + 亮度 × 2.5W。
-    func estimateDisplayPower(screenOn: Bool = true) -> Double {
-        guard screenOn else { return 0 }
-        var brightness: Float = 0
+    /// 主显示器亮度读取结果。brightness 为 nil 表示不可读取——
+    /// 不得用任何默认亮度或瓦数模型填补。
+    struct DisplayBrightnessReading {
+        /// 归一化亮度 0...1；nil = 接口失败或数值越界（坏数据直接拒绝，不夹取）
+        let brightness: Double?
+        let readAt: Date
+    }
 
-        // 通过 IOKit 读取主显示器亮度 (0.0-1.0)
-        // kIODisplayBrightnessKey = "brightness"
+    /// 读取主显示器亮度（0...1）。没有机型标定、HDR、内容与刷新率信息，
+    /// 亮度不能换算成可信瓦数，因此只记录原始量本身。
+    func readDisplayBrightness() -> DisplayBrightnessReading {
+        let readAt = Date()
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"))
-        guard service != 0 else { return 0 }
+        guard service != 0 else { return DisplayBrightnessReading(brightness: nil, readAt: readAt) }
         defer { IOObjectRelease(service) }
+        var brightness: Float = 0
         guard IODisplayGetFloatParameter(service, 0, "brightness" as CFString, &brightness) == kIOReturnSuccess,
-              brightness.isFinite, brightness >= 0, brightness <= 1 else { return 0 }
-
-        let basePower = 1.5
-        let brightnessPower = Double(brightness) * 2.5
-        return basePower + brightnessPower
+              brightness.isFinite, brightness >= 0, brightness <= 1
+        else { return DisplayBrightnessReading(brightness: nil, readAt: readAt) }
+        return DisplayBrightnessReading(brightness: Double(brightness), readAt: readAt)
     }
 
     // 健康度缓存：用 NSLock 保护，避免数据竞争
