@@ -335,3 +335,64 @@ gate 为真实校验（红色必然代表必需取证不可读）。Build workfl
   WebDAV 请求或修改历史内容。限制：锁屏导致本轮无法做最终 UI 点击/截图验收；GitHub 已
   证明视图完整编译，运行进程与数据通路正常。不同机型/系统的底层出数周期仍可能不同，
   应用只显示驱动真实发布值，不插值、不制造“每秒新数据”。
+
+## 十四、1.4.0 数据、安全与资源专项（2026-08-24）
+
+### 14.1 采集、数据解释与资源边界
+
+- 基线 `e3410a9`；主体实现 `a8a9afe`，链接/签名修复 `04b0663`、`e332ede`，遗留 Helper
+  只读提示补丁 `2d3e87c`。每轮基础读取合并为一个 `BatteryReading`，同一份 IOPS 状态与
+  IORegistry 电池数据共同消费；三个大型嵌套字典每轮各复制一次，消除重复跨 IOKit 分配和
+  插拔边界前后两次读数不一致。启动健康度优先用控制器容量，仅缺失时才后台运行
+  `system_profiler`。
+- 温度继续从 SmartBattery/Pack 多源归一化并已在总览、弹窗、功耗诊断显示；分钟快照 v4
+  新增低电量模式与系统热压力，旧 v1–v3 仍无损兼容。显示器估算在屏幕关闭、亮度接口失败
+  或越界时明确不可用（写 0），不再默认伪造 70% 亮度。关闭高级采样或 sampler 后，迟到
+  XPC 结果不会重新污染已清零状态。
+- 离电长期趋势最多绘制 240 个保极值点，完整样本仍用于统计；运行时 App 图标只解码 256px
+  缩略图，Finder/Dock 继续使用完整 ICNS。实机完整窗口 footprint 约 47MB（上一版同口径曾
+  约 80–81MB），RSS 稳定约 19MB；10 秒 sample 主线程 8561/8571（99.88%）处于
+  `mach_msg` 等待，无持续 body/layout/Chart 栈，CPU 0.0%。`leaks` 为 19.8KB 系统框架级
+  小对象，与此前基线相同量级。
+
+### 14.2 WebDAV 与凭据安全
+
+- 同步下载/目录列表使用临时文件后限长读取，压缩数据另设 6MiB 解压上限；设备、文件、
+  快照和离电记录均有硬上限。畸形 XML/JSON、非 404 下载错误、目录列举失败一律使本轮失败，
+  不会把“读失败”当远端空文件并上传覆盖；404 仍允许首次上传。同步成功返回前，dirty 清除
+  与远端合并已同步落盘。
+- 离电记录改为每设备独立文件，旧共享文件只读，消除多设备最后写入覆盖。Keychain 身份从
+  单用户名改为规范化 origin+用户名，更新使用 `SecItemUpdate`，旧凭据只允许设置页首次载入
+  既有配置时一次性迁移，不会随服务器地址变化带到另一源站。设备目录改用应用随机 UUID；
+  旧硬件 Platform UUID 自动轮换但旧目录仍可下载。
+
+### 14.3 Helper 提权边界
+
+- Helper 5.0 同时校验调用方 bundle id 与安装时绑定的主程序 CDHash；Release 完全移除
+  `BATTERYBAR_HELPER_PATH` 覆盖。安装 payload 必须位于已严格验签 App Resources 内，解析
+  符号链接后仍在该目录；AppleScript 只通过 argv 和 `quoted form of` 传值，launchd plist
+  由提权 shell 直接写最终路径，消除命令注入与临时 plist TOCTOU。
+- 新 launchd job 只有 MachServices，不含 RunAtLoad/KeepAlive；powermetrics 空闲 60 秒停止，
+  Helper 自身空闲 120 秒退出并由下次 XPC 按需拉起。关闭高级采样时仅比较系统/内嵌 Helper
+  的签名 CDHash 来显示过期提示，不连接 XPC、不启动服务。
+- 当前系统仍保留旧 4.2 Helper 与旧 KeepAlive job（PID 824，CPU 0.0%），本轮没有管理员授权，
+  因而未擅自替换或卸载；高级采样开关保持 false、零 powermetrics。用户在功耗页再次主动
+  开启并完成一次管理员授权后，才会安全替换为 5.0。这是当前唯一需用户参与的安全收尾。
+
+### 14.4 Gate、安装与外部状态
+
+- 最终代码 Build run [32679114508](https://github.com/miohalationN/battery/actions/runs/32679114508)
+  success：114 tests / 16 suites，完整 SwiftUI 编译、Release App/Helper、严格签名、Release
+  调试入口泄漏检查及 artifact 上传均通过。前一代码提交 UI Profile run
+  [32628564782](https://github.com/miohalationN/battery/actions/runs/32628564782) success：两页
+  Animation Hitches 各 51 schema、SwiftUI 各 25 schema；最终增量仅增加非视图磁盘签名比较。
+- 已安装最终 GitHub artifact 至 `/Users/mio/Applications/BatteryBar.app`，版本 1.4.0 (5)；
+  主二进制 SHA-256 `c51ab56bac8ac1036fd88704b34765d869ef6640859d33c6cf76b785587a4cc2`，
+  bundled Helper `dbbe0e713317f1bdaa0da60632a70e16aa69589769030d848f26f556a1707763`，
+  均与 artifact 一致且严格验签。原 1.3.0 位于
+  `/Users/mio/.Trash/BatteryBar-pre-1.4.0-d6793c.app`；安装前数据备份位于
+  `/Users/mio/Library/Application Support/BatteryBar-backup-pre-1.4.0-20260824`。
+- 新快照实机写入 temperature 33.09°C、system load 13.715W、battery power 1.712W、
+  externalConnected=true、lowPowerMode=false、thermal=正常；一分钟窗口 journal inode
+  `21822045` 不变且行数 1185→1186，保持纯追加。未启用 WebDAV、未发真实同步请求、未修改
+  历史内容；除 GitHub Actions、App 替换与上述可恢复备份外未触碰外部/生产系统。
