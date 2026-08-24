@@ -236,6 +236,9 @@ import Testing
             ))
         }
         input.minuteAggregates = longAggregates
+        // 功率证据的满充能量口径：5000mAh × 12V = 60Wh
+        input.fullChargeCapacityMah = 5000
+        input.voltageMV = 12_000
 
         // 自诊断：先确认两路内部证据都在（若缺席，消息携带现场数据）
         let power = try #require(

@@ -59,6 +59,8 @@ final class LoginItemState {
 
     init(controller: any LoginItemControlling = SystemLoginItemController()) {
         self.controller = controller
+        // 初始状态必须与真实系统注册状态一致，不替用户开启
+        status = controller.currentStatus()
     }
 
     var isOn: Bool { status == .enabled }
