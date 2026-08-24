@@ -33,6 +33,16 @@ swiftc -typecheck -swift-version 6 \
     $NON_VIEW_SOURCES $APP_BRAND \
     "$STRIPPED_DIR"/*.swift
 
+echo "== 2b/3 Release 级编译（WMO 触发 SIL 独占访问等诊断，与 CI 同口径） =="
+mkdir -p .build/gate-obj && rm -f .build/gate-obj/*.o
+# shellcheck disable=SC2086
+swiftc -emit-object -O -whole-module-optimization -swift-version 6 \
+    -F "$CLT_FRAMEWORKS" \
+    $( [ -f "$CLT_TESTING_PLUGIN" ] && echo "-load-plugin-library $CLT_TESTING_PLUGIN" ) \
+    $NON_VIEW_SOURCES $APP_BRAND \
+    "$STRIPPED_DIR"/*.swift \
+    -o .build/gate-obj/gate-nonview-O.o
+
 echo "== 3/3 Helper build（不安装） =="
 swift build --target BatteryBarHelper
 

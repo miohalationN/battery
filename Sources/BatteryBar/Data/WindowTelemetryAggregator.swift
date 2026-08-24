@@ -198,7 +198,12 @@ struct WindowTelemetryAggregator {
 
     /// 从流中取出 [attributedTo, min(end, 有效期)) ∩ 当前窗口 的区间并推进游标；
     /// 样本到期后置空。返回 (值, 有效秒数)。
-    private mutating func consume(_ stream: inout HoldStream, until end: Date) -> (value: Double, seconds: TimeInterval)? {
+    /// static：避免「mutating 方法接收者 self 与 inout 属性重叠」的独占访问冲突。
+    private static func consume(
+        _ stream: inout HoldStream,
+        until end: Date,
+        windowStart: Date?
+    ) -> (value: Double, seconds: TimeInterval)? {
         guard let value = stream.value else { return nil }
         let upper = min(end, stream.validUntil)
         let lower = max(stream.attributedTo, stream.validFrom, windowStart ?? .distantPast)
@@ -211,20 +216,21 @@ struct WindowTelemetryAggregator {
     }
 
     private mutating func integrateContinuous(until end: Date) {
-        if let s = consume(&systemStream, until: end) {
+        let start = windowStart ?? .distantPast
+        if let s = Self.consume(&systemStream, until: end, windowStart: start) {
             systemSeconds += s.seconds
             systemEnergyWh += s.value * s.seconds / 3600
             systemPeak = max(systemPeak, s.value)
         }
-        if let s = consume(&chargeStream, until: end) {
+        if let s = Self.consume(&chargeStream, until: end, windowStart: start) {
             chargeSeconds += s.seconds
             chargeWh += s.value * s.seconds / 3600
         }
-        if let s = consume(&dischargeStream, until: end) {
+        if let s = Self.consume(&dischargeStream, until: end, windowStart: start) {
             dischargeSeconds += s.seconds
             dischargeWh += s.value * s.seconds / 3600
         }
-        if let s = consume(&temperatureStream, until: end) {
+        if let s = Self.consume(&temperatureStream, until: end, windowStart: start) {
             temperatureSeconds += s.seconds
             temperatureWeightedSum += s.value * s.seconds
             temperatureMax = max(temperatureMax ?? s.value, s.value)
