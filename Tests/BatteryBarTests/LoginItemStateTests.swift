@@ -12,6 +12,11 @@ import Testing
         var unregisterError: Error?
         private let lock = NSLock()
         private var lockStatus: LoginItemStatus = .notRegistered
+        private var _approvalSettingsOpened = false
+        var approvalSettingsOpened: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return _approvalSettingsOpened
+        }
 
         func currentStatus() -> LoginItemStatus {
             lock.lock(); defer { lock.unlock() }
@@ -25,7 +30,10 @@ import Testing
             if let error = unregisterError { throw error }
             setLocked(.notRegistered)
         }
-        func openApprovalSettings() {}
+        func openApprovalSettings() {
+            lock.lock(); defer { lock.unlock() }
+            _approvalSettingsOpened = true
+        }
 
         private func setLocked(_ value: LoginItemStatus) {
             lock.lock(); defer { lock.unlock() }
@@ -79,6 +87,40 @@ import Testing
         #expect(model.statusSubtitle.contains("系统设置"))
     }
 
+    /// .notFound（BTM 无记录，首次安装未注册）：不得当作永久不支持——
+    /// 展示为「关闭（尚未注册）」、开关可操作，用户开启时调用 register
+    @MainActor
+    @Test func notFoundIsTreatableAsUnregistered() {
+        let (model, _) = makeModel(status: .notFound)
+        #expect(!model.isOn)
+        #expect(!model.needsApproval)
+        #expect(model.statusSubtitle.contains("关闭"))
+        #expect(!model.statusSubtitle.contains("不可用"))
+        #expect(model.statusSubtitle.contains("尚未注册"))
+    }
+
+    /// .notFound → 用户开启：register 成功即转为 enabled
+    @MainActor
+    @Test func notFoundCanRegisterAndBecomeEnabled() {
+        let (model, _) = makeModel(status: .notFound)
+        let error = model.setEnabled(true)
+        #expect(error == nil)
+        #expect(model.isOn)
+        #expect(model.status == .enabled)
+    }
+
+    /// .notFound 注册失败：返回可理解错误并恢复真实状态（仍是未注册）
+    @MainActor
+    @Test func notFoundRegisterFailureRestoresRealStatus() {
+        struct Boom: Error {}
+        let (model, _) = makeModel(status: .notFound, registerError: Boom())
+        let message = model.setEnabled(true)
+        #expect(message?.contains("开启") == true)
+        #expect(message?.contains("失败") == true)
+        #expect(model.status == .notFound)
+        #expect(!model.isOn)
+    }
+
     /// 注册失败：开关动作返回错误文案，状态恢复为真实系统状态
     @MainActor
     @Test func registerFailureRestoresRealStatusAndReports() {
@@ -109,5 +151,13 @@ import Testing
         controller.setStatus(.requiresApproval)
         model.refresh()
         #expect(model.needsApproval)
+    }
+
+    /// openApprovalSettings 转发到控制器（系统设置登录项面板）
+    @MainActor
+    @Test func openApprovalSettingsForwardsToController() {
+        let (model, controller) = makeModel(status: .requiresApproval)
+        model.openApprovalSettings()
+        #expect(controller.approvalSettingsOpened)
     }
 }

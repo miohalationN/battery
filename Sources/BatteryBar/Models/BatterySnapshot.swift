@@ -324,8 +324,8 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         snap.batteryChargeWh = remoteFinite(dict["batChgWh"], in: 0...20)
         snap.batteryDischargeWh = remoteFinite(dict["batDisWh"], in: 0...20)
         var temperatureAverage = remoteFinite(dict["tAvg"], in: -20...100)
-        let temperatureMaximum = remoteFinite(dict["tMax"], in: -20...100)
-        let temperatureCoverage = remoteUnitInterval(dict["tCov"])
+        var temperatureMaximum = remoteFinite(dict["tMax"], in: -20...100)
+        var temperatureCoverage = remoteUnitInterval(dict["tCov"])
         snap.screenOnFraction = remoteUnitInterval(dict["screenFrac"])
         snap.lowPowerModeFraction = remoteUnitInterval(dict["lpmFrac"])
         if let thermalPeak = dict["thermalPeak"] as? String,
@@ -355,8 +355,8 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
             snap.batteryChargeWh = nil
             snap.batteryDischargeWh = nil
             temperatureAverage = nil
-            snap.temperatureMaximum = nil
-            snap.temperatureCoverage = nil
+            temperatureMaximum = nil
+            temperatureCoverage = nil
             snap.screenOnFraction = nil
             snap.lowPowerModeFraction = nil
             snap.maximumThermalState = nil

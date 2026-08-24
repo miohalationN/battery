@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import AppKit
 import ServiceManagement
 
 /// SMAppService 登录项状态。requiresApproval 表示已请求但用户尚未在
@@ -40,11 +39,10 @@ struct SystemLoginItemController: LoginItemControlling {
         try SMAppService.mainApp.unregister()
     }
 
-    /// 打开系统设置的登录项面板，供 requiresApproval 用户完成允许操作
+    /// 打开系统设置的登录项面板（requiresApproval 时引导用户允许）。
+    /// 优先使用官方 API；回退到 Login Items 设置扩展 URL。
     func openApprovalSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
-            NSWorkspace.shared.open(url)
-        }
+        SMAppService.openSystemSettingsLoginItems()
     }
 }
 
@@ -72,7 +70,9 @@ final class LoginItemState {
         case .enabled: "已在登录项中启用"
         case .notRegistered: "关闭"
         case .requiresApproval: "需要在系统设置中允许"
-        case .notFound: "当前环境不可用"
+        // .notFound（BTM 无记录）不等于永久不支持：首次安装未注册即此状态，
+        // 展示为未注册并允许用户开启；不要把它当环境错误禁用开关。
+        case .notFound: "关闭（尚未注册）"
         }
     }
 

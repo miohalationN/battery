@@ -99,4 +99,61 @@ import Foundation
         #expect(model.summary.avgBatteryWatts > 24 && model.summary.avgBatteryWatts < 26)
         #expect(model.isCharging)
     }
+
+    /// 接电时段对用户称「本次接电」，不无条件称「本次充电」。
+    @Test func currentChargeCardTitleIsPluggedSession() {
+        let model = UsageSessionModel()
+        model.reload(snapshots: [], kind: .currentCharge)
+        #expect(model.cardTitle.contains("本次接电"))
+        #expect(!model.cardTitle.contains("本次充电"))
+    }
+
+    /// 展示模型反例：ext=true、100→97（接电时段电量下降）→ 中性「电量变化 -3%」，
+    /// 不得绿色高亮、不得出现「已充入 -3%」。
+    @Test func pluggedSessionNegativeDeltaShowsNeutralDisplay() {
+        // 时段内电量从 100 降到 97（例如接电但高负载）
+        var snaps: [BatterySnapshot] = []
+        for i in 0..<4 { snaps.append(snap(Double(i), level: 100 - Double(i), ext: true, batteryPower: 20)) }
+        let model = UsageSessionModel()
+        model.reload(snapshots: snaps, kind: .currentCharge)
+
+        #expect(model.summary.startLevel == 100)
+        #expect(model.summary.endLevel == 97)
+        #expect(abs(model.summary.deltaPercent - (-3)) < 0.001)
+
+        let display = UsageSessionModel.chargeDeltaDisplay(deltaPercent: model.summary.deltaPercent)
+        #expect(display.label == "电量变化")
+        #expect(display.text == "-3%")
+        #expect(!display.isGain)
+
+        // 视图不再渲染「已充入 -3%」：label 与「已充入」完全不同
+        #expect(display.label != "已充入")
+    }
+
+    /// 正增长 → 「电量增加 +N%」；零增长 → 中性「电量变化 0%」。
+    @Test func chargeDeltaDisplaySemantics() {
+        let gain = UsageSessionModel.chargeDeltaDisplay(deltaPercent: 5)
+        #expect(gain.label == "电量增加")
+        #expect(gain.text == "+5%")
+        #expect(gain.isGain)
+
+        let zero = UsageSessionModel.chargeDeltaDisplay(deltaPercent: 0)
+        #expect(zero.label == "电量变化")
+        #expect(zero.text == "0%")
+        #expect(!zero.isGain)
+
+        let negative = UsageSessionModel.chargeDeltaDisplay(deltaPercent: -3)
+        #expect(negative.label == "电量变化")
+        #expect(negative.text == "-3%")
+        #expect(!negative.isGain)
+    }
+
+    /// lastCharge 门槛不变：100→100（0% 增长）仍禁止出摘要。
+    @Test func lastChargeThresholdUnchangedStillRejectsFlatSession() {
+        var flat: [BatterySnapshot] = []
+        for i in 0..<120 { flat.append(snap(Double(i), level: 100, ext: true, batteryPower: 2)) }
+        let model = UsageSessionModel()
+        model.reload(snapshots: flat, kind: .lastCharge)
+        #expect(model.points.isEmpty)
+    }
 }

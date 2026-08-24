@@ -483,9 +483,17 @@ private struct SessionTrendCard: View {
             )
             if let first = model.points.first, let last = model.points.last {
                 let delta = last.level - first.level
-                Text(String(format: "%@%.0f%%", delta > 0 ? "+" : "", delta))
-                    .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(delta >= 0 ? Color.bbMint : Color.secondary)
+                if model.kind == .currentCharge {
+                    // 接电时段：正增长才高亮，零/负增长中性（不得绿色显示 0/-N%）
+                    let display = UsageSessionModel.chargeDeltaDisplay(deltaPercent: delta)
+                    Text(display.text)
+                        .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(display.isGain ? Color.bbMint : Color.secondary)
+                } else {
+                    Text(String(format: "%@%.0f%%", delta > 0 ? "+" : "", delta))
+                        .font(.system(size: 9, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(delta > 0 ? Color.bbMint : Color.secondary)
+                }
             }
             Spacer()
             Text("拖动曲线查看时点")
@@ -497,7 +505,12 @@ private struct SessionTrendCard: View {
     private var summaryRow: some View {
         let s = model.summary
         return HStack(spacing: 16) {
-            miniStat(model.isCharging ? "已充入" : "已耗电", value: String(format: "%.0f%%", s.deltaPercent), highlight: true)
+            if model.kind == .currentCharge {
+                let display = UsageSessionModel.chargeDeltaDisplay(deltaPercent: s.deltaPercent)
+                miniStat(display.label, value: display.text, highlight: display.isGain)
+            } else {
+                miniStat(model.isCharging ? "已充入" : "已耗电", value: String(format: "%.0f%%", s.deltaPercent), highlight: true)
+            }
             Spacer()
             miniStat("平均电池功率", value: String(format: "%.1fW", s.avgBatteryWatts))
             miniStat("起始", value: "\(Int(s.startLevel))%")

@@ -300,47 +300,23 @@ final class BatteryReader: @unchecked Sendable {
         }
 
         // 电池包功率必须区分「可信的有效 0W」与「没有读到功率」，不得用普通
-        // Double=0 同时表达两者：
-        // - 遥测节点存在且原始值恰为 0 → 可信的有效零瓦（available=true, value=0）；
-        // - 归一化后 >0 → 可信正值；
-        // - 节点缺失或数值越界（坏数据）→ 不可用。
-        // 电压×瞬时电流只作最后兜底，且仅在乘积 >0 时可用——0 乘积与字段缺失
-        // 不可区分，保守视为不可用。兼容哨兵 0 只允许进入 BatterySnapshot 兼容
-        // 字段，不得进入质量模型或分钟积分。
-        var batteryPowerValue: Double = 0
-        var batteryPowerAvailable = false
-        var sawZeroTelemetry = false
-        let rawBatteryPowerCandidates: [(raw: Double?, source: TelemetrySource)] = [
-            (dictionaryDouble(telemetryData, key: "BatteryPower"), .batteryPowerTelemetry),
-            (dictionaryDouble(batteryData, key: "BatteryPower"), .batteryPowerTelemetry),
-            (dictionaryDouble(packBatteryData, key: "BatteryPower"), .batteryPowerTelemetry),
-        ]
-        for candidate in rawBatteryPowerCandidates {
-            guard let raw = candidate.raw else { continue }
-            if raw == 0 {
-                sawZeroTelemetry = true
-                provenance.batteryPowerSource = candidate.source
-                continue
-            }
-            let normalized = Self.normalizedBatteryPower(raw)
-            if normalized > 0 {
-                batteryPowerValue = normalized
-                batteryPowerAvailable = true
-                provenance.batteryPowerSource = candidate.source
-                break
-            }
+        // Double=0 同时表达两者。来源选择（优先级/0 立即胜出/坏值跳过/V×I 兜底）
+        // 见 BatteryPowerSelection（纯逻辑，冻结规则）。兼容哨兵 0 只允许进入
+        // BatterySnapshot 兼容字段，不得进入质量模型或分钟积分。
+        let batteryPowerResult = BatteryPowerSelection.resolve(
+            directCandidates: [
+                (dictionaryDouble(telemetryData, key: "BatteryPower"), .batteryPowerTelemetry),
+                (dictionaryDouble(batteryData, key: "BatteryPower"), .batteryPowerTelemetry),
+                (dictionaryDouble(packBatteryData, key: "BatteryPower"), .batteryPowerTelemetry),
+            ],
+            voltage: voltage,
+            amperage: amperage
+        )
+        if batteryPowerResult.available {
+            provenance.batteryPowerSource = batteryPowerResult.source
         }
-        if !batteryPowerAvailable {
-            let calculatedBatteryPower = abs(voltage * amperage) / 1_000_000
-            if calculatedBatteryPower > 0 {
-                batteryPowerValue = calculatedBatteryPower
-                batteryPowerAvailable = true
-                provenance.batteryPowerSource = .voltageCurrentDerived
-            } else if sawZeroTelemetry {
-                batteryPowerAvailable = true
-            }
-        }
-        let batteryPower = batteryPowerValue
+        let batteryPower = batteryPowerResult.value
+        let batteryPowerAvailable = batteryPowerResult.available
 
         // Apple Silicon 的 PowerTelemetryData 提供系统负载与适配器输入功率，单位 mW。
         // 旧实现把 batteryPower（充电时只是电池包净流入功率）标成“系统总功耗”，

@@ -81,7 +81,7 @@ struct SyncTab: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
-                .disabled(loginItem.status == .notFound)
+                // .notFound（BTM 无记录）也保持可操作：首次安装未注册时用户应能直接开启
             }
 
             if loginItem.needsApproval {

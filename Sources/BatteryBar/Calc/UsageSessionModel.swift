@@ -51,7 +51,8 @@ final class UsageSessionModel {
     var cardTitle: String {
         switch kind {
         case .currentDischarge: return "本次离电使用"
-        case .currentCharge: return "本次充电"
+        // 分段只认 externalConnected，统计的是「接电时段」，不得无条件称「本次充电」
+        case .currentCharge: return "本次接电"
         case .lastCharge: return "上次充电摘要"
         }
     }
@@ -74,7 +75,7 @@ final class UsageSessionModel {
         case .currentDischarge:
             buildSession(from: sorted, wantExternal: false, title: "本次离电使用")
         case .currentCharge:
-            buildSession(from: sorted, wantExternal: true, title: "本次充电")
+            buildSession(from: sorted, wantExternal: true, title: "本次接电")
         case .lastCharge:
             buildLastCharge(from: sorted)
         }
@@ -152,6 +153,27 @@ final class UsageSessionModel {
     }
 
     // MARK: - 纯函数工具
+
+    /// 接电时段电量变化展示模型。
+    struct ChargeDeltaDisplay: Equatable {
+        /// 主标签：正增长「电量增加」，零/负增长「电量变化」
+        var label: String
+        /// 数值文本：+N% / 0% / -N%
+        var text: String
+        /// 是否正增长（决定绿色高亮；零/负增长不得高亮）
+        var isGain: Bool
+    }
+
+    /// 接电时段展示语义（纯逻辑，可单测）：
+    /// - 正增长 → 「电量增加 +N%」；
+    /// - 零或负增长 → 中性「电量变化 0% / -N%」，
+    ///   不得出现「已充入 -N%」，不得对非正增长绿色高亮。
+    static func chargeDeltaDisplay(deltaPercent: Double) -> ChargeDeltaDisplay {
+        if deltaPercent > 0 {
+            return ChargeDeltaDisplay(label: "电量增加", text: String(format: "+%.0f%%", deltaPercent), isGain: true)
+        }
+        return ChargeDeltaDisplay(label: "电量变化", text: String(format: "%.0f%%", deltaPercent), isGain: false)
+    }
 
     /// 只保留电量有变化的点（首点与其后每个新电量值）；末点始终保留
     static func changedLevelPoints(_ snaps: [BatterySnapshot]) -> [BatterySnapshot] {

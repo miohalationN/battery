@@ -500,14 +500,18 @@ import Foundation
         #expect(snap.temperatureMaximum == 40)
     }
 
-    /// 无合法 aggWin 时聚合字段整体不可信：全部清除，不得进入曲线/统计
+    /// 无合法 aggWin 时聚合字段整体不可信：全部清除，不得进入曲线/统计。
+    /// 使用真实协议键（batDisWh/tMax/tCov），并覆盖非法 aggWin：
+    /// 缺失、越界/非数值、超安全时间域。
     @Test func missingWindowClearsAllAggregateFields() throws {
         var dict = validBase()
         dict.removeValue(forKey: "aggWin")
         dict["sysEWh"] = 0.2
         dict["sysCov"] = 1.0
-        dict["batteryDischargeWh"] = 0.2
-        dict["temperatureMaximum"] = 35.0
+        dict["batDisWh"] = 0.2
+        dict["tAvg"] = 30.0
+        dict["tMax"] = 35.0
+        dict["tCov"] = 1.0
         dict["thermalPeak"] = "偏高"
 
         let snap = try #require(parse(dict))
@@ -515,8 +519,39 @@ import Foundation
         #expect(snap.systemEnergyWh == nil)
         #expect(snap.systemCoverage == nil)
         #expect(snap.batteryDischargeWh == nil)
+        #expect(snap.temperatureAverage == nil)
         #expect(snap.temperatureMaximum == nil)
+        #expect(snap.temperatureCoverage == nil)
         #expect(snap.maximumThermalState == nil)
+    }
+
+    /// 非法 aggWin（越界数值 / 非数值 / 超安全时间域 / 负值）与缺失等价：
+    /// 全部分钟聚合字段必须为 nil。
+    @Test func illegalAggWinClearsAllAggregateFields() throws {
+        let illegalWindows: [Any] = [
+            1e300,               // 越界：超安全时间域（finite 但 > 4102444800）
+            -1.0,                // 负值：不在 [0, 4102444800]
+            "not-a-timestamp",   // 非数值：JSON 无法产生 NaN，用非数值键值
+        ]
+        for badAggWin in illegalWindows {
+            var dict = validBase()
+            dict["aggWin"] = badAggWin
+            dict["sysEWh"] = 0.2
+            dict["sysCov"] = 1.0
+            dict["batDisWh"] = 0.2
+            dict["tAvg"] = 30.0
+            dict["tMax"] = 35.0
+            dict["tCov"] = 1.0
+            dict["thermalPeak"] = "偏高"
+
+            let snap = try #require(parse(dict))
+            #expect(snap.aggregateWindowStart == nil)
+            #expect(snap.systemEnergyWh == nil)
+            #expect(snap.systemCoverage == nil)
+            #expect(snap.batteryDischargeWh == nil)
+            #expect(snap.temperatureMaximum == nil)
+            #expect(snap.temperatureCoverage == nil)
+        }
     }
 
     /// 非法 thermal 标签（超长/白名单外）→ nil；白名单内保留
