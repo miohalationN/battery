@@ -457,3 +457,114 @@ Hitches trace（本页图表改动后必须取得有效 hitches trace）。本�
 - 管理员授权：全程未请求。用户数据：journal 只追加、未删除/改写任何历史；
   备份完整可恢复。
 - git：普通 push，无 force push、无历史改写；最终 HEAD 与 origin/main 同步。
+
+---
+
+# 第四轮交付 — BA 发布前产品化收口（品牌/版本 1.5.0、通知权限、Helper 生命周期）
+
+> 执行 Agent 移交文档，供 assurance/review agent 独立验证。
+> 基线：`16769c3`（clean 且与 origin/main 同步）。
+> 功能提交链：A=`5016cf0`（品牌与版本）→ B=`150a236`（通知模型 + Helper 生命周期）→
+> C=`afa5698`（测试/README/PROJECT_CONTEXT）→ 修复=`ddb042c`（NotificationManager 测试进程
+> SIGABRT 根因修复）→ 修复=`7c604f3`（通知持久化反例保留 UserDefaults 域）。
+> 最终功能 HEAD=`7c604f3`。普通 push，未改写任何已有提交，无 force push。
+
+## 二十五、本轮交付摘要
+
+### 块一：BA 品牌与版本（提交 A）
+
+- 冻结定义：正式英文名 BatteryArchive、简称 BA、中文名 电池档案、
+  副标题 电池健康与功耗记录；版本 1.5.0 / build 6。
+- `AppBrand` 集中定义 displayName/shortName/localizedName/tagline/version/build/fullBrand。
+- 关于页（自定义 AboutPanelView）：首行「BA · BatteryArchive」，下方
+  「电池档案 · 电池健康与功耗记录」，版本行「版本 1.5.0 (6)」。
+- Info.plist 用户可见名称 CFBundleName/CFBundleDisplayName = 电池档案；
+  build-app.sh PRODUCT_NAME=电池档案、APP_VERSION=1.5.0、APP_BUILD=6。
+- 右键菜单「关于 BA」「退出 BA」；登录项提示与 Helper 权限解释文案使用 电池档案。
+- 旧用户可见名「电池监测」已清理（README/update.sh/build-dmg.sh 卷名/DesignSystem 注释）。
+- 兼容边界全部保留：可执行名 BatteryBar、BatteryBar.app bundle 与 artifact 名、
+  Bundle ID com.batterybar.app、Helper/XPC/launchd 标识、数据目录/UserDefaults/Keychain、
+  WebDAV 路径与协议；不迁移/删除用户数据。图标文件零改动（AppIcon/icns/png/图标脚本均无 diff）。
+
+### 块二：通知权限与通知策略（提交 B + 修复 ddb042c/7c604f3）
+
+- 新增纯策略 `NotificationPolicy`（无 UserNotifications 依赖）：
+  低电量需 external==false、未充电、开关开、权限有效、≤20%、30 分钟冷却；
+  充满需 external==true、前态充电、现态停止、≥100%、开关开、权限有效、60 分钟冷却；
+  external==nil 一律禁止。
+- `NotificationManager`（@MainActor @Observable）+ `NotificationAuthorizing` 可注入边界
+  + `SystemNotificationAuthorizer`。启动/创建/读电量不请求权限；只有用户在设置页主动
+  开启且授权为 notDetermined 才请求。
+- 首次初始化按授权推导：authorized/provisional 旧用户两开关开；notDetermined/denied 两开关
+  关闭；写版本化标记 BatteryBarNotificationInitialized=1，之后不覆盖用户选择。
+- denied：开关恢复真实关闭 + 简洁原因 + 「打开系统设置」按钮（诚实打开系统通知页，
+  不做可能无效的 per-app 深链）。
+- 冷却时间持久化 BatteryBarLastLowBatteryNotifAt / BatteryBarLastFullChargeNotifAt，
+  BA 重启后仍遵守冷却窗口。投递展示 delegate 独立 NSObject，与模型类分离。
+- 设置页（数据与设置）新增「通知」区：低电量提醒、充满提醒、系统通知授权状态、拒绝入口。
+
+### 块三：高级采样与 Helper 生命周期（提交 B）
+
+- 新增 `HelperLifecycleController`（@MainActor @Observable）+ `HelperLifecycleOps` 可注入
+  边界（生产实现包 BatteryReader，阻塞调用在 detached 任务执行）。
+- 「高级采样」主开关只控制分项采样是否运行：开启→检查/安装/更新，成功启动 CPU/GPU/内存
+  分项采样；关闭→立即停定时器、持久化关闭、清空读数，绝不 uninstallHelper、绝不请求
+  管理员密码。安装失败/取消授权→恢复真实关闭 + 错误原因 + 重试。
+- 五态 disabled/starting/enabled/needsUpdate/error；`ComponentReadingGate` 纯函数保证
+  disable/stop 后迟到 XPC 结果不得写回。
+- 「采样诊断」新增独立「移除辅助服务…」：二次确认、说明需管理员授权、说明移除后再次
+  开启需重新安装；唯一 uninstallHelper 入口。启动检查只做休眠态版本检查，不自动安装。
+
+### 测试与 gate
+
+- 新增 3 个测试文件：NotificationPolicyTests（17 条低电量/充满门槛与冷却反例）、
+  NotificationManagerTests（11 条权限/开关/持久化反例）、HelperLifecycleTests（9 条
+  生命周期/gate/标签反例）。
+- CI 修复过程：NotificationManager init 触碰 UNUserNotificationCenter 在无 bundle 的
+  测试进程触发 NSInternalInconsistencyException（bundleProxyForCurrentProcess nil）
+  → 本地最小复现确认 → 系统 delegate 移出 init（attachSystemPresentationDelegate 仅生产
+  入口调用）→ 本地复验 NotificationManagerTests 全过；随后修复持久化反例重建时
+  removePersistentDomain 误清域的问题。
+
+## 二十六、验证证据（含最终 HEAD=`7c604f3` 的 CI）
+
+- local-gate（parse / Swift6 typecheck / WMO -O / Helper build）多次全绿（含最终树）。
+- Bash -n：全部 shell 脚本通过（seed_profile_data.py 是 Python，除外）；git diff --check 干净。
+- 静态检查：`requestAuthorization` 仅出现在 setLowBatteryEnabled/setFullChargeEnabled 的
+  notDetermined 分支与 SystemNotificationAuthorizer 本身；启动/init/读电量路径零请求。
+  `uninstallHelper` 仅出现在 BatteryReader 定义、SystemHelperLifecycleOps.uninstall、
+  HelperLifecycleController.remove；disable 路径无 uninstallHelper。
+- 图标零改动：git diff 无 Sources/BatteryBar/Resources 下任何文件。
+- Build `32701003634` success：218 tests / 30 suites 全过。
+- UI Profile：中间提交 `ddb042c` 对应 run `32700696802` **success**（两页 Animation
+  Hitches trace 通过 gate）；最终功能 HEAD `7c604f3` 对应 run `32701003601` 在本次
+  交付报告输出时仍在运行（xctrace attach 阶段性抖动，早期 `afa5698` 的
+  `32699372267` 曾因 attach rc=137 失败，同 runner 历史上有多轮 success 先例），
+  该 run 的最终结果与两页 traces 交 assurance agent 验收跟进。
+
+## 二十七、artifact、签名、哈希与安装
+
+- artifact：`BatteryBar.zip`（Build 32701003634）。
+- 下载→解压→安装哈希一致：
+  - App：`905007d13f913972fbdab5fbf2a31670b864403e6cef798ff53680ad82a81123`
+  - Helper：`6d6d52a532dc62122f67c5d1c4a5f9c08db5cf7bc0cc35bca414ce78649d1da2`
+- codesign `--verify --deep --strict`：主 App 与内嵌 Helper 均通过（下载样本与已安装副本）。
+- 安装：`/Users/mio/Applications/BatteryBar.app`；旧 App 备份至
+  `~/.Trash/BatteryBar-pre-1.5.0-20260824-152257.app`。
+- Info.plist 实测：CFBundleDisplayName/Name=电池档案、1.5.0、build 6、com.batterybar.app、
+  executable=BatteryBar。
+- 启动验证：进程 pid 34964 稳定（CPU 0.0%、RSS ~24MB）；状态栏显示电量百分比；
+  首启写入 BatteryBarNotificationInitialized=1、BatteryBarNotifyLowBattery/FullCharge=0、
+  BatteryBarHelperEnabled=0（未替用户开启任何开关、未请求权限、未触发管理员授权）；
+  已安装二进制内可检索到品牌/通知/高级采样全部关键文案。
+
+## 二十八、外部系统触碰状态与限制
+
+- WebDAV：未启用、无真实请求。Helper/launchd：未安装/卸载/修改。
+- 管理员授权：全程未请求。登录项：未注册/未改动。用户数据：未删除/改写。
+- 通知首启默认值在本机为「双关」（说明本机通知授权为 notDetermined），符合冻结语义。
+- 限制：关于面板与设置页的可见文案以源码 + 二进制字符串 + 运行 defaults 证据验证，
+  未做 UI 自动化点击（无辅助功能权限）；「取消移除确认不触碰 Helper」为按钮确认层
+  行为（确认后才调用 removeHelperService），以源码路径证据 + disable 不卸载测试覆盖。
+- 待验收项：最终功能 HEAD 的 UI Profile（32701003601）交付报告输出时未完成，
+  其两页 Animation Hitches traces 与 gate 结果由 assurance agent 跟进。
