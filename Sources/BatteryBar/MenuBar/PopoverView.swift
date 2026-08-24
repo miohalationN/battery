@@ -49,15 +49,8 @@ struct PopoverView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
-            LiveBadge(text: foregroundPollingText, tint: .bbMint)
         }
         .padding(.horizontal, 2)
-    }
-
-    private var foregroundPollingText: String {
-        sampler.isForegroundReadingActive
-            ? "\(Int(SamplingCadence.foregroundInterval)) 秒兜底轮询"
-            : "\(Int(SamplingCadence.backgroundInterval)) 秒保活轮询"
     }
 
     // MARK: - 顶部：电量 + 状态
@@ -249,10 +242,10 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle("电池健康")
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(sampler.systemHealthPercent > 0 ? String(format: "%.0f", sampler.systemHealthPercent) : "—")
+                Text(healthValue)
                     .font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(healthColor)
-                if sampler.systemHealthPercent > 0 {
+                if sampler.healthMetric.percent > 0 {
                     Text("%").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -262,11 +255,31 @@ struct PopoverView: View {
                     .background(healthColor.opacity(0.12), in: Capsule())
                     .foregroundStyle(healthColor)
             }
+            // 与主窗口同一健康模型：来源口径永不漂移
+            if let source = sampler.healthMetric.sourceLabel {
+                Text(healthSourceFootnote(source))
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.tertiary)
+            }
             healthRow("循环次数", value: "\(sampler.currentInfo?.cycleCount ?? 0) 次", icon: "arrow.triangle.2.circlepath")
             healthRow("满充容量", value: capacityText, icon: "battery.100")
             healthRow("温度", value: temperatureText, icon: "thermometer")
         }
         .cardStyle(accent: .bbMint)
+    }
+
+    /// 健康度首选系统报告值；回退时明确标注「容量比估算」，不可用显示 —
+    private var healthValue: String {
+        sampler.healthMetric.percent > 0 ? String(format: "%.0f", sampler.healthMetric.percent) : "—"
+    }
+
+    private func healthSourceFootnote(_ source: String) -> String {
+        let estimated = sampler.healthMetric.isEstimated ? "（估算，非系统健康度）" : ""
+        if let readAt = sampler.healthMetric.readAt {
+            let time = readAt.formatted(.dateTime.hour().minute())
+            return "来源：\(source)\(estimated) · 读取于 \(time)"
+        }
+        return "来源：\(source)\(estimated)"
     }
 
     private var capacityText: String {
@@ -279,16 +292,16 @@ struct PopoverView: View {
     }
 
     private var healthLabel: String {
-        if sampler.systemHealthPercent <= 0 { return "暂不可用" }
-        if sampler.systemHealthPercent >= 90 { return "良好" }
-        if sampler.systemHealthPercent >= 80 { return "一般" }
+        if sampler.healthMetric.percent <= 0 { return "暂不可用" }
+        if sampler.healthMetric.percent >= 90 { return "良好" }
+        if sampler.healthMetric.percent >= 80 { return "一般" }
         return "建议检修"
     }
 
     private var healthColor: Color {
-        if sampler.systemHealthPercent <= 0 { return .secondary }
-        if sampler.systemHealthPercent >= 90 { return .green }
-        if sampler.systemHealthPercent >= 80 { return .orange }
+        if sampler.healthMetric.percent <= 0 { return .secondary }
+        if sampler.healthMetric.percent >= 90 { return .green }
+        if sampler.healthMetric.percent >= 80 { return .orange }
         return .red
     }
 

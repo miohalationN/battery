@@ -349,8 +349,9 @@ import Foundation
         #expect(sparse.systemEnergyWh == nil)
         #expect(sparse.systemPowerAverage == nil)
         #expect(sparse.systemPowerPeak == nil)
+        // coverage<0.5：均值不可用于趋势，但该分钟确实观察到温度 → 最大值必须保留
         #expect(sparse.temperatureAverage == nil)
-        #expect(sparse.temperatureMaximum == nil)
+        #expect(sparse.temperatureMaximum == 33)
         #expect(sparse.systemCoverage == 0.4)
         #expect(sparse.temperatureCoverage == 0.3)
         // 能量分项（充/放）与离散份额不受系统覆盖率门控，如实记录
@@ -421,5 +422,137 @@ import Foundation
         let snaps = Array(makeSnaps([-3, -1, -2], now: now).shuffled())
         let retained = DataStore.retainedSnapshots(snaps, now: now)
         #expect(retained.map(\.timestamp) == retained.map(\.timestamp).sorted())
+    }
+}
+
+/// 远端 v5 可选字段保守校验：畸形降级为 nil 不破坏整条记录；
+/// 门控一致性（sysCov<0.8 清能量、tCov<0.5 清均值保最大值、无合法 aggWin 清全部聚合）。
+@Suite struct RemoteV5SanitizeTests {
+
+    private let windowStart = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func parse(_ dict: [String: Any]) -> BatterySnapshot? {
+        BatterySnapshot.from(remoteJSON: dict)
+    }
+
+    private func validBase() -> [String: Any] {
+        [
+            "id": UUID().uuidString,
+            "ts": 1_800_000_060.0,
+            "level": 55.0,
+            "charging": false,
+            "watt": 9.0,
+            "temp": 31.0,
+            "screen": true,
+            "ext": false,
+            "aggWin": windowStart.timeIntervalSince1970,
+        ]
+    }
+
+    /// 巨大数值 / 负能量 / 越界覆盖率 → 降级 nil，整条记录仍可解析
+    @Test func absurdValuesDegradeToNilWithoutRejectingRecord() throws {
+        var dict = validBase()
+        dict["sysEWh"] = 1e12
+        dict["sysPAvg"] = 99999.0
+        dict["batChgWh"] = -5.0
+        dict["sysCov"] = 1.5
+        dict["bright"] = 2.0
+        dict["screenFrac"] = -0.1
+
+        let snap = try #require(parse(dict))
+        #expect(snap.systemEnergyWh == nil)
+        #expect(snap.systemPowerAverage == nil)
+        #expect(snap.batteryChargeWh == nil)
+        #expect(snap.systemCoverage == nil)          // 1.5 越界 → nil
+        #expect(snap.displayBrightness == nil)
+        #expect(snap.screenOnFraction == nil)
+        // 兼容字段与身份不受影响
+        #expect(snap.wattage == 9)
+        #expect(snap.isDefinitelyOnBattery)
+    }
+
+    /// 门控不一致：远端声称 sysCov<0.8 却带能量/均值/峰值 → 全部清除
+    @Test func lowSystemCoverageClearsFullMinuteMetrics() throws {
+        var dict = validBase()
+        dict["sysCov"] = 0.5
+        dict["sysEWh"] = 0.2
+        dict["sysPAvg"] = 10.0
+        dict["sysPPeak"] = 14.0
+
+        let snap = try #require(parse(dict))
+        #expect(snap.systemCoverage == 0.5)
+        #expect(snap.systemEnergyWh == nil)
+        #expect(snap.systemPowerAverage == nil)
+        #expect(snap.systemPowerPeak == nil)
+    }
+
+    /// tCov<0.5：清除 tAvg，但保留合法 tMax 与覆盖率
+    @Test func lowTemperatureCoverageKeepsMaximumOnly() throws {
+        var dict = validBase()
+        dict["aggWin"] = windowStart.timeIntervalSince1970
+        dict["tAvg"] = 31.5
+        dict["tMax"] = 40.0
+        dict["tCov"] = 0.3
+
+        let snap = try #require(parse(dict))
+        #expect(snap.temperatureCoverage == 0.3)
+        #expect(snap.temperatureAverage == nil)
+        #expect(snap.temperatureMaximum == 40)
+    }
+
+    /// 无合法 aggWin 时聚合字段整体不可信：全部清除，不得进入曲线/统计
+    @Test func missingWindowClearsAllAggregateFields() throws {
+        var dict = validBase()
+        dict.removeValue(forKey: "aggWin")
+        dict["sysEWh"] = 0.2
+        dict["sysCov"] = 1.0
+        dict["batteryDischargeWh"] = 0.2
+        dict["temperatureMaximum"] = 35.0
+        dict["thermalPeak"] = "偏高"
+
+        let snap = try #require(parse(dict))
+        #expect(snap.aggregateWindowStart == nil)
+        #expect(snap.systemEnergyWh == nil)
+        #expect(snap.systemCoverage == nil)
+        #expect(snap.batteryDischargeWh == nil)
+        #expect(snap.temperatureMaximum == nil)
+        #expect(snap.maximumThermalState == nil)
+    }
+
+    /// 非法 thermal 标签（超长/白名单外）→ nil；白名单内保留
+    @Test func thermalLabelWhitelisted() throws {
+        var dict = validBase()
+        dict["thermalPeak"] = String(repeating: "x", count: 64)
+        let long = try #require(parse(dict))
+        #expect(long.maximumThermalState == nil)
+
+        var dict2 = validBase()
+        dict2["thermalPeak"] = "严重"
+        let ok = try #require(parse(dict2))
+        #expect(ok.maximumThermalState == "严重")
+    }
+
+    /// 合法 v5 远端行不受校验影响
+    @Test func legalV5RemoteRowSurvivesSanitization() throws {
+        var dict = validBase()
+        dict["sysEWh"] = 0.1667
+        dict["sysPAvg"] = 10.0
+        dict["sysPPeak"] = 12.0
+        dict["sysCov"] = 1.0
+        dict["batDisWh"] = 0.15
+        dict["tAvg"] = 30.0
+        dict["tMax"] = 33.0
+        dict["tCov"] = 1.0
+        dict["screenFrac"] = 1.0
+        dict["lpmFrac"] = 0.0
+        dict["bright"] = 0.5
+        dict["brightOK"] = true
+        dict["brightAt"] = 1_800_000_059.0
+
+        let snap = try #require(parse(dict))
+        #expect(abs((snap.systemEnergyWh ?? 0) - 0.1667) < 1e-9)
+        #expect(snap.temperatureAverage == 30)
+        #expect(snap.displayBrightness == 0.5)
+        #expect(snap.brightnessAvailable == true)
     }
 }

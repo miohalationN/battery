@@ -42,11 +42,23 @@ final class BatteryReader: @unchecked Sendable {
             return info.externalConnected == false ? info.systemPower : nil
         }
 
-        /// 电池功率方向通道。externalConnected 在实时读取中总是已知
-        /// （IORegistry 缺失时回退 IOPS），未知仅发生在 info 整体不可用。
+        /// 电池功率方向通道（冻结规则）：
+        /// 1. 接电且充电、功率可用 → charge；
+        /// 2. 明确离电且未充电、功率可用 → discharge；
+        /// 3. 接电未充电、状态自相矛盾（如离电却在充电）、来源未知或功率不可用 → unknown；
+        /// 4. unknown 不累计任何一侧的 seconds/Wh。
         var batteryChannel: WindowTelemetryAggregator.BatteryChannel {
-            guard let info = batteryInfo else { return .unknown }
-            return info.externalConnected ? .charge(info.batteryPower) : .discharge(info.batteryPower)
+            guard let info = batteryInfo, info.batteryPowerAvailable else { return .unknown }
+            switch (info.externalConnected, info.isCharging) {
+            case (true, true):
+                return .charge(info.batteryPower)
+            case (false, false):
+                return .discharge(info.batteryPower)
+            case (true, false), (false, true):
+                // 接电未充电（满电保持/优化充电暂停/80% 上限）与矛盾状态
+                // 都不得进入任何一侧积分
+                return .unknown
+            }
         }
     }
 
@@ -159,14 +171,15 @@ final class BatteryReader: @unchecked Sendable {
     /// 返回 nil 表示本轮 IOPS 读取失败：调用方必须保留上次状态，
     /// 不能把失败合成为 0%/离电污染插拔状态机。
     func readBatteryReading() -> BatteryReading? {
-        let readAt = Date()
         guard let powerSource = readPowerSource() else { return nil }
         let (info, provenance) = readBatteryInfoWithProvenance(powerSource: powerSource)
+        // readAt 在本轮 IOPS + IORegistry 全部读取完成后取得：
+        // 它是「App 完成读取」的时刻，不是传感器采样时间（IORegistry 无硬件时间戳）。
         return BatteryReading(
             powerSource: powerSource,
             batteryInfo: info,
             provenance: info == nil ? .empty : provenance,
-            readAt: readAt
+            readAt: Date()
         )
     }
 
@@ -286,21 +299,48 @@ final class BatteryReader: @unchecked Sendable {
             deviceName = batteryChipName
         }
 
-        // 优先使用电源遥测/电池控制器直接给出的 BatteryPower（mW）。电压×瞬时电流
-        // 只作最后兜底：瞬时电流在满电维持阶段抖动明显，不能替代控制器功率口径。
-        // 来源必须如实标注，供质量模型与功耗诊断区分。
-        let directBatteryPower = Self.firstValidDouble([
-            dictionaryDouble(telemetryData, key: "BatteryPower"),
-            dictionaryDouble(batteryData, key: "BatteryPower"),
-            dictionaryDouble(packBatteryData, key: "BatteryPower"),
-        ], normalize: Self.normalizedBatteryPower)
-        let calculatedBatteryPower = abs(voltage * amperage) / 1_000_000
-        let batteryPower = directBatteryPower > 0 ? directBatteryPower : calculatedBatteryPower
-        if directBatteryPower > 0 {
-            provenance.batteryPowerSource = .batteryPowerTelemetry
-        } else if batteryPower > 0 {
-            provenance.batteryPowerSource = .voltageCurrentDerived
+        // 电池包功率必须区分「可信的有效 0W」与「没有读到功率」，不得用普通
+        // Double=0 同时表达两者：
+        // - 遥测节点存在且原始值恰为 0 → 可信的有效零瓦（available=true, value=0）；
+        // - 归一化后 >0 → 可信正值；
+        // - 节点缺失或数值越界（坏数据）→ 不可用。
+        // 电压×瞬时电流只作最后兜底，且仅在乘积 >0 时可用——0 乘积与字段缺失
+        // 不可区分，保守视为不可用。兼容哨兵 0 只允许进入 BatterySnapshot 兼容
+        // 字段，不得进入质量模型或分钟积分。
+        var batteryPowerValue: Double = 0
+        var batteryPowerAvailable = false
+        var sawZeroTelemetry = false
+        let rawBatteryPowerCandidates: [(raw: Double?, source: TelemetrySource)] = [
+            (dictionaryDouble(telemetryData, key: "BatteryPower"), .batteryPowerTelemetry),
+            (dictionaryDouble(batteryData, key: "BatteryPower"), .batteryPowerTelemetry),
+            (dictionaryDouble(packBatteryData, key: "BatteryPower"), .batteryPowerTelemetry),
+        ]
+        for candidate in rawBatteryPowerCandidates {
+            guard let raw = candidate.raw else { continue }
+            if raw == 0 {
+                sawZeroTelemetry = true
+                provenance.batteryPowerSource = candidate.source
+                continue
+            }
+            let normalized = Self.normalizedBatteryPower(raw)
+            if normalized > 0 {
+                batteryPowerValue = normalized
+                batteryPowerAvailable = true
+                provenance.batteryPowerSource = candidate.source
+                break
+            }
         }
+        if !batteryPowerAvailable {
+            let calculatedBatteryPower = abs(voltage * amperage) / 1_000_000
+            if calculatedBatteryPower > 0 {
+                batteryPowerValue = calculatedBatteryPower
+                batteryPowerAvailable = true
+                provenance.batteryPowerSource = .voltageCurrentDerived
+            } else if sawZeroTelemetry {
+                batteryPowerAvailable = true
+            }
+        }
+        let batteryPower = batteryPowerValue
 
         // Apple Silicon 的 PowerTelemetryData 提供系统负载与适配器输入功率，单位 mW。
         // 旧实现把 batteryPower（充电时只是电池包净流入功率）标成“系统总功耗”，
@@ -363,6 +403,7 @@ final class BatteryReader: @unchecked Sendable {
                 externalConnected: externalConnected,
                 systemPower: systemPower,
                 batteryPower: batteryPower,
+                batteryPowerAvailable: batteryPowerAvailable,
                 adapterInputPower: telemetryInputPower,
                 systemPowerAvailable: systemPowerAvailable,
                 systemPowerIsEstimated: systemPowerIsEstimated,
@@ -777,20 +818,22 @@ final class BatteryReader: @unchecked Sendable {
         return DisplayBrightnessReading(brightness: Double(brightness), readAt: readAt)
     }
 
-    // 健康度缓存：用 NSLock 保护，避免数据竞争
-    // nonisolated(unsafe) 已由 NSLock 保证访问安全
-    private static let healthCacheLock = NSLock()
-    private nonisolated(unsafe) static var _cachedHealthPercent: Double?
-    private nonisolated(unsafe) static var _healthCacheTime: Date?
+    // MARK: - 系统电池健康（system_profiler 口径）
 
-    func readSystemHealthPercent() -> Double {
-        // 先检查缓存（60s 内复用）
-        Self.healthCacheLock.lock()
-        let cached = Self._cachedHealthPercent
-        let cacheTime = Self._healthCacheTime
-        Self.healthCacheLock.unlock()
-        if let c = cached, let t = cacheTime, Date().timeIntervalSince(t) < 60 {
-            return c
+    /// 健康度进程内缓存：避免重复 spawn system_profiler；
+    /// 刷新节奏（小时级 TTL / 唤醒后）由 PowerSampler 决定，不进入采样路径。
+    /// 解析与口径选择纯函数见 BatteryHealthMetric。
+    private let healthCacheLock = NSLock()
+    private var cachedSystemHealth: SystemHealthReading?
+
+    /// 后台读取系统健康度。耗时 1–3s，只允许在 detached 任务中调用，
+    /// 绝不进入 5/15 秒采样路径。60 秒进程内缓存防止重复 spawn。
+    func readSystemHealth() -> SystemHealthReading? {
+        healthCacheLock.lock()
+        let cached = cachedSystemHealth
+        healthCacheLock.unlock()
+        if let cached, Date().timeIntervalSince(cached.readAt) < 60 {
+            return cached
         }
 
         let process = Process()
@@ -805,25 +848,17 @@ final class BatteryReader: @unchecked Sendable {
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let power = (json["SPPowerDataType"] as? [[String: Any]])?.first(where: {
-                   $0["sppower_battery_health_info"] != nil
-               }),
-               let healthInfo = power["sppower_battery_health_info"] as? [String: Any],
-               let healthStr = healthInfo["sppower_battery_health_maximum_capacity"] as? String,
-               let percent = Double(healthStr.replacingOccurrences(of: "%", with: "")) {
-                Self.healthCacheLock.lock()
-                Self._cachedHealthPercent = percent
-                Self._healthCacheTime = Date()
-                Self.healthCacheLock.unlock()
-                return percent
+               let percent = BatteryHealthMetric.systemProfilerHealthPercent(json: json) {
+                let reading = SystemHealthReading(percent: percent, readAt: Date())
+                healthCacheLock.lock()
+                cachedSystemHealth = reading
+                healthCacheLock.unlock()
+                return reading
             }
         } catch {}
 
-        if let info = readBatteryInfo(), info.designCapacity > 0 {
-            return Double(info.maxCapacity) / Double(info.designCapacity) * 100
-        }
-        // 未知就是未知；返回 100 会把读取失败伪装成“健康度完美”。
-        return 0
+        // 解析失败不缓存失败态：下次 TTL 到期重试；调用方负责回退口径。
+        return nil
     }
 
     // MARK: - Helper XPC 连接

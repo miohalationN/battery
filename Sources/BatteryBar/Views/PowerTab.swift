@@ -104,15 +104,15 @@ struct PowerTab: View {
             coverage: { $0.temperatureCoverage }
         )
 
-        // 能耗与总覆盖率：只累计覆盖达标分钟的能量
-        var energy = 0.0
-        var coveredMinutes = 0.0
-        for snap in inRange where snap.systemCoverage != nil {
-            coveredMinutes += snap.systemCoverage ?? 0
-            if let wh = snap.systemEnergyWh { energy += wh }     // v5 已按 0.8 门控写入
-        }
-        rangeEnergyWh = energy
-        rangeOverallCoverage = inRange.isEmpty ? 0 : min(1, coveredMinutes / Double(inRange.count))
+        // 能耗与总覆盖率：分母是所选范围墙钟时长（完全缺失的分钟计为未覆盖），
+        // 能量仅累加覆盖达标分钟，均按 aggWin 去重并限制到窗口。
+        let now = Date()
+        rangeEnergyWh = RangeStatistics.trustedSystemEnergyWh(
+            snapshots: source, rangeStart: cutoff, rangeEnd: now
+        )
+        rangeOverallCoverage = RangeStatistics.overallSystemCoverage(
+            snapshots: source, rangeStart: cutoff, rangeEnd: now
+        )
 
         rebuildLegacyStats(from: source, cutoff: cutoff)
         rebuildAggregateStats(from: inRange)

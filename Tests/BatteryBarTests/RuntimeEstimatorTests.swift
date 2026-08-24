@@ -41,7 +41,8 @@ import Testing
 
     // MARK: A. 历史百分比斜率
 
-    /// 20 分钟下降 2% 对应 6%/h，Theil–Sen 结果正确
+    /// 20 分钟下降 2%：Theil–Sen 斜率 6%/h 的内部证据成立，
+    /// 但 confidence≈0.333 低于展示门槛 0.40 —— dischargeEstimate 必须 nil。
     @Test func twentyMinuteTwoPercentDropYieldsSixPercentPerHour() throws {
         var input = RuntimeEstimator.Inputs()
         input.now = t0.addingTimeInterval(1200)
@@ -53,9 +54,10 @@ import Testing
         #expect(abs(evidence.ratePercentPerHour - 6.0) < 0.01)
         #expect(evidence.basis == .historicalSlope)
         #expect(evidence.coverage >= 0.7)
+        #expect(evidence.confidence >= 0.3 && evidence.confidence < RuntimeEstimator.minimumDisplayConfidence)
 
-        let estimate = try #require(RuntimeEstimator.dischargeEstimate(input))
-        #expect(abs(estimate.valueHours - 13.0) < 0.1)      // 78 / 6 = 13h
+        // 单路出口同样执行门槛：证据存在 ≠ 可展示
+        #expect(RuntimeEstimator.dischargeEstimate(input) == nil)
     }
 
     /// 单个电量回跳/异常点不能摧毁中位斜率
@@ -182,24 +184,64 @@ import Testing
 
     // MARK: C. 融合与回退
 
-    /// 两路证据差异 >2 倍时总置信度下降并扩大区间
-    @Test func contradictoryEvidenceReducesConfidenceAndWidensInterval() throws {
+    /// 两路证据差异 >2 倍且矛盾惩罚后低于门槛（≈0.298 < 0.40）→ 不展示
+    @Test func contradictoryEvidenceBelowThresholdReturnsNil() {
         var input = RuntimeEstimator.Inputs()
         input.now = t0.addingTimeInterval(1200)
         input.currentLevel = 60
         input.externalConnected = false
-        input.snapshots = linearDischarge(minutes: 20)       // 斜率路径 6%/h
+        input.snapshots = linearDischarge(minutes: 20)       // 斜率路径 6%/h，conf≈0.333
         input.minuteAggregates = dischargeAggregates(watts: 30, minutes: 15)
-        input.fullChargeCapacityMah = 5000                   // 功率路径 50%/h（>2×6）
+        input.fullChargeCapacityMah = 5000                   // 功率路径 50%/h（>2×6），conf 0.66
         input.voltageMV = 12_000
+
+        // 两路内部证据都存在
+        #expect(RuntimeEstimator.historicalSlopeEvidence(input) != nil)
+        #expect(RuntimeEstimator.batteryPowerEvidence(input) != nil)
+        // 融合出口：((0.333+0.66)/2)×0.6 < 0.40 → nil
+        #expect(RuntimeEstimator.dischargeEstimate(input) == nil)
+    }
+
+    /// 置信度足够高的矛盾双路仍可展示：降置信与扩大区间可观察
+    @Test func highConfidenceContradictionStaysObservable() throws {
+        var input = RuntimeEstimator.Inputs()
+        input.now = t0.addingTimeInterval(3600)
+        input.currentLevel = 75
+        input.externalConnected = false
+        // 60 分钟净下降 5%：斜率 5%/h，confidence=min(1,1,coverage)=1
+        input.snapshots = (0...60).map { minute in
+            snapshot(TimeInterval(minute * 60), 80 - Double(minute) * (5.0 / 60.0))
+        }
+        // 功率路径 50%/h（>2×5），confidence 0.66
+        var longAggregates: [MinuteAggregate] = []
+        for minute in 0..<15 {
+            longAggregates.append(MinuteAggregate(
+                windowStart: t0.addingTimeInterval(TimeInterval(2100 + minute * 60)),
+                systemEnergyWh: 0.5,
+                systemPowerAverage: 30,
+                systemPowerPeak: 32,
+                systemCoverage: 1,
+                batteryChargeWh: 0,
+                batteryChargeSeconds: 0,
+                batteryDischargeWh: 0.5,
+                batteryDischargeSeconds: 60,
+                temperatureAverage: 30,
+                temperatureMaximum: 31,
+                temperatureCoverage: 1,
+                screenOnFraction: 1,
+                lowPowerModeFraction: 0,
+                maximumThermalStateLabel: "正常",
+                maximumThermalStateOrdinal: 0
+            ))
+        }
+        input.minuteAggregates = longAggregates
 
         let fused = try #require(RuntimeEstimator.dischargeEstimate(input))
         #expect(fused.basis == .fused)
-        if let reason = fused.failureReason {
-            #expect(reason.contains("差异"))
-        } else {
-            Issue.record("expected contradiction failureReason")
-        }
+        // (1 + 0.66)/2 × 0.6 ≈ 0.498 ≥ 0.40 → 可展示但降置信
+        #expect(fused.confidence >= RuntimeEstimator.minimumDisplayConfidence)
+        #expect(fused.failureReason?.contains("差异") == true)
+        // 矛盾扩大区间
         let spread = (fused.upperHours! - fused.lowerHours!) / fused.valueHours
         #expect(spread > 0.5)
     }
@@ -294,7 +336,9 @@ import Testing
         #expect(RuntimeEstimator.chargeEstimate(input) == nil)
     }
 
-    /// 80% 以上涓流阶段降低置信度；异常速率直接拒绝而不是夹值
+    /// 80% 以上涓流阶段置信度 ×0.6 后低于门槛（0.54→0.324）→ 不展示；
+    /// 5 分钟仅增长 1% 的低置信充电证据（≈0.15）同样不展示；
+    /// 200%/h 异常速率直接拒绝而不是夹值。
     @Test func tricklePhaseLowersConfidenceAndAbsurdRateRejected() throws {
         func chargingInput(level: Double) -> RuntimeEstimator.Inputs {
             var input = RuntimeEstimator.Inputs()
@@ -309,9 +353,24 @@ import Testing
             return input
         }
 
+        // 正常速率（30 分钟 +3%，conf≈0.54 ≥ 0.40）可展示
         let normal = try #require(RuntimeEstimator.chargeEstimate(chargingInput(level: 50)))
-        let trickle = try #require(RuntimeEstimator.chargeEstimate(chargingInput(level: 85)))
-        #expect(trickle.confidence < normal.confidence)
+        #expect(normal.confidence >= RuntimeEstimator.minimumDisplayConfidence)
+
+        // 涓流阶段（level>85）：0.54×0.6 < 0.40 → nil
+        #expect(RuntimeEstimator.chargeEstimate(chargingInput(level: 85)) == nil)
+
+        // 低置信短窗口：5 分钟 +1%（斜率 12%/h 合法，但 conf≈0.15）
+        var short = RuntimeEstimator.Inputs()
+        short.now = t0.addingTimeInterval(300)
+        short.currentLevel = 50
+        short.isCharging = true
+        short.externalConnected = true
+        short.snapshots = (0...5).map { minute in
+            snapshot(TimeInterval(minute * 60), 50 + Double(minute) * 0.2,
+                     externalConnected: true, isCharging: true)
+        }
+        #expect(RuntimeEstimator.chargeEstimate(short) == nil)
 
         // 200%/h 的异常斜率直接拒绝（不再夹到 80）
         var absurd = chargingInput(level: 50)

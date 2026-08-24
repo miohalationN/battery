@@ -205,13 +205,14 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         systemCoverage = aggregate.systemCoverage
         batteryChargeWh = aggregate.batteryChargeWh
         batteryDischargeWh = aggregate.batteryDischargeWh
-        // 温度均值/最大值跟随趋势可用性（coverage ≥ 0.5）；覆盖率始终如实记录
+        // 温度：coverage<0.5 时趋势均值不可用于连线（置 nil），
+        // 但只要该分钟确实观察到温度，最大值必须保留并附带覆盖率。
         if aggregate.hasUsableTemperatureTrend {
             temperatureAverage = aggregate.temperatureAverage
             temperatureMaximum = aggregate.temperatureMaximum
         } else {
             temperatureAverage = nil
-            temperatureMaximum = nil
+            temperatureMaximum = aggregate.temperatureMaximum
         }
         temperatureCoverage = aggregate.temperatureCoverage
         screenOnFraction = aggregate.screenOnFraction
@@ -266,6 +267,26 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         return json
     }
 
+    // MARK: - 远端字段保守校验
+
+    /// 远端 v5 可选数值：必须 finite 且落在安全域，否则降级为 nil
+/// （不因一个附加畸形字段破坏整条旧格式兼容记录）。
+    private static func remoteFinite(_ raw: Any?, in range: ClosedRange<Double>) -> Double? {
+        guard let value = raw as? Double, value.isFinite, range.contains(value) else { return nil }
+        return value
+    }
+
+    /// 远端覆盖率/份额/亮度类：0...1
+    private static func remoteUnitInterval(_ raw: Any?) -> Double? {
+        remoteFinite(raw, in: 0...1)
+    }
+
+    /// 远端时间戳：finite 且处于合理安全域（1970…2100）
+    private static func remoteTimestamp(_ raw: Any?) -> Date? {
+        guard let value = raw as? Double, value.isFinite, value >= 0, value <= 4_102_444_800 else { return nil }
+        return Date(timeIntervalSince1970: value)
+    }
+
     static func from(remoteJSON dict: [String: Any]) -> BatterySnapshot? {
         guard let idStr = dict["id"] as? String,
               let id = UUID(uuidString: idStr),
@@ -293,23 +314,60 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
             thermalState: dict["thermal"] as? String
         )
         snap.id = id
-        // v5 聚合字段：远端缺键保持 nil，不推导伪数据
-        if let aggWin = dict["aggWin"] as? Double { snap.aggregateWindowStart = Date(timeIntervalSince1970: aggWin) }
-        snap.systemEnergyWh = dict["sysEWh"] as? Double
-        snap.systemPowerAverage = dict["sysPAvg"] as? Double
-        snap.systemPowerPeak = dict["sysPPeak"] as? Double
-        snap.systemCoverage = dict["sysCov"] as? Double
-        snap.batteryChargeWh = dict["batChgWh"] as? Double
-        snap.batteryDischargeWh = dict["batDisWh"] as? Double
-        snap.temperatureAverage = dict["tAvg"] as? Double
-        snap.temperatureMaximum = dict["tMax"] as? Double
-        snap.temperatureCoverage = dict["tCov"] as? Double
-        snap.screenOnFraction = dict["screenFrac"] as? Double
-        snap.lowPowerModeFraction = dict["lpmFrac"] as? Double
-        snap.maximumThermalState = dict["thermalPeak"] as? String
-        snap.displayBrightness = dict["bright"] as? Double
+        // v5 聚合字段：远端缺键保持 nil，不推导伪数据；数值做保守校验，
+        // 畸形可选字段降级为 nil，不破坏整条记录。
+        snap.aggregateWindowStart = remoteTimestamp(dict["aggWin"])
+        var systemEnergyWh = remoteFinite(dict["sysEWh"], in: 0...20)          // 单分钟能量物理上限 ~8.3Wh
+        var systemPowerAverage = remoteFinite(dict["sysPAvg"], in: 0...500)
+        var systemPowerPeak = remoteFinite(dict["sysPPeak"], in: 0...500)
+        var systemCoverage = remoteUnitInterval(dict["sysCov"])
+        snap.batteryChargeWh = remoteFinite(dict["batChgWh"], in: 0...20)
+        snap.batteryDischargeWh = remoteFinite(dict["batDisWh"], in: 0...20)
+        var temperatureAverage = remoteFinite(dict["tAvg"], in: -20...100)
+        let temperatureMaximum = remoteFinite(dict["tMax"], in: -20...100)
+        let temperatureCoverage = remoteUnitInterval(dict["tCov"])
+        snap.screenOnFraction = remoteUnitInterval(dict["screenFrac"])
+        snap.lowPowerModeFraction = remoteUnitInterval(dict["lpmFrac"])
+        if let thermalPeak = dict["thermalPeak"] as? String,
+           thermalPeak.count <= 16,
+           ["正常", "偏高", "较高", "严重", "未知"].contains(thermalPeak) {
+            snap.maximumThermalState = thermalPeak
+        }
+        snap.displayBrightness = remoteUnitInterval(dict["bright"])
         snap.brightnessAvailable = dict["brightOK"] as? Bool
-        if let brightAt = dict["brightAt"] as? Double { snap.brightnessReadAt = Date(timeIntervalSince1970: brightAt) }
+        snap.brightnessReadAt = remoteTimestamp(dict["brightAt"])
+
+        // 门控一致性：远端不得让低覆盖数据冒充完整分钟指标
+        if systemCoverage == nil || !(systemCoverage! >= 0.8) {
+            systemEnergyWh = nil
+            systemPowerAverage = nil
+            systemPowerPeak = nil
+        }
+        if temperatureCoverage == nil || !(temperatureCoverage! >= 0.5) {
+            temperatureAverage = nil   // tMax 合法时保留
+        }
+        // 无合法 aggWin 时聚合字段整体不可信，不得进入曲线/统计
+        if snap.aggregateWindowStart == nil {
+            systemEnergyWh = nil
+            systemPowerAverage = nil
+            systemPowerPeak = nil
+            systemCoverage = nil
+            snap.batteryChargeWh = nil
+            snap.batteryDischargeWh = nil
+            temperatureAverage = nil
+            snap.temperatureMaximum = nil
+            snap.temperatureCoverage = nil
+            snap.screenOnFraction = nil
+            snap.lowPowerModeFraction = nil
+            snap.maximumThermalState = nil
+        }
+        snap.systemEnergyWh = systemEnergyWh
+        snap.systemPowerAverage = systemPowerAverage
+        snap.systemPowerPeak = systemPowerPeak
+        snap.systemCoverage = systemCoverage
+        snap.temperatureAverage = temperatureAverage
+        snap.temperatureMaximum = temperatureMaximum
+        snap.temperatureCoverage = temperatureCoverage
         snap.dirty = false
         return snap
     }

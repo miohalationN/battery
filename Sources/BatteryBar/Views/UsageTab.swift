@@ -329,20 +329,42 @@ private struct LiveReadoutsRow: View {
 // MARK: - 健康指标（独立观察子视图）
 
 /// 温度等读数在此视图内消费：变化只失效本块，不波及页面根。
+/// 健康度与弹窗消费同一个 healthMetric 模型，口径永不漂移。
 private struct HealthMetricsGrid: View {
     let sampler: PowerSampler
 
     var body: some View {
-        HStack(spacing: BBDesign.itemSpacing) {
-            StatTile(icon: "heart.fill", tint: .bbMint,
-                     value: sampler.systemHealthPercent > 0 ? String(format: "%.0f", sampler.systemHealthPercent) : "—",
-                     unit: sampler.systemHealthPercent > 0 ? "%" : "", label: "健康度")
-            StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环次数")
-            StatTile(icon: "thermometer", tint: .orange,
-                     value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
-                     unit: sampler.currentTemperature > 0.5 ? "°C" : "", label: "温度")
-            StatTile(icon: "battery.100", tint: .indigo, value: capacityString, unit: capacityString == "—" ? "" : "mAh", label: "满充容量")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: BBDesign.itemSpacing) {
+                StatTile(icon: "heart.fill", tint: .bbMint,
+                         value: healthValue,
+                         unit: healthValue == "—" ? "" : "%", label: "健康度")
+                StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环次数")
+                StatTile(icon: "thermometer", tint: .orange,
+                         value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
+                         unit: sampler.currentTemperature > 0.5 ? "°C" : "", label: "温度")
+                StatTile(icon: "battery.100", tint: .indigo, value: capacityString, unit: capacityString == "—" ? "" : "mAh", label: "满充容量")
+            }
+            if let source = sampler.healthMetric.sourceLabel {
+                Text(healthSourceFootnote(source))
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.tertiary)
+            }
         }
+    }
+
+    private var healthValue: String {
+        sampler.healthMetric.percent > 0 ? String(format: "%.0f", sampler.healthMetric.percent) : "—"
+    }
+
+    /// 明确标注健康口径：系统最大容量 vs 容量比估算（含读取时间）
+    private func healthSourceFootnote(_ source: String) -> String {
+        let estimated = sampler.healthMetric.isEstimated ? "（估算，非系统健康度）" : ""
+        if let readAt = sampler.healthMetric.readAt {
+            let time = readAt.formatted(.dateTime.hour().minute())
+            return "来源：\(source)\(estimated) · 读取于 \(time)"
+        }
+        return "来源：\(source)\(estimated)"
     }
 
     private var capacityString: String {

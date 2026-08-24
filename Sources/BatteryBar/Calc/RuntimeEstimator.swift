@@ -94,10 +94,17 @@ enum ConfidenceBand: String, Equatable {
 ///   上限无正增长不显示；异常速率直接拒绝，不再用 3–80%/h 夹值制造结果。
 enum RuntimeEstimator {
 
-    /// 展示门槛（冻结）：低于此置信度不显示 App 估算
+    /// 展示门槛（冻结）：最终 confidence 低于该值的结果一律返回 nil，
+    /// 内部证据可以低置信存在，但不得到达 UI。
     static let minimumDisplayConfidence = 0.40
     /// 两路速率差异超过该倍数视为互相矛盾
     static let contradictionRatio = 2.0
+
+    /// 单路/融合出口统一执行展示门槛：低于门槛视为数据不足。
+    private static func gated(_ result: EstimationResult?) -> EstimationResult? {
+        guard let result, result.confidence >= minimumDisplayConfidence else { return nil }
+        return result
+    }
 
     struct Inputs {
         var now = Date()
@@ -138,6 +145,8 @@ enum RuntimeEstimator {
             let contradicted = ratio > contradictionRatio
             var confidence = ((a.confidence + b.confidence) / 2) * (contradicted ? 0.6 : 1)
             confidence = min(1, confidence)
+            // 融合出口同样执行展示门槛：矛盾惩罚后低于门槛即数据不足
+            guard confidence >= minimumDisplayConfidence else { return nil }
             let spread = max(
                 abs(a.ratePercentPerHour - b.ratePercentPerHour) / fusedRate,
                 contradicted ? 0.35 : 0.15
@@ -154,9 +163,9 @@ enum RuntimeEstimator {
                 failureReason: contradicted ? "两路证据差异较大" : nil
             )
         case let (.some(a), .none):
-            return single(a, level: input.currentLevel)
+            return gated(single(a, level: input.currentLevel))
         case let (.none, .some(b)):
-            return single(b, level: input.currentLevel)
+            return gated(single(b, level: input.currentLevel))
         case (.none, .none):
             return nil
         }
@@ -289,7 +298,7 @@ enum RuntimeEstimator {
         // 80% 以上涓流/优化充电阶段降低置信度
         if input.currentLevel > 80 { confidence *= 0.6 }
 
-        return EstimationResult(
+        return gated(EstimationResult(
             confidence: clamp01(confidence),
             basis: .historicalSlope,
             valueHours: (100 - input.currentLevel) / median,
@@ -297,7 +306,7 @@ enum RuntimeEstimator {
             evidenceDuration: span,
             coverage: coverage,
             failureReason: input.currentLevel > 80 ? "涓流/优化充电阶段" : nil
-        )
+        ))
     }
 
     // MARK: - 纯函数工具

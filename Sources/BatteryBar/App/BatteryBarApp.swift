@@ -15,6 +15,7 @@ struct BatteryBarApp: App {
         WindowGroup(id: "main") {
             ContentView()
                 .environment(appDelegate.sampler)
+                .environment(appDelegate.loginItem)
                 .environmentObject(appDelegate.syncEngine)
                 .background(OpenWindowRelay())
                 .onAppear {
@@ -140,15 +141,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var observer: NSObjectProtocol?
+    private var loginItemActivationObserver: NSObjectProtocol?
     // refreshTitle 门控：文字与低电量态都没变时跳过（title/length 赋值会触发菜单栏重排）
     private var lastTitleText: String?
     private var lastTitleLowBattery = false
 
     let sampler = PowerSampler()
     let syncEngine = SyncEngine()
+    /// 开机自启动共享状态：右键菜单与设置页 Toggle 共用，禁止两套逻辑漂移
+    let loginItem = LoginItemState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         sampler.start()
+        loginItem.refresh()
+
+        // 应用重新激活后刷新登录项真实状态（用户可能在系统设置中手动改动）
+        loginItemActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.loginItem.refresh() }
+        }
 
         // 启动时让自动同步调度器与持久化配置一致
         let config = DataStore.shared.currentConfig()
@@ -222,7 +234,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         let loginItem = menu.addItem(withTitle: "开机自启动", action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
         loginItem.target = self
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        // 与设置页 Toggle 共用同一 LoginItemState；requiresApproval 不得假装已开启
+        if self.loginItem.isOn {
+            loginItem.state = .on
+        } else {
+            loginItem.state = .off
+            if self.loginItem.needsApproval {
+                loginItem.title = "开机自启动（需要在系统设置中允许）"
+            }
+        }
 
         menu.addItem(.separator())
 
@@ -252,20 +272,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.orderFrontStandardAboutPanel(nil)
     }
 
-    // MARK: - 开机自启动（SMAppService Login Item）
+    // MARK: - 开机自启动（与设置页共用 LoginItemState）
 
     @objc private func toggleLoginItem(_ sender: Any?) {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            // 常见失败原因：直接运行 .build 里的裸二进制（无 bundle），或 bundle 不在可注册位置
+        loginItem.refresh()
+        if let message = loginItem.setEnabled(!loginItem.isOn) {
             let alert = NSAlert()
             alert.messageText = "开机自启动设置失败"
-            alert.informativeText = "\(error.localizedDescription)\n请确认\(AppBrand.displayName)已安装到「应用程序」或个人目录的「应用程序」。"
+            alert.informativeText = "\(message)\n若系统要求批准，请在「系统设置 → 通用 → 登录项」中允许\(AppBrand.displayName)。"
             alert.alertStyle = .warning
             alert.runModal()
         }
@@ -321,6 +335,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         sampler.stop()
         syncEngine.stop()
         if let o = observer {
+            NotificationCenter.default.removeObserver(o)
+        }
+        if let o = loginItemActivationObserver {
             NotificationCenter.default.removeObserver(o)
         }
     }

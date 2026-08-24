@@ -104,6 +104,9 @@ import Testing
         let unknownMinute = try #require(unknownMinuteopt)
         #expect(unknownMinute.batteryChargeWh == 0)
         #expect(unknownMinute.batteryDischargeWh == 0)
+        // unknown 不累计任何一侧的 seconds
+        #expect(unknownMinute.batteryChargeSeconds == 0)
+        #expect(unknownMinute.batteryDischargeSeconds == 0)
 
         var dischargeOnly = WindowTelemetryAggregator()
         aggregate(&dischargeOnly, at: w0, channel: .discharge(6))
@@ -225,5 +228,45 @@ import Testing
         // 第二个 take 应为 nil：没有积压队列，内存 O(1)
         let secondTake = agg.takeCompletedAggregate()
         #expect(secondTake == nil)
+    }
+
+    /// 热压力最大值逐分钟重置：第一分钟「严重」不得继承进第二分钟；
+    /// 持续的热状态由新分钟首次 setState 重新登记。
+    @Test func thermalStateResetsPerMinute() throws {
+        var agg = WindowTelemetryAggregator()
+        agg.setState(thermalStateOrdinal: 3, thermalStateLabel: "严重", at: w0.addingTimeInterval(5))
+        aggregate(&agg, at: w0.addingTimeInterval(10))
+        aggregate(&agg, at: w0.addingTimeInterval(60))   // 完成第一分钟
+
+        let firstopt = agg.takeCompletedAggregate()
+        let first = try #require(firstopt)
+        #expect(first.windowStart == w0)
+        #expect(first.maximumThermalStateOrdinal == 3)
+        #expect(first.maximumThermalStateLabel == "严重")
+
+        // 第二分钟恢复正常并重新登记
+        agg.setState(thermalStateOrdinal: 0, thermalStateLabel: "正常", at: w0.addingTimeInterval(70))
+        aggregate(&agg, at: w0.addingTimeInterval(75))
+        aggregate(&agg, at: w0.addingTimeInterval(120))  // 完成第二分钟
+
+        let secondTake2 = agg.takeCompletedAggregate()
+        let second = try #require(secondTake2)
+        #expect(second.windowStart == w0.addingTimeInterval(60))
+        #expect(second.maximumThermalStateOrdinal == 0)
+        #expect(second.maximumThermalStateLabel == "正常")
+    }
+
+    /// 来源明确的真实 0W 放电：正确方向覆盖增加、Wh=0
+    @Test func validZeroWattDischargeAccumulatesCoverageOnly() throws {
+        var agg = WindowTelemetryAggregator()
+        aggregate(&agg, at: w0, channel: .discharge(0))
+        aggregate(&agg, at: w0.addingTimeInterval(30), channel: .discharge(0))
+        aggregate(&agg, at: w0.addingTimeInterval(60))
+
+        let minuteopt = agg.takeCompletedAggregate()
+        let minute = try #require(minuteopt)
+        #expect(abs(minute.batteryDischargeSeconds - 60) < 1e-9)
+        #expect(minute.batteryDischargeWh == 0)
+        #expect(minute.batteryChargeSeconds == 0)
     }
 }

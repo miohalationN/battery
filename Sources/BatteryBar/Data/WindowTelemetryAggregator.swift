@@ -284,6 +284,11 @@ struct WindowTelemetryAggregator {
         temperatureMax = nil
         screenSpan.secondsInWindow = 0
         lowPowerSpan.secondsInWindow = 0
+        // 热压力是逐分钟观察到的最大值：每个自然分钟必须重置，
+        // 不能把上一分钟的「严重」继承进新窗口；
+        // 若当前热状态在新分钟仍持续，该分钟首次 setState/observe 会重新登记。
+        thermalOrdinalMax = nil
+        thermalLabelForMax = nil
     }
 
     private mutating func finalizeCurrentWindow() {

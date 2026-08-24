@@ -3,12 +3,14 @@ import SwiftUI
 struct SyncTab: View {
     @ObservedObject var syncEngine: SyncEngine
     @Environment(PowerSampler.self) private var sampler
+    @Environment(LoginItemState.self) private var loginItem
     @State private var config = DataStore.shared.currentConfig()
     @State private var testing = false
     @State private var testResult: String?
     @State private var password = ""
     @State private var localSnapshotCount = 0
     @State private var localRecordCount = 0
+    @State private var loginItemError: String?
     // 密码防抖：用户停止输入 0.6s 后才写入 Keychain，避免每次按键都触发 SecItem 操作
     @State private var passwordDebounceTask: Task<Void, Never>?
 
@@ -16,12 +18,13 @@ struct SyncTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: BBDesign.sectionSpacing) {
                 PageHeader(
-                    title: "数据与同步",
-                    subtitle: "自动采样节奏与安全备份",
+                    title: "数据与设置",
+                    subtitle: "应用设置、自动采样节奏与安全备份",
                     systemImage: "arrow.triangle.branch",
                     tint: .bbPurple,
                     badge: config.isEnabled ? "WebDAV 已启用" : "仅本机"
                 )
+                appSettingsSection
                 autoSamplingSection
                 localDataSection
                 syncToggleCard
@@ -39,7 +42,8 @@ struct SyncTab: View {
         }
         .onAppear {
             reloadLocalCounts()
-            // 预填密码（用于测试连接 / 同步），从 Keychain 读取
+            // 页面重新出现时刷新登录项真实状态（用户可能在系统设置中改动）
+            loginItem.refresh()
             password = KeychainHelper.getPassword(
                 serverURL: config.serverURL,
                 username: config.username,
@@ -54,32 +58,84 @@ struct SyncTab: View {
         }
     }
 
+    // MARK: - 应用设置（开机自启动）
+
+    /// 与右键菜单共用同一 LoginItemState；requiresApproval 时不得假装已开启。
+    private var appSettingsSection: some View {
+        VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
+            SectionHeader(title: "应用设置", systemImage: "gearshape.fill", tint: .bbPurple)
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("开机时自动启动").font(.system(size: 12, weight: .medium))
+                    Text(loginItem.statusSubtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(loginItem.needsApproval ? .orange : .secondary)
+                }
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { loginItem.isOn },
+                    set: { newValue in
+                        loginItemError = loginItem.setEnabled(newValue)
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(loginItem.status == .notFound)
+            }
+
+            if loginItem.needsApproval {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                    Text("已在登录项中提出请求，需要在系统设置的登录项里允许后才会生效")
+                        .font(.system(size: 10))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("打开系统设置") { loginItem.openApprovalSettings() }
+                        .controlSize(.small)
+                }
+                .foregroundStyle(.orange)
+            }
+            if let message = loginItemError {
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+            }
+        }
+        .glassCard(accent: .bbPurple)
+    }
+
     // MARK: - 自动采样（只读说明）
 
-    /// 采样节奏由固定策略决定，不再提供用户可调刷新频率：
-    /// IORegistry 功率/温度没有可靠逐字段通知，5/15 秒是兜底读取；
-    /// 系统驱动可能数秒至十余秒才发布新值，相邻读数可能相同。
+    /// 用户语言描述采样行为；精确秒数与最近读取时间属于排障细节，
+    /// 收进默认折叠的「采样诊断」，不暗示传感器按固定频率更新。
     private var autoSamplingSection: some View {
         VStack(alignment: .leading, spacing: BBDesign.itemSpacing) {
             SectionHeader(title: "自动采样", systemImage: "arrow.clockwise.circle.fill", tint: .bbBlue)
             VStack(spacing: 7) {
-                cadenceRow(
-                    "当前模式",
-                    value: sampler.isForegroundReadingActive
-                        ? "前台 · \(Int(SamplingCadence.foregroundInterval)) 秒"
-                        : "后台 · \(Int(SamplingCadence.backgroundInterval)) 秒",
-                    tint: sampler.isForegroundReadingActive ? .bbMint : .secondary
-                )
-                cadenceRow("历史记录", value: "每 \(Int(SamplingCadence.historyInterval)) 秒", tint: .bbTeal)
-                cadenceRow(
-                    "CPU / GPU 分项",
-                    value: sampler.helperEnabled
-                        ? "独立每 \(Int(SamplingCadence.componentPowerInterval)) 秒"
-                        : "关闭（零采样）",
-                    tint: sampler.helperEnabled ? .bbAmber : .secondary
-                )
-                cadenceRow("电源插拔 / 低电量模式 / 热压力", value: "系统事件立即读取", tint: .bbBlue)
-                PollingHeartbeat(sampler: sampler)
+                cadenceRow("读数界面打开时自动提高读取频率，后台自动降低占用", value: "自动", tint: .bbBlue)
+                cadenceRow("功率和温度何时变化取决于 macOS 驱动", value: "系统决定", tint: .secondary)
+                cadenceRow("历史数据每分钟记录一次", value: "每分钟", tint: .bbTeal)
+
+                DisclosureGroup("采样诊断") {
+                    VStack(spacing: 7) {
+                        cadenceRow("前台兜底读取", value: "每 \(Int(SamplingCadence.foregroundInterval)) 秒", tint: .secondary)
+                        cadenceRow("后台保活读取", value: "每 \(Int(SamplingCadence.backgroundInterval)) 秒", tint: .secondary)
+                        cadenceRow("历史记录落盘", value: "每 \(Int(SamplingCadence.historyInterval)) 秒", tint: .secondary)
+                        cadenceRow(
+                            "CPU / GPU 分项",
+                            value: sampler.helperEnabled
+                                ? "独立每 \(Int(SamplingCadence.componentPowerInterval)) 秒"
+                                : "关闭（零采样）",
+                            tint: sampler.helperEnabled ? .bbAmber : .secondary
+                        )
+                        cadenceRow("电源插拔 / 低电量模式 / 热压力", value: "系统事件立即读取", tint: .secondary)
+                        PollingHeartbeat(sampler: sampler)
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.system(size: 10))
             }
 
             Divider().opacity(0.45)
@@ -88,7 +144,7 @@ struct SyncTab: View {
                 Image(systemName: "info.circle")
                     .font(.system(size: 10))
                     .padding(.top, 1)
-                Text("采样节奏由系统事件与固定兜底策略决定，不能手动调节。macOS 电池驱动常会隔数秒到十余秒批量发布功率、温度等数据；相邻读数相同代表驱动尚未发布新值，不是应用停止工作。")
+                Text("相邻两次读数相同代表驱动尚未发布新值，不是应用停止工作。")
                     .font(.system(size: 10))
                     .fixedSize(horizontal: false, vertical: true)
             }

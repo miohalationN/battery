@@ -56,7 +56,13 @@ final class PowerSampler {
     private(set) var currentLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
     private(set) var currentThermalState = "正常"
     private(set) var currentInfo: BatteryInfo?
-    private(set) var systemHealthPercent: Double = 0
+    /// 健康口径（冻结）：UI 首选 macOS system_profiler 报告的「最大容量」；
+    /// FullChargeCapacity÷DesignCapacity 仅作回退并标注「容量比估算」，
+    /// 不冒充系统健康度。Popover 与主窗口消费同一模型。
+    private(set) var healthMetric = BatteryHealthMetric()
+    /// 系统健康读取的小时级 TTL 状态；读取本身后台执行，不进采样路径
+    private var lastSystemHealthFetchAt: Date?
+    private static let systemHealthRefreshTTL: TimeInterval = 3600
     /// 最近一次基础读数轮询成功的时刻。只有明确读取它的小视图会跟随失效。
     private(set) var lastUpdateTime: Date = Date()
     /// 当前基础读数的实际轮询间隔：界面可见 5 秒，否则 15 秒保活。
@@ -175,21 +181,12 @@ final class PowerSampler {
         }
         sampleStorage()
 
-        // 优先使用同一轮 IORegistry 的实际/设计容量，避免启动时额外再跑一份
-        // system_profiler。只有容量字段确实不可用时才走后台兜底。
-        let reader = reader
-        let directHealth = reading?.batteryInfo?.healthPercent ?? 0
-        if directHealth > 0 {
-            systemHealthPercent = directHealth
-        } else {
-            Task { @MainActor in
-                let health = await Task.detached(priority: .userInitiated) {
-                    reader.readSystemHealthPercent()
-                }.value
-                if health != self.systemHealthPercent { self.systemHealthPercent = health }
-            }
-        }
+        // 健康口径：先以 IORegistry 容量比作为「估算」回退占位（明确标注），
+        // 随后后台读取 macOS 系统报告值（首选口径）覆盖；不因容量比>0 而跳过。
+        applyFallbackHealth()
+        refreshSystemHealthInBackground()
 
+        let reader = reader
         // 后台预加载静态信息（机器型号、序列号、制造商），避免主线程每秒 spawn system_profiler。
         // 加载完成无需广播：下一次轻量采样会经 shouldPublishMetadata 比对出新字段并写入 currentInfo，
         // Observation 只失效读取该属性的视图。
@@ -232,6 +229,11 @@ final class PowerSampler {
     }
 
     func stop() {
+        // 先关闭运行态门控：此后到达的定时器回调、事件回调、迟到 Task 一律
+        // 不得写状态或 journal；随后才撤销各事件源与定时器。
+        isStarted = false
+        pendingEventReadTask?.cancel()
+        pendingEventReadTask = nil
         dispatchTimer?.cancel()
         dispatchTimer = nil
         stopComponentPowerTimer()
@@ -239,10 +241,7 @@ final class PowerSampler {
         storageTimer = nil
         sleepWatcher.stop()
         unregisterSystemEventSources()
-        pendingEventReadTask?.cancel()
-        pendingEventReadTask = nil
         persistUsageState()
-        isStarted = false
     }
 
     // MARK: - 系统事件（IOPS / 低电量模式 / 热压力）
@@ -455,8 +454,11 @@ final class PowerSampler {
         isSleeping = false
         areScreensSleeping = false
         persistUsageState()
-        // 唤醒后立即重新读取，不等下一个兜底 deadline
-        if isStarted { sampleUI() }
+        // 唤醒后立即重新读取，不等下一个兜底 deadline；系统健康也按 TTL 刷新
+        if isStarted {
+            sampleUI()
+            refreshSystemHealthInBackground()
+        }
     }
 
     // MARK: - Usage state persistence
@@ -475,10 +477,45 @@ final class PowerSampler {
     // MARK: - 基础读取
 
     private func sampleUI() {
+        // stop 后到达的回调/迟到定时器一律不得写状态
+        guard isStarted else { return }
         // IOPS 在睡眠切换/驱动重载时可能瞬时失败。此时保留上次 UI 状态，不能把
         // 失败合成为 0%/离电并污染插拔状态机。
         guard let reading = reader.readBatteryReading() else { return }
         applyBaseReading(reading)
+    }
+
+    /// 后台低频刷新系统健康度：启动一次、TTL 到期或唤醒后触发；
+    /// system_profiler 在 detached 任务执行，绝不阻塞主线程、不进 5/15 秒路径。
+    private func refreshSystemHealthInBackground() {
+        guard BatteryHealthMetric.shouldRefresh(
+            lastFetchAt: lastSystemHealthFetchAt, now: Date(), ttl: Self.systemHealthRefreshTTL
+        ) else { return }
+        lastSystemHealthFetchAt = Date()
+        let reader = reader
+        Task { @MainActor in
+            let reading = await Task.detached(priority: .utility) {
+                reader.readSystemHealth()
+            }.value
+            guard isStarted else { return }
+            let resolved = BatteryHealthMetric.resolved(
+                systemReading: reading,
+                maxCapacityMah: currentInfo?.maxCapacity ?? 0,
+                designCapacityMah: currentInfo?.designCapacity ?? 0
+            )
+            if healthMetric != resolved { healthMetric = resolved }
+        }
+    }
+
+    /// 回退口径：FullChargeCapacity÷DesignCapacity，标注「容量比估算」；
+    /// 全部缺失时保持不可用（percent=0），不默认 100。
+    private func applyFallbackHealth() {
+        let fallback = BatteryHealthMetric.resolved(
+            systemReading: nil,
+            maxCapacityMah: currentInfo?.maxCapacity ?? 0,
+            designCapacityMah: currentInfo?.designCapacity ?? 0
+        )
+        if healthMetric != fallback { healthMetric = fallback }
     }
 
     /// 应用一轮成功的基础读取：发布可观察状态、更新质量样本、喂入聚合器。
@@ -547,7 +584,11 @@ final class PowerSampler {
         // currentInfo 只承载界面使用的元数据。电压、电流、温度和功率已有独立
         // 可观察字段；若把这些高频值也纳入 BatteryInfo 等值比较，会平白多触发
         // 一次读取该属性的视图更新。
-        if shouldPublishMetadata(info) { currentInfo = info }
+        if shouldPublishMetadata(info) {
+            currentInfo = info
+            // 容量信息更新时，若系统健康值尚未取得，同步刷新容量比估算占位
+            if !healthMetric.sourceIsSystem { applyFallbackHealth() }
+        }
         lastUpdateTime = readAt
 
         updateQualityMetrics(reading)
@@ -588,10 +629,13 @@ final class PowerSampler {
             isEstimated: provenance.systemLoadIsEstimated,
             readAt: readAt
         )
-        let batteryPower = info?.batteryPower
+        let batteryPowerAvailable = info?.batteryPowerAvailable ?? false
+        let batteryPowerValue = info?.batteryPower ?? 0
+        // 可信零瓦 = available + some(0)；没读到功率 = unavailable + nil。
+        // 兼容哨兵 0（available=false 时的 batteryPower==0）不得进入质量模型。
         batteryPowerMetric.observe(
-            batteryPower,
-            source: batteryPower == nil ? .unavailable : provenance.batteryPowerSource,
+            batteryPowerAvailable ? .some(batteryPowerValue) : .none,
+            source: batteryPowerAvailable ? provenance.batteryPowerSource : .unavailable,
             isEstimated: provenance.batteryPowerSource == .voltageCurrentDerived,
             readAt: readAt
         )
@@ -653,6 +697,7 @@ final class PowerSampler {
     }
 
     @objc private func fireStorage() {
+        guard isStarted else { return }
         sampleStorage()
     }
 
@@ -676,6 +721,8 @@ final class PowerSampler {
     /// 估算证据不足时必须显示「正在校准」，不得用平滑值填补。
 
     private func sampleStorage() {
+        // stop 后到达的定时器回调一律不得写 journal 或状态
+        guard isStarted else { return }
         // 采集失败时跳过这一分钟；伪造 0% 快照比一个明确的数据缺口更有害。
         guard let reading = reader.readBatteryReading() else { return }
         applyBaseReading(reading)
@@ -724,6 +771,10 @@ final class PowerSampler {
 
         // 新分钟快照是估算的合法重算触发
         recalculateEstimates()
+
+        // 系统健康的小时级 TTL 刷新：仅一次廉价日期比较，读取在后台执行，
+        // 绝不随 5/15 秒基础采样重复启动 system_profiler。
+        refreshSystemHealthInBackground()
 
         // 只在离电时累加使用时间
         // awake 计入屏幕亮起；睡眠期间 Timer 不触发，实际睡眠时长由 onWake 补足
