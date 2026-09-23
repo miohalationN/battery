@@ -620,3 +620,140 @@ Hitches trace（本页图表改动后必须取得有效 hitches trace）。本�
 - 本轮未请求通知权限、未修改/安装/卸载 Helper 或 launchd、未触发管理员授权；WebDAV 未启用、
   无真实请求；未改登录项和用户数据。当前已安装 App 保持上一绿色 artifact，待本提交一次推送
   后 Build 与 UI Profile 均绿，再验签、比对哈希并替换安装。
+
+---
+
+# 第六轮交付 — 全量代码审查返工（估算门控对称、生命周期边角、主窗口重开、UI 诚实口径）
+
+> 执行 Agent 移交文档，供 assurance/review agent 独立验证。
+> 基线：`bb704a6`（第五轮发布候选，clean 且与 origin 同步）。
+> 提交链：`8aca9fb`（估算链与远端校验）→ `6647f6b`（采样生命周期与数据层加固）
+> → `622a748`（主窗口重开与 UI 诚实口径）→ `3430873`（CI 发现：hasRangeStats
+> 归属修复）→ `d73dc6d`（CI 发现：WebDAV 解析器空白覆盖修复）。
+> 普通 push，无 force push，未改写任何已有提交。
+
+## 范围与来源
+
+对全部约 1.5 万行源码的四路并行深度审查（采样核心 / 聚合估算 / UI / 同步安全），
+修复全部确认成立的 P1/P2 与可落地 P3。核心计算链（积分数学、口径门控、XPC 安全、
+TLS/重定向防御）经审查验证正确，未改动其语义；本轮修复集中在审查暴露的门控不对称、
+生命周期边角与 UI 出口退化。
+
+## 估算与数据清洗（8aca9fb）
+
+- 充电置信度去掉 `max(coverage, 0.5)` 掩护：合盖睡眠仅首尾两点的稀疏证据
+  （coverage≈0.07）置信度跌破 0.40 门槛 → 正在校准，不再显示「充满需 19 小时」；
+  与放电侧 coverage≥0.7 硬门槛对称。既有充电用例 coverage 均≈1，无一破坏。
+- 放电 Theil–Sen 中位斜率补 100%/h 上限：SMC 重校准跳变（48%→28% 级）直接
+  拒绝，与充电 ≤80%/h、功率 <100%/h 对称。
+- 远端 v5 核心字段域校验：level 越界/缺失/非有限整行拒绝（原实现缺省回退 0
+  可穿透估算链）；温度/瓦数/分项越界降级哨兵 0 不破坏整条记录；合法负温度
+  （-20…100，与 tAvg/tMax 同域）原样保留。
+- EstimationResult 移除自定义 ==（合成相等性覆盖区间与失败原因字段）。
+- 健康口径降级自愈：system_profiler 瞬时失败保留既有口径不再降级（原来一次
+  spawn 失败会把系统 98% 覆盖为容量比估算且 1 小时不重试）。
+
+## 采样生命周期与数据层（6647f6b）
+
+- PowerSampler：stop() 复位合并窗口（stop→start 后事件驱动不再永久失效）；
+  IOPS C context 改 passRetained + IOPSSourceCleanup + deinit 兜底（未配对
+  stop 释放不再有悬挂指针/泄漏）；暗唤醒（Power Nap）不再被计入亮屏份额
+  （areScreensSleeping 只由 screensDidWake 恢复）；聚合与质量模型温度门槛
+  兼容负温度；新增 currentBatteryPowerAvailable 供 UI 守卫。
+- BatteryReader：system_profiler 三处统一走 runProcessCapturingStdout（先并发
+  读管道再等待，消除 64KB 管道死锁模式；15s 超时 SIGTERM→SIGKILL，不再可能
+  挂起累积）；旧硬件 AdapterPower 仅在离电作回退并标 estimated（不再冒充
+  精确遥测进 trustedSystemLoad 积分）；安装脚本 root 复制前整行比对源文件
+  SHA-256（CryptoKit 计算传入，关闭校验-复制 TOCTOU 窗口）；清理无观察者
+  通知与 readBatteryInfo 死代码。
+- DataStore：dirty 快照豁免 24h 保留窗口（仅同步启用时；独立 20k 硬上限
+  ≈2 周分钟样本兜底）——断网/凭据失败期间的数据恢复后仍可上传；
+  updateConfig 落盘前保留内存中较新 lastSyncAt。
+- SyncEngine：远端坏行/坏文件隔离不再整体中止——快照行级坏行跳过（下次上传
+  覆盖该日文件时自然清除），cycles 文件损坏跳过上传保护远端累计数据、
+  快照同步不受影响、本地 dirty 保留待重试；下载方向单文件损坏跳过该设备继续。
+- WebDAVClient：href 逐段累积原文、收尾统一去首尾空白（多段回调含空格 URL
+  不再拼错致 404）；清理 dead 凭据同步删除 legacy v1 项（旧密码不残留复活）。
+- CycleTracker：平均功率剔除哨兵 0（与 UsageSessionModel 同口径）。
+- DataStore.flushNow + applicationWillTerminate 排空（退出丢尾写防护）。
+
+## 主窗口重开与 UI（622a748 + 3430873）
+
+- 主窗口重开：OpenWindowRelay 在窗口存活时把场景级 openWindow action 注册给
+  AppDelegate；窗口关闭后中继销毁，但 action 由常驻 WindowGroup 场景提供仍可
+  重建窗口。右键菜单与 Popover「查看详情」统一走 presentMainWindow 权威路径
+  （detached NSHostingController 的 openWindow 环境为空 action，原路径静默
+  失效）；保留裸 NSWindow 回滚教训（2026-08-22 材质退化），未走 NSWindow 路线。
+- CommandGroup(replacing: .newItem) 移除 Cmd+N 多开入口（单实例窗口语义）。
+- UI 诚实口径：功耗统计无覆盖达标样本显示「—」（0.0W 假读数消失）；循环次数
+  currentInfo 未取得显示「—」（真实 0 次如实显示）；电池功率三处（弹窗功率行/
+  侧栏状态/功耗页电池行）按 currentBatteryPowerAvailable 守卫。
+- 图表对账与断线：24h 曲线改 ChartDownsampler.downsampleTrendPoints 全范围
+  等距抽稀（缺口标志传播），不再只画末端 ≈4h 与同卡 24h 统计无法对账；概览
+  时段曲线按原始序列标记 >90s 缺口分段渲染（合盖睡眠不插值，与功耗曲线同口径）。
+- 视觉：五色品牌令牌改 NSColor 动态深浅双变体（浅色小字前景对比度
+  ≈1.8:1 → ≥4.5:1 WCAG AA）；峰值 tile 红色改琥珀（红色语义为错误）；
+  8/8.5pt 微字号统一 10pt；弹窗卡片圆角统一 BBDesign.cornerRadiusSmall；
+  温度统一「39.1°C」无空格；「休眠」统一「屏幕关闭/休眠」；「放电 N%」改
+  「下降 N%」；电压统一 V 展示。
+- 可访问性：弹窗与侧栏电量条合并单一 VoiceOver 元素输出百分比；StatTile
+  合并朗读；测试连接结果判定改前缀匹配。
+
+## CI 发现并修复的本地盲区（透明披露）
+
+- `3430873`：hasRangeStats 计算属性误放 PowerLoadHero（引用不到 PowerTab 的
+  rangeStats）——视图层 CLT 编译盲区，Build `35867151817` 发现。
+- `d73dc6d`：WebDAVResponseParser didEndElement 不清 currentElement，元素间
+  空白使 foundCharacters 重复进入 getcontentlength 分支把已解析 size 覆盖回
+  0。原先靠 foundCharacters 入口的空白 guard 掩盖；href 原文累积修复将其
+  暴露，Build `35867627358` 的 WebDAVResponseParserTests 三例发现。本地
+  可执行 harness（真实 parser + 两个 fixture）复现验证后修复，CI 复验通过。
+
+## 本轮验证
+
+- local-gate 三步全绿（parse / Swift6 typecheck / WMO -O / Helper build）；
+  `bash -n` 与 `git diff --check` 通过。
+- Build `35868249422` **success：236 tests / 30 suites 全过**（上轮基线
+  218/30；新增 18 例：睡眠充电稀疏端点 nil、放电 240%/h 拒绝且合法 25%/h
+  不受影响、level 域校验边界（0/100 合法、越界/缺失/非有限拒绝）、越界
+  温度降级与负温度保留、远端坏行隔离且好行保留、cycles 损坏跳过上传但
+  快照成功、同步凭据删除含 legacy 等）。
+- UI Profile `35868249424` **success**（35m26s，概览页与功耗页 Animation
+  Hitches trace 有效，Gate required traces 校验通过）。
+
+## artifact、签名、哈希与安装
+
+- artifact：`BatteryBar.zip`（Build 35868249422 产出，HEAD=d73dc6d）。
+- 主程序 SHA-256：`0adcd42b80ed4a6cc10c7c2e79760cb1b127f08923f0f3e38e88eda03aa75d8c`
+- Helper SHA-256：`01d2215431a3ade8c6c9d20221c865ab9eefcf4e6580ac2a67f771def3dd773d`
+- codesign `--verify --deep --strict`：主 App 与内嵌 Helper 分别通过。
+- 安装前备份：数据 `~/Library/Application Support/BatteryBar-backup-pre-fix6-20260923`；
+  旧 App `~/.Trash/BatteryBar-pre-fix6-*.app`。ditto 安装后哈希与下载
+  artifact 逐一比对一致。
+- Info.plist 实测：1.5.0 / build 6 / 电池档案 / com.batterybar.app。
+- 运行时验证：pid 3805 稳定（CPU 0.0%、RSS 22.9MB），零 TCP 连接；
+  journal 1414 行按 60s 节奏追加，最新行 v5 字段完整（加权
+  temperatureAverage=44.59、systemCoverage=0.73、maximumThermalState=偏高）。
+  **首次自然观测到「接电未充电」运行期窗口**：ext=true、charging=false 时
+  batteryChargeWh=0 / batteryDischargeWh=0 双侧零累计——此前轮次声明该场景
+  只能由 CI 证明，本轮实机出现并验证方向门控正确。
+- 未替用户开启任何开关：BatteryBarHelperEnabled=0、通知双开关=0、
+  登录项未注册；Helper/launchd 未安装/卸载/修改，管理员授权全程未请求。
+
+## 外部系统触碰状态（第六轮）
+
+- WebDAV：未启用、无真实请求。系统 Helper/launchd：未安装/卸载/修改。
+- 管理员授权：全程未请求（仅实现安装脚本的哈希校验加固，未实际执行安装）。
+- 用户数据：journal 只追加；数据与旧 App 均有可恢复备份。
+- git：普通 push 至 main，无 force push、无历史改写。
+
+## 遗留限制
+
+1. 主窗口关闭后重开的「场景级 openWindow action」路径基于 WindowGroup 场景
+   常驻假设，未做 UI 自动化点击验证（无辅助功能权限）；以代码路径证据 +
+   Build/UI Profile 通过证明，assurance 验收时可实机点击右键菜单复核。
+2. 暗唤醒不误计亮屏、coalescer 复位、deinit 兜底为代码审查级验证
+   （PowerSampler 私有状态机无纯逻辑单测注入点），运行期仅能长期观测。
+3. 上轮限制沿用：历史 batteryChargeWh（e3997af 规则产物）不可信、无迁移；
+   Helper 仍绑定旧 App CDHash（用户下次开启分项采样时一次授权更新）；
+   登录项 requiresApproval 需用户手动允许。
