@@ -590,4 +590,38 @@ import Foundation
         #expect(snap.displayBrightness == 0.5)
         #expect(snap.brightnessAvailable == true)
     }
+
+    /// 核心字段 level 的域校验：越界/缺失/非有限整行拒绝，不得回退 0 穿透估算链
+    @Test func remoteJSONRejectsOutOfRangeOrMissingLevel() {
+        var dict = validBase()
+        dict["level"] = 9999.0                        // 越界（旧端 bug/手改）
+        #expect(parse(dict) == nil)
+        dict["level"] = -3.0
+        #expect(parse(dict) == nil)
+        dict["level"] = Double.infinity               // 非有限
+        #expect(parse(dict) == nil)
+        dict.removeValue(forKey: "level")             // 缺键：无电量信息的行没有解析价值
+        #expect(parse(dict) == nil)
+        dict["level"] = 0.0                           // 合法边界 0%
+        #expect(parse(dict) != nil)
+        dict["level"] = 100.0                         // 合法边界 100%
+        #expect(parse(dict) != nil)
+    }
+
+    /// 越界温度/瓦数降级为哨兵 0：不破坏整条记录（与聚合字段降级口径一致）；
+    /// 合法负温度（-20...100 域内）必须原样保留
+    @Test func remoteJSONOutOfRangeTempAndWattDegradeToZero() throws {
+        var dict = validBase()
+        dict["temp"] = 250.0                           // 越界温度 → 0 哨兵
+        dict["watt"] = -8.0                            // 负瓦数 → 0 哨兵
+        dict["cpu"] = 1e300                            // 荒谬分项 → 0
+        let parsed = try #require(parse(dict))
+        #expect(parsed.temperature == 0)
+        #expect(parsed.wattage == 0)
+        #expect(parsed.cpuPower == 0)
+        #expect(parsed.level == 55)                    // 行本身保留
+        dict["temp"] = -5.0                            // 冬季户外负温度 → 原样保留
+        let cold = try #require(parse(dict))
+        #expect(cold.temperature == -5)
+    }
 }

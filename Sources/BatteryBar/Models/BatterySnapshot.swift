@@ -294,21 +294,32 @@ struct BatterySnapshot: Codable, Identifiable, Equatable {
         else { return nil }
 
         let isCharging = dict["charging"] as? Bool ?? false
-        let wattage = dict["watt"] as? Double ?? 0
+        // 核心字段域校验（与 v5 聚合字段同等防御）：level 是估算链的直接输入，
+        // 越界/非有限（如 9999）整行拒绝，不得缺省回退或穿透估算。
+        guard let levelRaw = dict["level"] as? Double,
+              levelRaw.isFinite, (0...100).contains(levelRaw) else { return nil }
+        // 越界的可选数值降级为哨兵/0（不破坏整条记录），与聚合字段口径一致。
+        // 温度合法域 -20...100；0 兼任「不可读」哨兵（下游 >0.25 门槛丢弃）。
+        func remoteCoreDouble(_ raw: Any?, domain: ClosedRange<Double>) -> Double {
+            guard let value = raw as? Double, value.isFinite, domain.contains(value) else { return 0 }
+            return value
+        }
+        let wattage = remoteCoreDouble(dict["watt"], domain: 0...500)
+        let temperature = remoteCoreDouble(dict["temp"], domain: -20...100)
         var snap = BatterySnapshot(
             timestamp: Date(timeIntervalSince1970: ts),
-            level: dict["level"] as? Double ?? 0,
+            level: levelRaw,
             isCharging: isCharging,
             wattage: wattage,
-            temperature: dict["temp"] as? Double ?? 0,
+            temperature: temperature,
             screenOn: dict["screen"] as? Bool ?? false,
             batteryPower: dict["batteryWatt"] as? Double,
             systemPowerAvailable: dict["powerAvailable"] as? Bool,
             systemPowerIsEstimated: dict["powerEstimated"] as? Bool,
-            cpuPower: dict["cpu"] as? Double ?? 0,
-            gpuPower: dict["gpu"] as? Double ?? 0,
-            displayPower: dict["disp"] as? Double ?? 0,
-            dramPower: dict["dram"] as? Double ?? 0,
+            cpuPower: remoteCoreDouble(dict["cpu"], domain: 0...500),
+            gpuPower: remoteCoreDouble(dict["gpu"], domain: 0...500),
+            displayPower: remoteCoreDouble(dict["disp"], domain: 0...500),
+            dramPower: remoteCoreDouble(dict["dram"], domain: 0...500),
             externalConnected: dict["ext"] as? Bool,
             lowPowerModeEnabled: dict["lpm"] as? Bool,
             thermalState: dict["thermal"] as? String

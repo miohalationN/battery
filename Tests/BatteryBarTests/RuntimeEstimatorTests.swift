@@ -396,4 +396,43 @@ import Testing
         }
         #expect(RuntimeEstimator.chargeEstimate(absurd) == nil)
     }
+
+    /// 合盖睡眠充电：30 分钟仅首尾两条快照，覆盖率 ≈0.07 → 置信度跌破门槛，
+    /// 不得显示「充满需 19 小时」（覆盖率下限 0.5 掩盖缺陷的回归反例）。
+    @Test func sleepChargingWithSparseEndpointsReturnsNil() {
+        var input = RuntimeEstimator.Inputs()
+        input.now = t0.addingTimeInterval(1800)
+        input.currentLevel = 43
+        input.isCharging = true
+        input.externalConnected = true
+        input.snapshots = [
+            snapshot(0, 40, externalConnected: true, isCharging: true),
+            snapshot(1800, 43, externalConnected: true, isCharging: true),
+        ]
+        let evidence = RuntimeEstimator.chargeEstimate(input)
+        #expect(evidence == nil)
+    }
+
+    /// 放电斜率异常上限（与充电/功率路径同规则）：密集采样的 SMC 重校准跳变
+    /// 序列（每分钟 -4%，240%/h）→ 直接拒绝，不得输出「剩余 12 分钟」。
+    @Test func absurdDischargeSlopeIsRejected() {
+        var input = RuntimeEstimator.Inputs()
+        input.now = t0.addingTimeInterval(1200)
+        input.currentLevel = 10
+        input.externalConnected = false
+        // 20 分钟从 90% 掉到 10%：跨度/净降/覆盖率全部达标，唯独斜率 240%/h
+        input.snapshots = (0...20).map { minute in
+            snapshot(TimeInterval(minute * 60), 90 - Double(minute) * 4.0)
+        }
+        #expect(RuntimeEstimator.historicalSlopeEvidence(input) == nil)
+        #expect(RuntimeEstimator.dischargeEstimate(input) == nil)
+
+        // 合法高负载放电（25%/h）不受影响
+        input.snapshots = (0...20).map { minute in
+            snapshot(TimeInterval(minute * 60), 80 - Double(minute) * (25.0 / 60.0))
+        }
+        input.currentLevel = 71.6
+        let fast = RuntimeEstimator.historicalSlopeEvidence(input)
+        #expect(fast != nil)
+    }
 }

@@ -33,15 +33,6 @@ struct EstimationResult: Equatable {
     var band: ConfidenceBand {
         ConfidenceBand.of(confidence)
     }
-
-    static func == (lhs: EstimationResult, rhs: EstimationResult) -> Bool {
-        lhs.basis == rhs.basis
-            && lhs.valueHours == rhs.valueHours
-            && lhs.ratePercentPerHour == rhs.ratePercentPerHour
-            && lhs.confidence == rhs.confidence
-            && lhs.evidenceDuration == rhs.evidenceDuration
-            && lhs.coverage == rhs.coverage
-    }
 }
 
 extension EstimationResult {
@@ -198,7 +189,9 @@ enum RuntimeEstimator {
         guard coverage >= 0.7 else { return nil }
 
         let slopes = pairwiseSlopes(points: points, minimumPairInterval: 5 * 60)
-        guard let median = median(of: slopes), median > 0 else { return nil }
+        // 与充电/功率路径同规则：异常速率直接拒绝（不夹值）。SMC 重校准跳变
+        // （如两点间 48%→28%）产生的荒谬斜率不得进入续航计算。
+        guard let median = median(of: slopes), median > 0, median <= 100 else { return nil }
 
         let confidence = clamp01(min(span / 3600, netDrop / 5, coverage))
         return EstimationResult(
@@ -294,7 +287,9 @@ enum RuntimeEstimator {
         guard median <= 80 else { return nil }
 
         let coverage = coveredFraction(points: points, span: span)
-        var confidence = clamp01(min(span / (30 * 60), gain / 5, max(coverage, 0.5))) * 0.9
+        // 覆盖率直接参与 min（与放电侧同规则）：首尾仅两点的「睡眠充电」场景
+        // 覆盖率极低 → 置信度跌破展示门槛 → 正在校准，不再被 0.5 下限掩盖。
+        var confidence = clamp01(min(span / (30 * 60), gain / 5, coverage)) * 0.9
         // 80% 以上涓流/优化充电阶段降低置信度
         if input.currentLevel > 80 { confidence *= 0.6 }
 
