@@ -311,6 +311,10 @@ final class WebDAVResponseParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName: String?) {
+        // 元素结束即清空 currentElement：元素之间的空白文本（换行+缩进）也会
+        // 触发 foundCharacters，残留的元素名会让空白段重复进入文本分支——
+        // 如把已解析的 getcontentlength 覆盖回 0。
+        currentElement = ""
         if elementName.lowercased() == "response",
            let href = currentHref?.trimmingCharacters(in: .whitespacesAndNewlines),
            !href.isEmpty {
