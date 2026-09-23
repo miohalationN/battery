@@ -215,6 +215,11 @@ struct PowerTab: View {
         )
     }
 
+    /// 范围内是否存在覆盖达标样本（无 → 统计 tile 显示「—」而非归零值）
+    private var hasRangeStats: Bool {
+        rangeStats.sampleCount > 0
+    }
+
     // MARK: - 历史趋势
 
     private var historyCard: some View {
@@ -398,11 +403,6 @@ private struct PowerLoadHero: View {
         guard sampler.currentBatteryPowerAvailable else { return "电池功率 不可读" }
         let direction = sampler.currentIsCharging ? "充入" : "放出"
         return String(format: "电池%@ %.1f W", direction, sampler.currentBatteryPower)
-    }
-
-    /// 范围内是否存在覆盖达标样本（无 → 统计 tile 显示「—」而非归零值）
-    private var hasRangeStats: Bool {
-        rangeStats.sampleCount > 0
     }
 }
 
