@@ -188,7 +188,13 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                     guard let lineData = line.data(using: .utf8),
                           let dict = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                           let remote = BatterySnapshot.from(remoteJSON: dict)
-                    else { throw WebDAVError.parseError }
+                    else {
+                        // 坏行隔离：跳过该行继续合并，绝不让单行坏数据中止整个
+                        // 同步。跳过的远端行不进入 merged，下次上传覆盖该日文件
+                        // 时自然清除；本地 dirty 数据照常上传。
+                        syncLogger.error("Skip corrupt remote snapshot line during upload merge")
+                        continue
+                    }
                     if let local = byID[remote.id] {
                         // timestamp 胜出
                         if remote.timestamp > local.timestamp { byID[remote.id] = remote }
@@ -227,8 +233,18 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         var mergedCycles: [ChargeCycle] = dirtyCycles
         do {
             let data = try await client.download(from: path)
-            let remote = try JSONDecoder().decode([ChargeCycle].self, from: data)
-            guard remote.count <= Self.maximumCycles else { throw WebDAVError.tooManyEntries }
+            // 远端文件损坏/不兼容：跳过本次 cycles 上传（不覆盖远端——仅上传
+            // 本地数据会把其他设备已上传的循环永久清掉），保留本地 dirty 待
+            // 下次重试；快照同步不受影响。该文件持续损坏时每次都会被隔离，
+            // 直到远端被修复或用户手动清理。
+            guard let remote = try? JSONDecoder().decode([ChargeCycle].self, from: data) else {
+                syncLogger.error("Remote cycles file unreadable; skipping cycles upload to protect remote data")
+                return
+            }
+            guard remote.count <= Self.maximumCycles else {
+                syncLogger.error("Remote cycles file exceeds limit; skipping cycles upload")
+                return
+            }
             var byID: [UUID: ChargeCycle] = [:]
             for c in dirtyCycles { byID[c.id] = c }
             for c in remote {
@@ -281,7 +297,11 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
                     guard let lineData = line.data(using: .utf8),
                           let dict = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                           let snap = BatterySnapshot.from(remoteJSON: dict)
-                    else { throw WebDAVError.parseError }
+                    else {
+                        // 坏行隔离：跳过继续，单行坏数据不中止整个下载合并
+                        syncLogger.error("Skip corrupt remote snapshot line during download")
+                        continue
+                    }
                     if let existing = snapshotsByID[snap.id] {
                         if snap.timestamp > existing.timestamp { snapshotsByID[snap.id] = snap }
                     } else {
@@ -312,8 +332,13 @@ final class SyncEngine: ObservableObject, @unchecked Sendable {
         var cyclesByID: [UUID: ChargeCycle] = [:]
         for file in jsonFiles {
             let data = try await client.download(from: file.path)
-            let decoded = try JSONDecoder().decode([ChargeCycle].self, from: data)
-            guard decoded.count <= Self.maximumCycles else { throw WebDAVError.tooManyEntries }
+            // 单个坏文件隔离：跳过该设备继续合并其余设备。下载方向不写任何
+            // 远端内容，跳过安全；该设备的循环在远端修复前不进入本地。
+            guard let decoded = try? JSONDecoder().decode([ChargeCycle].self, from: data) else {
+                syncLogger.error("Skip unreadable remote cycles file: \(file.name, privacy: .public)")
+                continue
+            }
+            guard decoded.count <= Self.maximumCycles else { continue }
             for cycle in decoded {
                 if let existing = cyclesByID[cycle.id] {
                     if cycle.startDate > existing.startDate { cyclesByID[cycle.id] = cycle }

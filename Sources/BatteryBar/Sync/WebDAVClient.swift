@@ -291,13 +291,17 @@ final class WebDAVResponseParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
         switch currentElement.lowercased() {
-        case "href": currentHref = (currentHref ?? "") + trimmed
-        case "getcontentlength": currentSize = Int(trimmed) ?? 0
+        case "href":
+            // XML 解析器可能把一个文本节点分多次回调（如含空格/实体）。
+            // 段间空白是 URL 的一部分（WebDAV 允许未编码空格），逐段 trim
+            // 会在拼接时把它们永久裁掉导致 404；只累积原文，收尾统一去首尾空白。
+            currentHref = (currentHref ?? "") + string
+        case "getcontentlength":
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            currentSize = Int(trimmed) ?? 0
         case "getlastmodified":
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
@@ -307,7 +311,9 @@ final class WebDAVResponseParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName: String?) {
-        if elementName.lowercased() == "response", let href = currentHref {
+        if elementName.lowercased() == "response",
+           let href = currentHref?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !href.isEmpty {
             let normalizedPath = normalize(href: href)
             let name = normalizedPath.split(separator: "/").last.map(String.init) ?? normalizedPath
             files.append(WebDAVFile(

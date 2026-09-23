@@ -56,9 +56,14 @@ final class DataStore: @unchecked Sendable {
         queue.sync {
             // 核心数据文件解码失败时先备份 .bak 再从空数据重建，
             // 避免格式损坏导致的数据静默丢失（MAINTENANCE_PLAN 回滚策略的落地）
+            // 先加载同步配置：待上传（dirty）样本是否豁免 24h 保留窗口取决于
+            // 同步是否启用，裁剪必须发生在配置就绪之后。
+            syncConfig = loadJSON(from: configFile, backupOnFailure: true) ?? .default
             let journalSnapshots = loadSnapshotJournal()
             let loaded = journalSnapshots ?? loadJSON(from: snapshotsFile, backupOnFailure: true) ?? []
-            snapshots = Self.retainedSnapshots(loaded, now: Date())
+            snapshots = Self.retainedSnapshots(
+                loaded, now: Date(), keepDirty: syncConfig.isEnabled
+            )
             // 第一次启动迁移旧数组文件；之后每条采样只追加一行。
             // 同时清掉超出保留窗口的旧记录与可能存在的末尾半行。
             if journalSnapshots == nil || snapshots.count != loaded.count {
@@ -68,7 +73,6 @@ final class DataStore: @unchecked Sendable {
                 rewriteSnapshotJournal()
             }
             cycles = loadJSON(from: cyclesFile, backupOnFailure: true) ?? []
-            syncConfig = loadJSON(from: configFile, backupOnFailure: true) ?? .default
             if syncConfig.migrateLegacyHardwareIdentifierIfNeeded() {
                 saveJSON(syncConfig, to: configFile)
                 dataStoreLogger.notice("Replaced legacy hardware-derived WebDAV device identifier")
@@ -86,7 +90,11 @@ final class DataStore: @unchecked Sendable {
 
             // 内存侧立即按保留窗口收敛；文件侧的过期行延迟清理，
             // 累计到 compactExpiredThreshold 才做一次原子 compact。
-            let retained = Self.retainedSnapshots(snapshots, now: snap.timestamp, hours: 24, maxCount: Self.hardCap)
+            // 同步启用时待上传（dirty）样本豁免窗口，防断网期间静默丢失。
+            let retained = Self.retainedSnapshots(
+                snapshots, now: snap.timestamp, hours: 24, maxCount: Self.hardCap,
+                keepDirty: syncConfig.isEnabled
+            )
             let dropped = snapshots.count - retained.count
             if dropped > 0 {
                 snapshots = retained
@@ -208,10 +216,18 @@ final class DataStore: @unchecked Sendable {
         queue.sync { syncConfig }
     }
 
-    /// 线程安全地更新同步配置并落盘
+    /// 线程安全地更新同步配置并落盘。
+    /// 调用方通常以「页面读出的旧配置」为基础提交：若同步期间 lastSyncAt 已被
+    /// updateLastSyncAt 推进，全量覆盖会把较新的同步时间回退。因此落盘前
+    /// 保留内存中较新的 lastSyncAt（与 updateLastSyncAt 的字段级合并对称）。
     func updateConfig(_ config: SyncConfig) {
         queue.async { [self] in
-            syncConfig = config
+            var merged = config
+            if let existing = syncConfig.lastSyncAt,
+               config.lastSyncAt.map({ $0 < existing }) ?? true {
+                merged.lastSyncAt = existing
+            }
+            syncConfig = merged
             saveJSON(syncConfig, to: configFile)
         }
     }
@@ -252,22 +268,47 @@ final class DataStore: @unchecked Sendable {
         queue.sync {}
     }
 
+    /// 退出路径同步排空（applicationWillTerminate 在 stop() 之后调用）：
+    /// stop 触发的最后一次 async 落盘必须赶在进程结束前完成，
+    /// 否则随进程退出静默丢失。串行队列上的空 sync 即等待全部已入队写完成。
+    func flushNow() {
+        queue.sync {}
+    }
+
     // MARK: - JSON helpers
 
     /// 只保留时间窗口内的记录，并用硬上限防御异常高频或远端脏数据。
+    /// keepDirty（同步启用时）：待上传的 dirty 快照豁免 24h 窗口——断网/凭据
+    /// 失败期间的数据在恢复后仍可上传，不随本地保留窗口静默丢失；
+    /// 豁免行有独立的更大硬上限兜底（≈2 周分钟样本，防异常高频写入）。
     static func retainedSnapshots(
         _ source: [BatterySnapshot],
         now: Date,
         hours: TimeInterval = 24,
-        maxCount: Int = 1_500
+        maxCount: Int = 1_500,
+        keepDirty: Bool = false
     ) -> [BatterySnapshot] {
         guard maxCount > 0 else { return [] }
         let cutoff = now.addingTimeInterval(-hours * 3600)
-        let recent = source
-            .filter { $0.timestamp >= cutoff && $0.timestamp <= now.addingTimeInterval(300) }
-            .sorted { $0.timestamp < $1.timestamp }
-        return recent.count > maxCount ? Array(recent.suffix(maxCount)) : recent
+        let futureBound = now.addingTimeInterval(300)
+        let sorted = source.sorted { $0.timestamp < $1.timestamp }
+        var inWindow: [BatterySnapshot] = []
+        var dirtyPending: [BatterySnapshot] = []
+        for snap in sorted {
+            if snap.timestamp >= cutoff && snap.timestamp <= futureBound {
+                inWindow.append(snap)
+            } else if keepDirty && snap.dirty {
+                dirtyPending.append(snap)
+            }
+        }
+        if inWindow.count > maxCount { inWindow = Array(inWindow.suffix(maxCount)) }
+        if dirtyPending.count > dirtyHardCap { dirtyPending = Array(dirtyPending.suffix(dirtyHardCap)) }
+        return (inWindow + dirtyPending).sorted { $0.timestamp < $1.timestamp }
     }
+
+    /// dirty 豁免行的独立硬上限（≈2 周分钟样本；journal 每行数百字节，
+    /// 极端积压下约 10MB，超出后按时间保留最近的）
+    private static let dirtyHardCap = 20_000
 
     private func loadSnapshotJournal() -> [BatterySnapshot]? {
         guard FileManager.default.fileExists(atPath: snapshotJournalFile.path),

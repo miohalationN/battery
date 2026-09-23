@@ -88,6 +88,14 @@ enum KeychainHelper {
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)
+        // 同步清除该用户名的 legacy v1 项：清空密码是明确的「删除该凭据」
+        // 意图，残留的旧项会在用户改回旧源站时把旧密码「复活」回输入框。
+        let legacyQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: legacyService,
+            kSecAttrAccount as String: username.trimmingCharacters(in: .whitespacesAndNewlines),
+        ]
+        SecItemDelete(legacyQuery as CFDictionary)
     }
 
     static func credentialAccount(serverURL: String, username: String) -> String {

@@ -33,7 +33,12 @@ final class PowerSampler {
 
     // MARK: 系统事件源
     private var powerSourceRunLoopSource: CFRunLoopSource?
-    private var iopsContextBox: WeakSamplerBox?
+    /// IOPS 回调 C context 的清理句柄。box 由 CFRunLoopSource 的 context 以
+    /// passRetained 持有（与 sampler 生命周期解耦，未配对 stop 释放后回调经
+    /// 弱引用安全返回）；unregister/deinit 必须配对 release，防止泄漏或悬挂。
+    /// nonisolated(unsafe)：deinit（非隔离上下文）需要兜底读取该句柄——
+    /// 对象销毁时不存在并发访问，模式安全；正常读写均在 MainActor。
+    nonisolated(unsafe) private var iopsSourceCleanup: IOPSSourceCleanup?
     private var systemEventObservers: [NSObjectProtocol] = []
     private var baseReadingCoalescer = NotificationCoalescer()
     private var pendingEventReadTask: Task<Void, Never>?
@@ -47,6 +52,8 @@ final class PowerSampler {
     private(set) var currentWattage: Double = 0
     /// 电池包充入/放出功率绝对值（瓦特）；方向由 currentIsCharging 表达
     private(set) var currentBatteryPower: Double = 0
+    /// 本轮电池包功率是否真实可用（含可信 0W；false = 没有读到功率）
+    private(set) var currentBatteryPowerAvailable = false
     private(set) var currentPowerAvailable = false
     private(set) var currentPowerIsEstimated = false
     private(set) var currentTemperature: Double = 0
@@ -230,6 +237,10 @@ final class PowerSampler {
         isStarted = false
         pendingEventReadTask?.cancel()
         pendingEventReadTask = nil
+        // 复位合并窗口：若 stop 恰发生在 delay 窗口内，pendingSince 会永久滞留，
+        // 之后的 start() 里所有事件都会被判 mergeIntoPending 而不再立即读取，
+        // 事件驱动采样静默失效。此处按「已完成」记账清空 pending 状态。
+        baseReadingCoalescer.fireCompleted(at: Date())
         dispatchTimer?.cancel()
         dispatchTimer = nil
         stopComponentPowerTimer()
@@ -240,17 +251,25 @@ final class PowerSampler {
         persistUsageState()
     }
 
+    deinit {
+        // 未配对 stop() 释放的兜底：source 与 context 持有的盒子已与实例解耦
+        // （回调经弱引用安全返回），但 RunLoop source 会泄漏；调度到主队列
+        // 完成最后一次配对清理，不引用实例自身。
+        iopsSourceCleanup?.scheduleCleanupOnMain()
+    }
+
     // MARK: - 系统事件（IOPS / 低电量模式 / 热压力）
 
     /// 注册事件源：IOPS 电源变化用专用 RunLoop source；低电量模式与热压力用
     /// Foundation 系统通知。回调统一进入合并窗口后触发立即读取。
     private func registerSystemEventSources() {
         // IOPS 回调是 C 函数指针，不能捕获 Swift 上下文；通过 context 指针
-        // 传回弱引用盒子。source 只挂在主 RunLoop 上，注销在主线程同步完成，
+        // 传回弱引用盒子。box 用 passRetained 交给 C context 持有：即使本实例
+        // 未配对 stop() 就释放，盒子依然存活，回调经弱引用安全返回。
+        // source 只挂在主 RunLoop 上，注销在主线程同步完成，
         // 回调内 assumeIsolated 安全且不会在 stop 后再触发。
         let box = WeakSamplerBox(self)
-        iopsContextBox = box
-        let context = Unmanaged.passUnretained(box).toOpaque()
+        let context = Unmanaged.passRetained(box).toOpaque()
         let callback: IOPowerSourceCallbackType = { rawContext in
             guard let rawContext else { return }
             let box = Unmanaged<WeakSamplerBox>.fromOpaque(rawContext).takeUnretainedValue()
@@ -260,6 +279,7 @@ final class PowerSampler {
         if let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() {
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
             powerSourceRunLoopSource = source
+            iopsSourceCleanup = IOPSSourceCleanup(source: source, context: context)
         }
 
         let center = NotificationCenter.default
@@ -281,7 +301,10 @@ final class PowerSampler {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
             powerSourceRunLoopSource = nil
         }
-        iopsContextBox = nil
+        // 配对释放 context 持有的盒子，防止泄漏；清理后回调（若仍到达）经
+        // 弱引用空安全返回
+        iopsSourceCleanup?.cleanupNow()
+        iopsSourceCleanup = nil
         for observer in systemEventObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -457,7 +480,10 @@ final class PowerSampler {
             sleepStartTime = nil
         }
         isSleeping = false
-        areScreensSleeping = false
+        // 暗唤醒（Power Nap/维护唤醒）只有 systemDidWake、没有 screensDidWake：
+        // 屏幕仍处于熄灭状态，areScreensSleeping 必须保持 true，亮屏份额与
+        // 使用时长才不会把维护唤醒分钟误计为亮屏。恢复亮屏只由
+        // handleScreensWake（screensDidWake 通知）负责。
         persistUsageState()
         // 唤醒后立即重新读取，不等下一个兜底 deadline；系统健康也按 TTL 刷新
         if isStarted {
@@ -503,6 +529,10 @@ final class PowerSampler {
                 reader.readSystemHealth()
             }.value
             guard isStarted else { return }
+            // 瞬时失败（spawn 失败/解析失败）不得降级既有口径：只有拿到新的
+            // 系统读数才覆盖；失败时保留旧值（含启动时的回退口径），
+            // TTL 到期后的下一次刷新自然重试。与「系统值永远优先」冻结规则一致。
+            guard let reading else { return }
             let resolved = BatteryHealthMetric.resolved(
                 systemReading: reading,
                 maxCapacityMah: currentInfo?.maxCapacity ?? 0,
@@ -567,6 +597,12 @@ final class PowerSampler {
         if abs(wattage - currentWattage) > 0.05 { currentWattage = wattage }
         if abs((info?.batteryPower ?? 0) - currentBatteryPower) > 0.05 {
             currentBatteryPower = info?.batteryPower ?? 0
+        }
+        // 电池包功率可用性（含可信 0W）与系统负载可用性分开发布：
+        // UI 三处（弹窗功率行 / 侧栏状态 / 功耗页电池行）据此决定显示数值
+        // 还是「不可用」，不得把启动初值 0.0W 冒充真实读数。
+        if (info?.batteryPowerAvailable ?? false) != currentBatteryPowerAvailable {
+            currentBatteryPowerAvailable = info?.batteryPowerAvailable ?? false
         }
         if (info?.systemPowerAvailable ?? false) != currentPowerAvailable {
             currentPowerAvailable = info?.systemPowerAvailable ?? false
@@ -677,8 +713,9 @@ final class PowerSampler {
             readAt: readAt
         )
         let temperature = info?.temperature ?? 0
+        // 合法负温度（冬季户外）必须计入覆盖；0 兼任「不可读」哨兵。
         temperatureMetric.observe(
-            temperature > 0.25 ? temperature : nil,
+            abs(temperature) > 0.25 ? temperature : nil,
             source: provenance.temperatureSource ?? .unavailable,
             readAt: readAt
         )
@@ -708,7 +745,8 @@ final class PowerSampler {
             date: readAt,
             trustedSystemLoad: reading.trustedSystemLoad,
             batteryChannel: reading.batteryChannel,
-            temperatureCelsius: temperature > 0.25 ? temperature : nil,
+            // 合法负温度（冬季户外）必须计入温度覆盖与趋势；0 = 不可读哨兵
+            temperatureCelsius: abs(temperature) > 0.25 ? temperature : nil,
             expectedInterval: effectiveRefreshInterval
         ))
     }
@@ -930,10 +968,36 @@ final class PowerSampler {
     }
 
     /// IOPS C 回调与 MainActor 采样器之间的弱引用桥。
-    /// 生命周期完全由 PowerSampler 在主线程管理：注册时创建、注销时置空，
-    /// 因此回调触发时盒子必然存活，不存在跨线程释放竞争。
+    /// 盒子由 CFRunLoopSource 的 context 以 passRetained 持有：注册时创建，
+    /// 注销（或 deinit 兜底清理）时 release。即使采样器未配对 stop() 释放，
+    /// 回调经弱引用取不到 sampler 时安全返回，不存在悬挂指针。
     private final class WeakSamplerBox {
         weak var sampler: AnyObject?
         init(_ sampler: AnyObject) { self.sampler = sampler }
+    }
+
+    /// IOPS RunLoop source 与 C context 的配对清理器。
+    /// @unchecked Sendable：仅携带不可变指针；清理动作固定在主队列执行
+    /// （与注册线程一致，CFRunLoopSource 要求在安装它的 RunLoop 线程注销）。
+    private final class IOPSSourceCleanup: @unchecked Sendable {
+        private let source: CFRunLoopSource
+        private let context: UnsafeMutableRawPointer
+
+        init(source: CFRunLoopSource, context: UnsafeMutableRawPointer) {
+            self.source = source
+            self.context = context
+        }
+
+        /// 主线程同步清理（stop() 的正常路径）
+        func cleanupNow() {
+            CFRunLoopSourceInvalidate(source)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            Unmanaged<WeakSamplerBox>.fromOpaque(context).release()
+        }
+
+        /// deinit 兜底路径：主队列异步清理，不引用已释放的采样器实例
+        func scheduleCleanupOnMain() {
+            DispatchQueue.main.async { self.cleanupNow() }
+        }
     }
 }

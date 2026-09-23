@@ -65,7 +65,12 @@ final class CycleTracker {
         }
 
         if !isPluggedIn {
-            batteryPowerSamples.append(batteryPower)
+            // 平均功率口径（与 UsageSessionModel.makeSummary 一致）：哨兵 0 =
+            // 功率不可读（快照 batteryPower 兼容字段无 available 位），不得混入
+            // 稀释均值；>0 的真实读数照常采样。
+            if batteryPower > 0 {
+                batteryPowerSamples.append(batteryPower)
+            }
             // 累加放电量（相邻 tick 正向差值，忽略电量读数回跳）
             if let last = lastSeenLevel {
                 accumulatedDischarge += max(0, last - level)

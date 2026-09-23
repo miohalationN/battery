@@ -3,6 +3,7 @@ import AppKit
 import IOKit
 import IOKit.ps
 import Security
+import CryptoKit
 import os
 
 private let batteryReaderLogger = Logger(subsystem: "com.batterybar", category: "BatteryReader")
@@ -91,8 +92,6 @@ final class BatteryReader: @unchecked Sendable {
 
     /// 后台预加载静态信息（machine model + serial/mfg 兜底）。
     /// 在 PowerSampler.start() 中调用，避免主线程阻塞。
-    /// 加载完成后通过 `staticInfoLoaded` 通知外部触发 UI 刷新。
-    private static let staticInfoLoadedNotification = Notification.Name("BatteryReaderStaticInfoLoaded")
     func prefetchStaticInfo(includeBatteryFallback: Bool = true) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
@@ -120,7 +119,8 @@ final class BatteryReader: @unchecked Sendable {
             self._staticInfo = info
             self.staticInfoLock.unlock()
             batteryReaderLogger.info("Static info prefetched: model=\(model ?? "nil", privacy: .public), serial=\(serialFallback, privacy: .private(mask: .hash))")
-            NotificationCenter.default.post(name: Self.staticInfoLoadedNotification, object: nil)
+            // 无需广播：下一次轻量采样经 shouldPublishMetadata 比对出新字段写入
+            // currentInfo，Observation 只失效读取该属性的视图（设计如此，勿加通知）。
         }
     }
 
@@ -181,10 +181,6 @@ final class BatteryReader: @unchecked Sendable {
             provenance: info == nil ? .empty : provenance,
             readAt: Date()
         )
-    }
-
-    func readBatteryInfo() -> BatteryInfo? {
-        readBatteryInfoWithProvenance(powerSource: readPowerSource()).info
     }
 
     private func readBatteryInfoWithProvenance(powerSource: PowerSourceInfo?) -> (info: BatteryInfo?, provenance: ReadingProvenance) {
@@ -330,6 +326,11 @@ final class BatteryReader: @unchecked Sendable {
 
         let legacySystemPower = Self.firstValidDouble([
             dictionaryDouble(batteryData, key: "SystemPower"),
+        ], normalize: Self.normalizedTelemetryPower)
+        // AdapterPower 充电时 = 负载 + 充电功率 + 损耗，离电时无意义；仅在
+        // 离电且 SystemPower 缺失时作近似的系统负载回退，并标记为估算，
+        // 不冒充精确遥测进入 trustedSystemLoad 积分。
+        let legacyAdapterPower = Self.firstValidDouble([
             dictionaryDouble(batteryData, key: "AdapterPower"),
         ], normalize: Self.normalizedTelemetryPower)
         let systemPower: Double
@@ -347,6 +348,14 @@ final class BatteryReader: @unchecked Sendable {
             systemPowerIsEstimated = false
             provenance.systemLoadSource = .batteryDataSystemPower
             provenance.systemLoadIsEstimated = false
+        } else if !externalConnected, legacyAdapterPower > 0 {
+            // 离电回退：适配器功率字段在拔电后通常清零，少数旧机型保留上次
+            // 值；标估算，不冒充精确值进入积分
+            systemPower = legacyAdapterPower
+            systemPowerAvailable = true
+            systemPowerIsEstimated = true
+            provenance.systemLoadSource = .batteryDataSystemPower
+            provenance.systemLoadIsEstimated = true
         } else if !externalConnected {
             // 离电时，电池包输出功率可作为整机负载的近似值（含转换损耗）。
             systemPower = batteryPower
@@ -416,9 +425,12 @@ final class BatteryReader: @unchecked Sendable {
     }
 
     /// IORegistry Temperature/VirtualTemperature 使用百分之一摄氏度；兼容少数直接给 °C 的节点。
+    /// 合法域 -20...100（与 v5 tAvg/tMax 远端校验一致）；冬季户外电池可达负温度，
+    /// 不得用 raw > 0 当哨兵丢弃。0 兼任「不可读」哨兵（下游 >0.25 门槛丢弃），
+    /// 真实 0°C 极罕见且不会改变趋势判断；与历史口径保持一致。
     static func normalizedBatteryTemperature(_ raw: Double?) -> Double {
-        guard let raw, raw.isFinite, raw > 0 else { return 0 }
-        let celsius = raw > 150 ? raw / 100 : raw
+        guard let raw, raw.isFinite, raw != 0 else { return 0 }
+        let celsius = abs(raw) > 150 ? raw / 100 : raw
         return (celsius >= -20 && celsius <= 100) ? celsius : 0
     }
 
@@ -493,80 +505,135 @@ final class BatteryReader: @unchecked Sendable {
         let designCapacity: Int
     }
 
-    /// 通过 `system_profiler SPPowerDataType -json` 读取电池静态信息。
-    /// 仅 serialNumber/manufacturer 可靠；cycleCount/maxCapacity 作为备份。
-    /// ⚠️ 耗时 1-3s，仅在 prefetchStaticInfo 中后台调用一次，不在 readBatteryInfo 中直接调用。
-    private func readSystemProfilerBattery() -> SystemProfilerBattery? {
+    /// 跨线程安全收集子进程 stdout 的小盒子（Swift 6 严格并发下禁止在
+    /// @Sendable 闭包里直接捕获局部 var）。
+    private final class StdoutBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func set(_ value: Data) {
+            lock.lock()
+            data = value
+            lock.unlock()
+        }
+        func get() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return data
+        }
+    }
+
+    /// 运行子进程并捕获 stdout，带超时与管道死锁保护（冻结口径）：
+    /// - 先并发读管道再等待退出——否则输出超过管道缓冲（64KB）时子进程
+    ///   阻塞在 write、父进程死锁在 `waitUntilExit`；
+    /// - 超时先 SIGTERM（宽限 2s）再 SIGKILL，防止 system_profiler 偶发挂起
+    ///   在后台按 TTL 节奏累积成排不掉的僵尸调用。
+    /// 只允许在 detached 工具线程调用；失败返回 nil。
+    private static func runProcessCapturingStdout(
+        path: String,
+        arguments: [String],
+        timeout: TimeInterval
+    ) -> Data? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        process.arguments = ["SPPowerDataType", "-json"]
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
 
         do {
             try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let powerArray = json["SPPowerDataType"] as? [[String: Any]],
-                  let power = powerArray.first(where: { ($0["_name"] as? String)?.contains("battery") ?? false }) else { return nil }
-
-            // 真实 JSON 结构：serial/device_name 在 sppower_battery_model_info 嵌套字典里
-            let modelInfo = power["sppower_battery_model_info"] as? [String: Any] ?? [:]
-            let serial = modelInfo["sppower_battery_serial_number"] as? String ?? ""
-            let deviceName = modelInfo["sppower_battery_device_name"] as? String ?? ""
-
-            // system_profiler 不提供 manufacturer 字段，Apple Silicon 电池无此信息
-            let mfg = "Apple Inc."
-
-            let healthInfo = power["sppower_battery_health_info"] as? [String: Any] ?? [:]
-            let cycleCount = healthInfo["sppower_battery_cycle_count"] as? Int ?? 0
-            var maxCap = 0
-            if let maxStr = healthInfo["sppower_battery_health_maximum_capacity"] as? String {
-                maxCap = Int(maxStr.replacingOccurrences(of: "%", with: "")) ?? 0
-            }
-
-            return SystemProfilerBattery(
-                serialNumber: serial,
-                manufacturer: mfg,
-                deviceName: deviceName,
-                cycleCount: cycleCount,
-                maxCapacity: maxCap,
-                designCapacity: 0
-            )
         } catch {
             return nil
         }
+
+        // 先并发读满管道，再等待退出（消除 write 阻塞死锁模式）
+        let box = StdoutBox()
+        let readQueue = DispatchQueue(label: "bb.process.stdout-read")
+        let group = DispatchGroup()
+        group.enter()
+        readQueue.async {
+            box.set(pipe.fileHandleForReading.readDataToEndOfFile())
+            group.leave()
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+            let killDeadline = Date().addingTimeInterval(2)
+            while process.isRunning, Date() < killDeadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+        }
+        process.waitUntilExit()
+        _ = group.wait(timeout: .now() + 2)
+
+        let captured = box.get()
+        guard !captured.isEmpty else { return nil }
+        return captured
+    }
+
+    /// 通过 `system_profiler SPPowerDataType -json` 读取电池静态信息。
+    /// 仅 serialNumber/manufacturer 可靠；cycleCount/maxCapacity 作为备份。
+    /// ⚠️ 耗时 1-3s，仅在 prefetchStaticInfo 中后台调用一次，不在 readBatteryInfo 中直接调用。
+    private func readSystemProfilerBattery() -> SystemProfilerBattery? {
+        guard let data = Self.runProcessCapturingStdout(
+            path: "/usr/sbin/system_profiler",
+            arguments: ["SPPowerDataType", "-json"],
+            timeout: 15
+        ) else { return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let powerArray = json["SPPowerDataType"] as? [[String: Any]],
+              let power = powerArray.first(where: { ($0["_name"] as? String)?.contains("battery") ?? false }) else { return nil }
+
+        // 真实 JSON 结构：serial/device_name 在 sppower_battery_model_info 嵌套字典里
+        let modelInfo = power["sppower_battery_model_info"] as? [String: Any] ?? [:]
+        let serial = modelInfo["sppower_battery_serial_number"] as? String ?? ""
+        let deviceName = modelInfo["sppower_battery_device_name"] as? String ?? ""
+
+        // system_profiler 不提供 manufacturer 字段，Apple Silicon 电池无此信息
+        let mfg = "Apple Inc."
+
+        let healthInfo = power["sppower_battery_health_info"] as? [String: Any] ?? [:]
+        let cycleCount = healthInfo["sppower_battery_cycle_count"] as? Int ?? 0
+        var maxCap = 0
+        if let maxStr = healthInfo["sppower_battery_health_maximum_capacity"] as? String {
+            maxCap = Int(maxStr.replacingOccurrences(of: "%", with: "")) ?? 0
+        }
+
+        return SystemProfilerBattery(
+            serialNumber: serial,
+            manufacturer: mfg,
+            deviceName: deviceName,
+            cycleCount: cycleCount,
+            maxCapacity: maxCap,
+            designCapacity: 0
+        )
     }
 
     /// 通过 `system_profiler SPHardwareDataType -json` 读取机器型号与芯片型号。
     /// 返回组合字符串："MacBook Air (Apple M1)"。失败返回 nil。
     /// ⚠️ 耗时 1-3s，仅在 prefetchStaticInfo 中后台调用一次。
     private func readHardwareModel() -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        process.arguments = ["SPHardwareDataType", "-json"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let arr = json["SPHardwareDataType"] as? [[String: Any]],
-                  let hw = arr.first else { return nil }
-            let machineName = hw["machine_name"] as? String ?? ""
-            let chipType = hw["chip_type"] as? String ?? ""
-            if machineName.isEmpty && chipType.isEmpty { return nil }
-            if chipType.isEmpty { return machineName }
-            if machineName.isEmpty { return chipType }
-            return "\(machineName) (\(chipType))"
-        } catch {
-            return nil
-        }
+        guard let data = Self.runProcessCapturingStdout(
+            path: "/usr/sbin/system_profiler",
+            arguments: ["SPHardwareDataType", "-json"],
+            timeout: 15
+        ) else { return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = json["SPHardwareDataType"] as? [[String: Any]],
+              let hw = arr.first else { return nil }
+        let machineName = hw["machine_name"] as? String ?? ""
+        let chipType = hw["chip_type"] as? String ?? ""
+        if machineName.isEmpty && chipType.isEmpty { return nil }
+        if chipType.isEmpty { return machineName }
+        if machineName.isEmpty { return chipType }
+        return "\(machineName) (\(chipType))"
     }
 
     // MARK: - 电源适配器 / 充电协议
@@ -812,26 +879,22 @@ final class BatteryReader: @unchecked Sendable {
             return cached
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        process.arguments = ["SPPowerDataType", "-json"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let percent = BatteryHealthMetric.systemProfilerHealthPercent(json: json) {
-                let reading = SystemHealthReading(percent: percent, readAt: Date())
-                healthCacheLock.lock()
-                cachedSystemHealth = reading
-                healthCacheLock.unlock()
-                return reading
-            }
-        } catch {}
+        guard let data = Self.runProcessCapturingStdout(
+            path: "/usr/sbin/system_profiler",
+            arguments: ["SPPowerDataType", "-json"],
+            timeout: 15
+        ) else {
+            // 解析失败不缓存失败态：下次 TTL 到期重试；调用方负责回退口径。
+            return nil
+        }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let percent = BatteryHealthMetric.systemProfilerHealthPercent(json: json) {
+            let reading = SystemHealthReading(percent: percent, readAt: Date())
+            healthCacheLock.lock()
+            cachedSystemHealth = reading
+            healthCacheLock.unlock()
+            return reading
+        }
 
         // 解析失败不缓存失败态：下次 TTL 到期重试；调用方负责回退口径。
         return nil
@@ -1034,6 +1097,13 @@ final class BatteryReader: @unchecked Sendable {
         return staticCodeCDHash(at: executableURL)
     }
 
+    /// 文件内容 SHA-256（hex 小写）。installHelper 用它关闭「用户态校验 →
+    /// root cp」之间源文件被同用户进程替换的 TOCTOU：root 在复制前整行比对。
+    static func sha256Hex(at path: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// 执行安装
     private func installHelper(from helperPath: String) -> Bool {
         let helperID = "com.batterybar.helper"
@@ -1041,6 +1111,13 @@ final class BatteryReader: @unchecked Sendable {
         let plistPath = "/Library/LaunchDaemons/\(helperID).plist"
         guard let authorizedClientCDHash = currentExecutableCDHash() else {
             batteryReaderLogger.error("Cannot bind Helper to the current signed executable")
+            return false
+        }
+        // 关闭「用户态校验 → root cp」之间的 TOCTOU：源文件位于用户可写的 App
+        // Bundle 内，校验通过后仍可能被同用户进程替换。把内容哈希传给提权脚本，
+        // 由 root 在复制前重新校验，不一致则整个安装失败（不落盘任何文件）。
+        guard let expectedSourceSHA256 = Self.sha256Hex(at: helperPath) else {
+            batteryReaderLogger.error("Cannot hash bundled Helper before install")
             return false
         }
 
@@ -1072,7 +1149,9 @@ final class BatteryReader: @unchecked Sendable {
         // 用 osascript 请求管理员权限执行安装。所有动态路径都通过 argv 传入，再由
         // AppleScript 的 `quoted form of` 生成 shell 参数；禁止把路径直接插进命令字符串。
         // plist 内容也由提权 shell 直接写入最终路径，不经过可被同用户进程替换的临时文件。
-        // 顺序很重要：先 bootout 杀旧进程释放文件锁，再 cp 覆盖二进制，最后 bootstrap 启动新进程。
+        // 顺序很重要：root 先整行比对源文件 SHA-256（防用户态校验后被替换的 TOCTOU，
+        // 校验失败则整条命令失败、不落盘任何文件），再 bootout 杀旧进程释放文件锁，
+        // cp 覆盖二进制，最后 bootstrap 启动新进程。
         let script = """
         on run argv
             set helperSource to item 1 of argv
@@ -1080,7 +1159,9 @@ final class BatteryReader: @unchecked Sendable {
             set plistDestination to item 3 of argv
             set plistContents to item 4 of argv
             set authPrompt to item 5 of argv
-            set shellCommand to "mkdir -p /Library/PrivilegedHelperTools && (launchctl bootout system/com.batterybar.helper 2>/dev/null || true) && sleep 1 && cp " & quoted form of helperSource & " " & quoted form of helperDestination & " && chown root:wheel " & quoted form of helperDestination & " && chmod 755 " & quoted form of helperDestination & " && /usr/bin/printf %s " & quoted form of plistContents & " > " & quoted form of plistDestination & " && chown root:wheel " & quoted form of plistDestination & " && chmod 644 " & quoted form of plistDestination & " && sleep 1 && launchctl bootstrap system/ " & quoted form of plistDestination
+            set expectedHash to item 6 of argv
+            set hashLine to expectedHash & "  " & helperSource
+            set shellCommand to "mkdir -p /Library/PrivilegedHelperTools && /usr/bin/shasum -a 256 " & quoted form of helperSource & " | /usr/bin/grep -qx " & quoted form of hashLine & " && (launchctl bootout system/com.batterybar.helper 2>/dev/null || true) && sleep 1 && cp " & quoted form of helperSource & " " & quoted form of helperDestination & " && chown root:wheel " & quoted form of helperDestination & " && chmod 755 " & quoted form of helperDestination & " && /usr/bin/printf %s " & quoted form of plistContents & " > " & quoted form of plistDestination & " && chown root:wheel " & quoted form of plistDestination & " && chmod 644 " & quoted form of plistDestination & " && sleep 1 && launchctl bootstrap system/ " & quoted form of plistDestination
             do shell script shellCommand with administrator privileges with prompt authPrompt
         end run
         """
@@ -1094,6 +1175,7 @@ final class BatteryReader: @unchecked Sendable {
             plistPath,
             plistContent,
             "\(AppBrand.localizedName)需要安装后台服务以读取 CPU/GPU 分项功耗",
+            expectedSourceSHA256,
         ]
         let pipe = Pipe()
         task.standardOutput = pipe
