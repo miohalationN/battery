@@ -33,6 +33,11 @@ struct BatteryBarApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 940, height: 660)
+        .commands {
+            // 单实例工具：移除「文件 → 新建窗口」与 Cmd+N 多开入口，保证主窗口
+            // 全程至多一个，关闭后经状态栏右键菜单 / Popover「查看详情」重开。
+            CommandGroup(replacing: .newItem) {}
+        }
     }
 
     init() {
@@ -143,6 +148,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var aboutWindow: NSWindow?
     private var observer: NSObjectProtocol?
     private var loginItemActivationObserver: NSObjectProtocol?
+    /// 主窗口关闭后重建用的场景级 openWindow action（OpenWindowRelay.onAppear 注册）
+    private var openMainWindowAction: (() -> Void)?
     // refreshTitle 门控：文字与低电量态都没变时跳过（title/length 赋值会触发菜单栏重排）
     private var lastTitleText: String?
     private var lastTitleLowBattery = false
@@ -208,7 +215,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.delegate = self
         popover.contentViewController = NSHostingController(
-            rootView: PopoverMenuBarView(sampler: sampler)
+            rootView: PopoverMenuBarView(
+                sampler: sampler,
+                requestOpenMainWindow: { [weak self] in
+                    self?.openMainWindowFromPopover()
+                }
+            )
         )
         self.popover = popover
 
@@ -272,7 +284,56 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func openMainWindowFromMenu(_ sender: Any?) {
+        presentMainWindow()
+    }
+
+    /// 打开主窗口的唯一权威路径（右键菜单与 Popover「查看详情」共用）：
+    /// 1) 已有可见主窗口 → 直接前置；2) 主窗口已关闭 → 用启动后捕获的
+    /// 场景级 openWindow action 重建（OpenWindowRelay 视图随窗口销毁，但
+    /// action 由 WindowGroup 场景提供，场景常驻 App 生命周期）；3) 从未
+    /// 打开过（action 未注册）→ 兜底通知，由窗口内存活的中继响应。
+    private func presentMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = Self.findVisibleMainWindow() {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        if let action = openMainWindowAction {
+            action()
+            return
+        }
         NotificationCenter.default.post(name: .init("OpenMainWindowRequested"), object: nil)
+    }
+
+    /// 场景级 openWindow action 的注册入口（由 OpenWindowRelay.onAppear 调用）
+    func registerOpenMainWindowAction(_ action: @escaping () -> Void) {
+        openMainWindowAction = action
+    }
+
+    /// Popover「查看详情」入口：先收起弹窗再呈现主窗口（同一权威路径）
+    func openMainWindowFromPopover() {
+        popover?.performClose(nil)
+        presentMainWindow()
+    }
+
+    /// 查找已存在的可见主窗口（SwiftUI WindowGroup 创建的 ContentView 所在窗口）。
+    /// 排除 MenuBarExtra popover（私有类名特征）、About 面板（380 宽）与
+    /// 状态栏 Popover（340 宽）：主窗口最小宽度 840，用 frame.width > 500 区分。
+    static func findVisibleMainWindow() -> NSWindow? {
+        NSApp.windows.first { window in
+            let className = String(describing: type(of: window))
+            if className.contains("MenuExtra") || className.contains("_NSMenuExtra") {
+                return false
+            }
+            guard window.contentView != nil,
+                  window.canBecomeKey,
+                  !window.isMiniaturized,
+                  window.isVisible else {
+                return false
+            }
+            return window.frame.width > 500
+        }
     }
 
     @objc private func openBatterySettingsFromMenu(_ sender: Any?) {
@@ -359,6 +420,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         sampler.stop()
         syncEngine.stop()
+        // stop 触发的最后一次 async 落盘必须赶在进程结束前完成：
+        // 串行队列排空后再放行终止，防止退出丢 usage-state/journal 尾行
+        DataStore.shared.flushNow()
         if let o = observer {
             NotificationCenter.default.removeObserver(o)
         }
@@ -600,15 +664,22 @@ private struct SidebarBatteryStatus: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
         }
+        // VoiceOver：合并为单一元素，读出电量与状态文本，进度条不再碎片化朗读
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("当前电量"))
+        .accessibilityValue(Text("\(Int(sampler.currentLevel))%，\(sampler.currentIsCharging ? "正在充电" : sidebarPowerText)"))
     }
 
     /// 离电时系统负载与电池放出功率等价（估算）；接电无遥测时负载不可用，
-    /// 显示电池功率并如实标注，不冒充系统总功耗。
+    /// 显示电池功率并如实标注；两者都不可读时明确说明，不冒充 0W。
     private var sidebarPowerText: String {
         if sampler.currentPowerAvailable {
             return String(format: "系统负载 %.1f W", sampler.currentWattage)
         }
-        return String(format: "电池功率 %.1f W", sampler.currentBatteryPower)
+        if sampler.currentBatteryPowerAvailable {
+            return String(format: "电池功率 %.1f W", sampler.currentBatteryPower)
+        }
+        return "功率不可读"
     }
 
     private var sidebarStatusColor: Color {
@@ -621,21 +692,29 @@ private struct SidebarBatteryStatus: View {
 /// 状态栏弹窗
 struct PopoverMenuBarView: View {
     let sampler: PowerSampler
+    var requestOpenMainWindow: (() -> Void)?
 
     var body: some View {
-        PopoverView(sampler: sampler)
+        PopoverView(sampler: sampler, requestOpenMainWindow: requestOpenMainWindow)
             .frame(width: 340)
     }
 }
 
-/// 右键菜单「打开主窗口」的中继：主窗口归 WindowGroup 管理，
-/// openWindow 环境只在视图内可用，通过通知把请求转进来
+/// 主窗口的 openWindow 中继：
+/// - onAppear 把场景级 openWindow action 注册给 AppDelegate —— 主窗口关闭后
+///   本视图随之销毁，但 action 由 WindowGroup 场景（常驻 App 生命周期）提供，
+///   AppDelegate 据此可随时重建窗口，右键菜单「打开主窗口」不再随窗口销毁失效；
+/// - 通知监听保留为最后兜底（AppDelegate 未捕获 action 的启动窗口期）。
 private struct OpenWindowRelay: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
+            .onAppear {
+                (NSApp.delegate as? AppDelegate)?
+                    .registerOpenMainWindowAction { openWindow(id: "main") }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .init("OpenMainWindowRequested"))) { _ in
                 openWindow(id: "main")
             }

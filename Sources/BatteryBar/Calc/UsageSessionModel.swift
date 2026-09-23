@@ -20,11 +20,15 @@ final class UsageSessionModel {
         let relMin: Double
         let level: Double
         let time: Date
+        /// 与上一点之间超过缺口阈值（合盖睡眠等）：渲染时断开连线，
+        /// 与功耗曲线「缺口绝不跨接」同一口径
+        let breakBefore: Bool
 
-        init(relMin: Double, level: Double, time: Date) {
+        init(relMin: Double, level: Double, time: Date, breakBefore: Bool = false) {
             self.relMin = relMin
             self.level = level
             self.time = time
+            self.breakBefore = breakBefore
         }
     }
 
@@ -119,8 +123,14 @@ final class UsageSessionModel {
             return
         }
         let filtered = Self.changedLevelPoints(sessionSnaps)
+        let breaks = Self.gapBreakIDs(in: sessionSnaps)
         points = Self.downsample(filtered).map { snap in
-            Point(relMin: snap.timestamp.timeIntervalSince(start) / 60, level: snap.level, time: snap.timestamp)
+            Point(
+                relMin: snap.timestamp.timeIntervalSince(start) / 60,
+                level: snap.level,
+                time: snap.timestamp,
+                breakBefore: breaks.contains(snap.id)
+            )
         }
         summary = Self.makeSummary(sessionSnaps: sessionSnaps, start: start, charging: plugged)
     }
@@ -146,8 +156,14 @@ final class UsageSessionModel {
             return
         }
         let filtered = Self.changedLevelPoints(sessionSnaps)
+        let breaks = Self.gapBreakIDs(in: sessionSnaps)
         points = Self.downsample(filtered).map { snap in
-            Point(relMin: snap.timestamp.timeIntervalSince(first.timestamp) / 60, level: snap.level, time: snap.timestamp)
+            Point(
+                relMin: snap.timestamp.timeIntervalSince(first.timestamp) / 60,
+                level: snap.level,
+                time: snap.timestamp,
+                breakBefore: breaks.contains(snap.id)
+            )
         }
         summary = Self.makeSummary(sessionSnaps: sessionSnaps, start: first.timestamp, charging: true)
     }
@@ -191,6 +207,21 @@ final class UsageSessionModel {
         return filtered
     }
 
+    /// 相邻快照间隔超过 90 秒视为真实缺口（合盖睡眠等），该点标记断线。
+    /// 基于原始序列计算——抽稀/去重点后步长变大，直接判间隔会把正常
+    /// 抽稀误标成缺口。
+    static func gapBreakIDs(in snaps: [BatterySnapshot], gap: TimeInterval = 90) -> Set<UUID> {
+        var ids: Set<UUID> = []
+        var previous: Date?
+        for snap in snaps {
+            if let prev = previous, snap.timestamp.timeIntervalSince(prev) > gap {
+                ids.insert(snap.id)
+            }
+            previous = snap.timestamp
+        }
+        return ids
+    }
+
     /// 曲线点数上限：超出时按均匀步长抽稀并保留末点
     static func downsample(_ snaps: [BatterySnapshot]) -> [BatterySnapshot] {
         guard snaps.count > maxPoints else { return snaps }
@@ -209,6 +240,8 @@ final class UsageSessionModel {
 
     /// 时段摘要。平均电池功率：充电时段只取 isCharging 的样本（优化充电暂停的
     /// ≈0W 不稀释"平均功率"）；离电时段取 >0 的放出功率。
+    /// 口径（与 CycleTracker 一致）：哨兵 0 = 功率不可读（快照 batteryPower
+    /// 兼容字段无 available 位），剔除；>0 的真实读数照常平均。
     static func makeSummary(sessionSnaps: [BatterySnapshot], start: Date, charging: Bool) -> Summary {
         guard let first = sessionSnaps.first, let last = sessionSnaps.last else { return Summary() }
         let delta = charging ? last.level - first.level : first.level - last.level

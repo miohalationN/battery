@@ -139,8 +139,9 @@ struct PowerTab: View {
             ))
             previousTime = time
         }
-        // 与旧瞬时曲线相同的 marks 预算上限（240 点），防止长范围图表退化
-        return points.count > 240 ? Array(points.suffix(240)) : points
+        // 超出预算时等距抽稀全范围（保首末点、缺口标志传播），与同卡统计
+        // 数字覆盖同一时间窗——只截末端会让 24h 统计与 ≈4h 曲线无法对账。
+        return ChartDownsampler.downsampleTrendPoints(points, maxPoints: 240)
     }
 
     /// 聚合可用时的范围统计：平均 = Σ能量 ÷ Σ有效时长；峰值 = max(systemPowerPeak)
@@ -229,9 +230,18 @@ struct PowerTab: View {
             }
 
             HStack(spacing: BBDesign.itemSpacing) {
-                StatTile(icon: "chart.bar.fill", tint: .bbBlue, value: String(format: "%.1f", rangeStats.average), unit: "W", label: "平均负载")
-                StatTile(icon: "arrow.up.circle.fill", tint: .red, value: String(format: "%.1f", rangeStats.peak), unit: "W", label: "峰值")
-                StatTile(icon: "bolt.slash.fill", tint: .bbMint, value: String(format: "%.2f", rangeEnergyWh), unit: "Wh", label: "能耗")
+                // 诚实口径：范围内没有任何覆盖达标的样本时显示「—」，
+                // 不得把归零统计冒充 0.0W 真实读数
+                StatTile(icon: "chart.bar.fill", tint: .bbBlue,
+                         value: hasRangeStats ? String(format: "%.1f", rangeStats.average) : "—",
+                         unit: "W", label: "平均负载")
+                // 峰值是普通统计量：红色在 macOS 语义为错误/危险，改用品牌琥珀色
+                StatTile(icon: "arrow.up.circle.fill", tint: .bbAmber,
+                         value: hasRangeStats ? String(format: "%.1f", rangeStats.peak) : "—",
+                         unit: "W", label: "峰值")
+                StatTile(icon: "bolt.slash.fill", tint: .bbMint,
+                         value: rangeOverallCoverage > 0 ? String(format: "%.2f", rangeEnergyWh) : "—",
+                         unit: "Wh", label: "能耗")
             }
 
             HStack(spacing: 13) {
@@ -346,7 +356,7 @@ private struct PowerLoadHero: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     Text(sourceText)
-                        .font(.system(size: 8.5, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(sourceTint)
                         .padding(.horizontal, 5).padding(.vertical, 2)
                         .background(sourceTint.opacity(0.1), in: Capsule())
@@ -384,8 +394,15 @@ private struct PowerLoadHero: View {
     }
 
     private var batteryLine: String {
+        // 不可读时如实标注：启动初值 0.0W 不得冒充「电池放出 0.0W」
+        guard sampler.currentBatteryPowerAvailable else { return "电池功率 不可读" }
         let direction = sampler.currentIsCharging ? "充入" : "放出"
         return String(format: "电池%@ %.1f W", direction, sampler.currentBatteryPower)
+    }
+
+    /// 范围内是否存在覆盖达标样本（无 → 统计 tile 显示「—」而非归零值）
+    private var hasRangeStats: Bool {
+        rangeStats.sampleCount > 0
     }
 }
 
@@ -512,7 +529,7 @@ private struct PowerDiagnosticsSection: View {
                 VStack(spacing: 8) {
                     diagRow("电池电压", sampler.currentVoltage > 0 ? String(format: "%.0f mV", sampler.currentVoltage) : "—")
                     diagRow("瞬时电流", sampler.currentAmperage != 0 ? String(format: "%.0f mA", sampler.currentAmperage) : "—")
-                    diagRow("电池温度", sampler.currentTemperature > 0.5 ? String(format: "%.1f °C", sampler.currentTemperature) : "—")
+                    diagRow("电池温度", sampler.currentTemperature > 0.5 ? String(format: "%.1f°C", sampler.currentTemperature) : "—")
                     diagRow("适配器输入功率", adapterInputText)
                     diagRow("适配器额定功率", adapterWattsText)
                     diagRow("充电协议", sampler.currentInfo?.adapterProtocol ?? "—")
@@ -550,7 +567,7 @@ private struct PowerDiagnosticsSection: View {
 
     private var temperatureQualityValue: String {
         guard sampler.temperatureMetric.availability == .available, let v = sampler.temperatureMetric.value else { return "—" }
-        return String(format: "%.1f °C", v)
+        return String(format: "%.1f°C", v)
     }
 
     private func qualityRow(_ label: String, metric: TelemetrySample<Double>, valueText: String) -> some View {
@@ -570,7 +587,7 @@ private struct PowerDiagnosticsSection: View {
                 }
                 Spacer()
                 Text(qualityTimingText(metric))
-                    .font(.system(size: 8.5, design: .rounded).monospacedDigit())
+                    .font(.system(size: 10, design: .rounded).monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
         }
@@ -578,7 +595,7 @@ private struct PowerDiagnosticsSection: View {
 
     private func qualityTag(_ text: String, tint: Color) -> some View {
         Text(text)
-            .font(.system(size: 8.5, weight: .semibold))
+            .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(tint)
             .padding(.horizontal, 5).padding(.vertical, 1.5)
             .background(tint.opacity(0.1), in: Capsule())

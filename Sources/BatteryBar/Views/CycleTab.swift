@@ -248,7 +248,8 @@ struct CycleTab: View {
                 Text(cycle.startDate, format: .dateTime.month().day().hour().minute())
                     .font(.system(size: 11, design: .rounded).monospacedDigit())
                 HStack(spacing: 6) {
-                    Text(String(format: "放电 %.1f%%", cycle.totalEnergy))
+                    // 术语与全局统一：该时段电量净下降，不叫「放电」
+                    Text(String(format: "下降 %.1f%%", cycle.totalEnergy))
                     Text("·")
                     Text(String(format: "均 %.1fW", cycle.averageWattage))
                 }

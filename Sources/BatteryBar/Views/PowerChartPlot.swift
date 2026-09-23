@@ -1,31 +1,11 @@
 import SwiftUI
 import Charts
 
-/// 趋势图数据点：来自 v5 分钟聚合。
-/// `breakBefore` 标记与上一点之间存在缺口（分钟缺失或覆盖率未达标），
-/// 渲染时在此断开连线，绝不跨缺口插值。
-struct TrendPoint: Equatable {
-    let time: Date
-    let value: Double
-    /// tooltip 附加量（如该窗口的温度最大值）
-    let maximum: Double?
-    /// 该点所属窗口的覆盖率（tooltip 展示）
-    let coverage: Double?
-    let breakBefore: Bool
-
-    init(time: Date, value: Double, maximum: Double? = nil, coverage: Double? = nil, breakBefore: Bool = false) {
-        self.time = time
-        self.value = value
-        self.maximum = maximum
-        self.coverage = coverage
-        self.breakBefore = breakBefore
-    }
-}
-
 /// 历史趋势曲线与实时指标隔离。父页面刷新数字时，只要输入点不变，
 /// EquatableView 会跳过全部 Chart marks 的重新构造。
 /// 曲线口径：v5 分钟聚合的 systemPowerAverage / temperatureAverage；
 /// 覆盖率不足的分钟留缺口，不外推、不插值。
+/// TrendPoint 数据类型定义在 ChartDownsampler.swift（Calc 层，纯数据无视图依赖）。
 struct TrendChartPlot: View, @MainActor Equatable {
     let points: [TrendPoint]
     let timeRange: TimeRange
@@ -134,12 +114,12 @@ struct TrendChartPlot: View, @MainActor Equatable {
                 .font(.system(size: 9, design: .rounded).monospacedDigit())
                 .foregroundStyle(.tertiary)
             Text(isTemperature
-                 ? String(format: "%.1f °C", point.value)
+                 ? String(format: "%.1f°C", point.value)
                  : String(format: "%.1f%@", point.value, unit))
                 .font(.system(size: 11, weight: .bold, design: .rounded).monospacedDigit())
             if isTemperature, let maximum = point.maximum {
-                Text(String(format: "峰值 %.1f °C", maximum))
-                    .font(.system(size: 8.5, design: .rounded).monospacedDigit())
+                Text(String(format: "峰值 %.1f°C", maximum))
+                    .font(.system(size: 10, design: .rounded).monospacedDigit())
                     .foregroundStyle(.orange)
             }
             if let coverage = point.coverage {

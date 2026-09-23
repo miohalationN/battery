@@ -298,7 +298,7 @@ private struct LiveReadoutsRow: View {
                                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                         }
                         Text(loadSourceText)
-                            .font(.system(size: 8.5, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(sourceTint)
                             .padding(.horizontal, 5).padding(.vertical, 2)
                             .background(sourceTint.opacity(0.1), in: Capsule())
@@ -339,7 +339,7 @@ private struct HealthMetricsGrid: View {
                 StatTile(icon: "heart.fill", tint: .bbMint,
                          value: healthValue,
                          unit: healthValue == "—" ? "" : "%", label: "健康度")
-                StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: "\(sampler.currentInfo?.cycleCount ?? 0)", unit: "次", label: "循环次数")
+                StatTile(icon: "arrow.triangle.2.circlepath", tint: .bbBlue, value: cycleCountString, unit: cycleCountString == "—" ? "" : "次", label: "循环次数")
                 StatTile(icon: "thermometer", tint: .orange,
                          value: sampler.currentTemperature > 0.5 ? String(format: "%.1f", sampler.currentTemperature) : "—",
                          unit: sampler.currentTemperature > 0.5 ? "°C" : "", label: "温度")
@@ -347,7 +347,7 @@ private struct HealthMetricsGrid: View {
             }
             if let source = sampler.healthMetric.sourceLabel {
                 Text(healthSourceFootnote(source))
-                    .font(.system(size: 8.5))
+                    .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -355,6 +355,13 @@ private struct HealthMetricsGrid: View {
 
     private var healthValue: String {
         sampler.healthMetric.percent > 0 ? String(format: "%.0f", sampler.healthMetric.percent) : "—"
+    }
+
+    /// 循环次数：电池信息未取得显示「—」（与同卡片容量/温度口径一致）；
+    /// 真实 0 次循环的新电池如实显示 0
+    private var cycleCountString: String {
+        guard let info = sampler.currentInfo else { return "—" }
+        return "\(info.cycleCount)"
     }
 
     /// 明确标注健康口径：系统最大容量 vs 容量比估算（含读取时间）
@@ -388,7 +395,7 @@ private struct BatteryDetailSection: View {
                     infoTile("制造商", value: info?.manufacturer ?? "—", icon: "building.2")
                     infoTile("序列号", value: info?.serialNumber ?? "—", icon: "number")
                     infoTile("设计容量", value: designCapacityString, icon: "doc.text")
-                    infoTile("电压", value: sampler.currentVoltage > 0 ? String(format: "%.0f mV", sampler.currentVoltage) : "—", icon: "bolt")
+                    infoTile("电压", value: sampler.currentVoltage > 0 ? String(format: "%.2f V", sampler.currentVoltage / 1000) : "—", icon: "bolt")
                     infoTile("瞬时电流", value: sampler.currentAmperage != 0 ? String(format: "%.0f mA", sampler.currentAmperage) : "—", icon: "arrow.left.arrow.right")
                     infoTile("充电协议", value: info?.adapterProtocol ?? "—", icon: "powerplug")
                     infoTile("适配器额定", value: adapterWattsString, icon: "power")
@@ -544,21 +551,40 @@ private struct SessionChartPlot: View, @MainActor Equatable {
         lhs.isCharging == rhs.isCharging && lhs.points == rhs.points
     }
 
+    /// 按 breakBefore 切成连续段（与 TrendChartPlot 同模式）：
+    /// 时段中途合盖睡眠几小时的缺口不被直线插值
+    private var segments: [[UsageSessionModel.Point]] {
+        var result: [[UsageSessionModel.Point]] = []
+        var current: [UsageSessionModel.Point] = []
+        for point in points {
+            if point.breakBefore, !current.isEmpty {
+                result.append(current)
+                current = []
+            }
+            current.append(point)
+        }
+        if !current.isEmpty { result.append(current) }
+        return result
+    }
+
     var body: some View {
         let lineColor: Color = isCharging ? .bbMint : .bbBlue
         let windowMin = max(30, ceil((points.last?.relMin ?? 0) / 30) * 30)
         let startTime = points.first?.time ?? Date()
         return Chart {
-            ForEach(Array(points.enumerated()), id: \.offset) { _, p in
-                LineMark(x: .value("时长", p.relMin), y: .value("电量", p.level))
-                    .foregroundStyle(lineColor.gradient)
-                    .interpolationMethod(.monotone)
-                    .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
-                AreaMark(x: .value("时长", p.relMin), yStart: .value("底", 0), yEnd: .value("电量", p.level))
-                    .foregroundStyle(LinearGradient(
-                        colors: [lineColor.opacity(0.16), lineColor.opacity(0)],
-                        startPoint: .top, endPoint: .bottom))
-                    .interpolationMethod(.monotone)
+            // 每个连续段一个独立 ForEach：段间自然留缺口，绝不跨缺口插值
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                ForEach(Array(segment.enumerated()), id: \.offset) { _, p in
+                    LineMark(x: .value("时长", p.relMin), y: .value("电量", p.level))
+                        .foregroundStyle(lineColor.gradient)
+                        .interpolationMethod(.monotone)
+                        .lineStyle(StrokeStyle(lineWidth: 2.7, lineCap: .round, lineJoin: .round))
+                    AreaMark(x: .value("时长", p.relMin), yStart: .value("底", 0), yEnd: .value("电量", p.level))
+                        .foregroundStyle(LinearGradient(
+                            colors: [lineColor.opacity(0.16), lineColor.opacity(0)],
+                            startPoint: .top, endPoint: .bottom))
+                        .interpolationMethod(.monotone)
+                }
             }
             if let latest = points.last {
                 PointMark(x: .value("时长", latest.relMin), y: .value("电量", latest.level))

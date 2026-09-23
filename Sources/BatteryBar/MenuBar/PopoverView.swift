@@ -2,7 +2,10 @@ import SwiftUI
 
 struct PopoverView: View {
     let sampler: PowerSampler
-    @Environment(\.openWindow) private var openWindow
+    /// 打开主窗口的委托（由 AppDelegate 注入：收起弹窗 → 权威重开路径）。
+    /// Popover 挂在 detached NSHostingController 下、不在任何 SwiftUI 场景内，
+    /// @Environment(\.openWindow) 在此拿不到有效 action，必须经 AppDelegate。
+    var requestOpenMainWindow: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -45,7 +48,7 @@ struct PopoverView: View {
                 Text(AppBrand.displayName)
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                 Text(AppBrand.tagline)
-                    .font(.system(size: 8))
+                    .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
             Spacer()
@@ -86,7 +89,7 @@ struct PopoverView: View {
             if sampler.powerSourceState == .onBattery {
                 HStack(spacing: 0) {
                     durationItem("亮屏", minutes: sampler.screenOnTime, icon: "sun.max.fill", color: .bbAmber)
-                    durationItem("休眠", minutes: sampler.sleepTime, icon: "moon.fill", color: .indigo)
+                    durationItem("屏幕关闭/休眠", minutes: sampler.sleepTime, icon: "moon.fill", color: .indigo)
                     powerItem
                 }
             }
@@ -134,7 +137,9 @@ struct PopoverView: View {
         }
     }
 
-    /// 电量进度条：所有状态统一显示
+    /// 电量进度条：所有状态统一显示。
+    /// 对 VoiceOver 合并为单一元素并输出百分比——纯装饰性的 Capsule 不再
+    /// 产生碎片化朗读。
     private var batteryBar: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
@@ -145,6 +150,9 @@ struct PopoverView: View {
             }
         }
         .frame(height: 6)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("当前电量"))
+        .accessibilityValue(Text("\(Int(sampler.currentLevel.rounded()))%"))
     }
 
     private var powerItem: some View {
@@ -174,14 +182,14 @@ struct PopoverView: View {
                 sectionTitle("实时功耗")
                 Spacer()
                 Text(loadSourceText)
-                    .font(.system(size: 8.5, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(loadSourceTint)
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background(loadSourceTint.opacity(0.1), in: Capsule())
             }
             powerRow("系统负载", value: loadValueText, icon: "cpu.fill", color: .bbAmber)
             powerRow(sampler.currentIsCharging ? "电池充入" : "电池放出",
-                     value: String(format: "%.1f W", sampler.currentBatteryPower),
+                     value: batteryPowerText,
                      icon: "bolt.fill", color: .bbBlue)
             if sampler.helperEnabled {
                 powerRow("CPU", value: String(format: "%.1f W", sampler.cpuPower), icon: "cpu", color: .bbBlue)
@@ -213,6 +221,12 @@ struct PopoverView: View {
     /// 系统负载标注数据来源；接电无遥测时明确不可用，不用充电功率冒充
     private var loadValueText: String {
         sampler.currentPowerAvailable ? String(format: "%.1f W", sampler.currentWattage) : "—"
+    }
+
+    /// 电池功率行与上方负载行同口径：不可读显示「—」，可信 0W 如实显示
+    /// 0.0W，启动初值不冒充读数
+    private var batteryPowerText: String {
+        sampler.currentBatteryPowerAvailable ? String(format: "%.1f W", sampler.currentBatteryPower) : "—"
     }
 
     private var brightnessText: String {
@@ -258,10 +272,12 @@ struct PopoverView: View {
             // 与主窗口同一健康模型：来源口径永不漂移
             if let source = sampler.healthMetric.sourceLabel {
                 Text(healthSourceFootnote(source))
-                    .font(.system(size: 8.5))
+                    .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
-            healthRow("循环次数", value: "\(sampler.currentInfo?.cycleCount ?? 0) 次", icon: "arrow.triangle.2.circlepath")
+            // 电池信息未取得（启动初期/读取失败）时显示「—」，不冒充「0 次」；
+            // 真实 0 次循环的新电池如实显示
+            healthRow("循环次数", value: cycleCountText, icon: "arrow.triangle.2.circlepath")
             healthRow("满充容量", value: capacityText, icon: "battery.100")
             healthRow("温度", value: temperatureText, icon: "thermometer")
         }
@@ -271,6 +287,13 @@ struct PopoverView: View {
     /// 健康度首选系统报告值；回退时明确标注「容量比估算」，不可用显示 —
     private var healthValue: String {
         sampler.healthMetric.percent > 0 ? String(format: "%.0f", sampler.healthMetric.percent) : "—"
+    }
+
+    /// 循环次数：currentInfo 未取得显示「—」（与同卡片容量/温度口径一致）；
+    /// 真实 0 次显示「0 次」
+    private var cycleCountText: String {
+        guard let info = sampler.currentInfo else { return "—" }
+        return "\(info.cycleCount) 次"
     }
 
     private func healthSourceFootnote(_ source: String) -> String {
@@ -446,45 +469,9 @@ struct PopoverView: View {
     // MARK: - 主窗口控制
 
     private func openMainWindow() {
-        // 单例窗口控制：若已有主窗口则激活它，否则新建
-        if let existing = findExistingMainWindow() {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            if existing.isMiniaturized { existing.deminiaturize(nil) }
-        } else {
-            openWindow(id: "main")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                NSApp.activate(ignoringOtherApps: true)
-                if let window = findExistingMainWindow() {
-                    window.makeKeyAndOrderFront(nil)
-                }
-            }
-        }
-    }
-
-    /// 查找已存在的主窗口（SwiftUI WindowGroup 创建的 ContentView 所在窗口）。
-    /// 判断依据：
-    ///   1. 排除 MenuBarExtra 的 popover（className 含 "MenuExtra" 或 "_NSMenuExtra"）
-    ///   2. 排除已最小化或不可见的窗口
-    ///   3. 主窗口默认 760x580，popover 宽度只有 340，用 frame.width > 500 区分
-    ///   4. contentView 不为 nil 且能成为 key window
-    private func findExistingMainWindow() -> NSWindow? {
-        return NSApp.windows.first { window in
-            // 排除 MenuBarExtra popover（私有类名特征）
-            let className = String(describing: type(of: window))
-            if className.contains("MenuExtra") || className.contains("_NSMenuExtra") {
-                return false
-            }
-            // 必须可见、有 contentView、能成为 key
-            guard window.contentView != nil,
-                  window.canBecomeKey,
-                  !window.isMiniaturized,
-                  window.isVisible else {
-                return false
-            }
-            // 主窗口默认 760 宽，popover 340 宽，用 500 作为分界
-            return window.frame.width > 500
-        }
+        // 统一走 AppDelegate 的权威路径：detached popover 内的 openWindow
+        // 环境为空 action，自行新建在主窗口关闭后会静默失效。
+        requestOpenMainWindow?()
     }
 }
 
@@ -492,12 +479,14 @@ struct PopoverView: View {
 
 private extension View {
     /// Popover 专用紧凑卡片：用淡彩边缘区分信息类型，不增加厚重阴影。
+    /// 圆角与主窗口 BBDesign.cornerRadiusSmall 统一；padding 保持 12 的
+    /// 紧凑密度（弹窗空间有限，不照搬主窗 18）。
     func cardStyle(accent: Color = .clear) -> some View {
         self
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous)
                     .fill(Color.primary.opacity(0.038))
                     .overlay {
                         LinearGradient(
@@ -505,11 +494,11 @@ private extension View {
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous))
                     }
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.065), lineWidth: 1)
             }
     }

@@ -386,7 +386,7 @@ struct SyncTab: View {
                 }
                 .disabled(testing || config.serverURL.isEmpty).buttonStyle(.bordered)
                 if let r = testResult {
-                    Text(r).font(.system(size: 10)).foregroundStyle(r.contains("✅") ? .green : .red)
+                    Text(r).font(.system(size: 10)).foregroundStyle(r.hasPrefix("✅") ? .green : .red)
                 }
             }
         }
@@ -395,16 +395,21 @@ struct SyncTab: View {
 
     /// 密码防抖：停止输入 0.6s 后才写入 Keychain。
     /// 避免每次按键都触发 SecItem 操作（涉及 Keychain daemon IPC，开销大）。
+    /// 清空输入 = 删除该身份的凭据（含 legacy 旧项）：旧密码不得在 Keychain
+    /// 残留，否则改回旧源站时会被自动回填「复活」。
     private func schedulePasswordSave() {
         passwordDebounceTask?.cancel()
         let pw = password
         let serverURL = config.serverURL
         let user = config.username
-        guard !pw.isEmpty else { return }
         passwordDebounceTask = Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
             if Task.isCancelled { return }
-            try? KeychainHelper.setPassword(pw, serverURL: serverURL, username: user)
+            if pw.isEmpty {
+                KeychainHelper.deletePassword(serverURL: serverURL, username: user)
+            } else {
+                try? KeychainHelper.setPassword(pw, serverURL: serverURL, username: user)
+            }
         }
     }
 

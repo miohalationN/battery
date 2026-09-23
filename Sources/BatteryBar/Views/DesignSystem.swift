@@ -15,11 +15,25 @@ enum BBDesign {
 }
 
 extension Color {
-    static let bbMint = Color(red: 0.20, green: 0.80, blue: 0.58)
-    static let bbTeal = Color(red: 0.13, green: 0.68, blue: 0.72)
-    static let bbBlue = Color(red: 0.25, green: 0.55, blue: 0.96)
-    static let bbAmber = Color(red: 0.98, green: 0.66, blue: 0.18)
-    static let bbPurple = Color(red: 0.61, green: 0.45, blue: 0.94)
+    /// 品牌色统一走深浅双变体：浅色模式用加深色（12pt 以下小字前景对
+    /// controlBackground 的对比度从 ≈1.8:1 提到 ≥4.5:1，达到 WCAG AA），
+    /// 深色模式保持亮色。原先的固定 RGB 在浅色下不可读。
+    private static func dynamicBrandColor(
+        light: (Double, Double, Double), dark: (Double, Double, Double)
+    ) -> Color {
+        let nsColor = NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let c = isDark ? dark : light
+            return NSColor(red: c.0, green: c.1, blue: c.2, alpha: 1)
+        }
+        return Color(nsColor: nsColor)
+    }
+
+    static let bbMint = dynamicBrandColor(light: (0.05, 0.52, 0.40), dark: (0.24, 0.78, 0.60))
+    static let bbTeal = dynamicBrandColor(light: (0.04, 0.48, 0.54), dark: (0.15, 0.66, 0.70))
+    static let bbBlue = dynamicBrandColor(light: (0.11, 0.40, 0.84), dark: (0.30, 0.60, 0.98))
+    static let bbAmber = dynamicBrandColor(light: (0.70, 0.45, 0.04), dark: (0.98, 0.70, 0.25))
+    static let bbPurple = dynamicBrandColor(light: (0.44, 0.30, 0.78), dark: (0.66, 0.52, 0.96))
 }
 
 /// 整个主窗口的环境底色。彩色光晕非常克制，避免浅色模式下变成一整片灰。
@@ -238,6 +252,8 @@ struct StatTile: View {
             RoundedRectangle(cornerRadius: BBDesign.cornerRadiusSmall, style: .continuous)
                 .strokeBorder(tint.opacity(0.13), lineWidth: 1)
         }
+        // VoiceOver：一个瓦片 = 一个数值（label + value 合并朗读）
+        .accessibilityElement(children: .combine)
     }
 }
 
